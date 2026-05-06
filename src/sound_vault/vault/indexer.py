@@ -14,6 +14,7 @@ class SoundRecord:
     tags: tuple[str, ...]
     status: str
     raw: dict[str, Any]
+    associated_video_count: int = 0
 
     @property
     def search_text(self) -> str:
@@ -41,6 +42,7 @@ def build_index(vault_root: Path) -> list[SoundRecord]:
                     tags=tuple(data.get("tags") or []),
                     status=str(data.get("status") or "unreviewed"),
                     raw=data,
+                    associated_video_count=int(data.get("associated_video_count") or 0),
                 )
             )
     return records
