@@ -53,6 +53,10 @@ def poll(pair_code: str, x_device_id: str = Header(default=""), x_device_secret:
 
 
 def main() -> None:
+    import os
+
     import uvicorn
 
-    uvicorn.run("sound_vault.relay.server:app", host="127.0.0.1", port=43117, reload=False)
+    host = os.getenv("SOUND_VAULT_RELAY_HOST", "127.0.0.1")
+    port = int(os.getenv("SOUND_VAULT_RELAY_PORT", "43117"))
+    uvicorn.run("sound_vault.relay.server:app", host=host, port=port, reload=False)
