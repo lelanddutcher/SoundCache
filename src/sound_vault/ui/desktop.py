@@ -38,6 +38,7 @@ class SoundVaultWindow(QMainWindow):
             index_path=Path.home() / ".sound-vault" / "index.sqlite3",
         )
         self.current_rows = []
+        self.current_inbox_rows = []
         self._build_ui()
         self.rebuild_index()
 
@@ -116,7 +117,26 @@ class SoundVaultWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.itemSelectionChanged.connect(self.update_preview_from_selection)
-        main_layout.addWidget(self.table, 1)
+        main_layout.addWidget(self.table, 2)
+
+        inbox_header = QHBoxLayout()
+        inbox_title = QLabel("Shortcut inbox")
+        inbox_title.setObjectName("sectionTitle")
+        refresh_inbox = QPushButton("Refresh inbox")
+        refresh_inbox.clicked.connect(self.refresh_inbox)
+        mark_imported = QPushButton("Mark selected imported")
+        mark_imported.clicked.connect(self.mark_selected_inbox_imported)
+        inbox_header.addWidget(inbox_title)
+        inbox_header.addStretch(1)
+        inbox_header.addWidget(refresh_inbox)
+        inbox_header.addWidget(mark_imported)
+        main_layout.addLayout(inbox_header)
+
+        self.inbox_table = QTableWidget(0, 3)
+        self.inbox_table.setHorizontalHeaderLabels(["source", "url", "status"])
+        self.inbox_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.inbox_table.verticalHeader().setVisible(False)
+        main_layout.addWidget(self.inbox_table, 1)
         shell.addWidget(main, 1)
 
         preview = QFrame()
@@ -159,6 +179,7 @@ class SoundVaultWindow(QMainWindow):
         self.vm.rebuild_index()
         self.stats_label.setText(self.vm.stats_text())
         self.refresh_table()
+        self.refresh_inbox()
 
     def refresh_table(self) -> None:
         self.current_rows = self.vm.search(self.search_box.text())
@@ -186,12 +207,31 @@ class SoundVaultWindow(QMainWindow):
         self.preview_tags.setText(" ".join(f"#{tag}" for tag in record.tags) or "no tags yet")
         self.preview_json.setPlainText(str(record.raw or {"music_id": record.music_id, "status": record.status}))
 
+    def refresh_inbox(self) -> None:
+        self.current_inbox_rows = self.vm.pending_inbox()
+        self.inbox_label.setText(self.vm.inbox_text())
+        self.inbox_table.setRowCount(len(self.current_inbox_rows))
+        for row_idx, item in enumerate(self.current_inbox_rows):
+            for col_idx, value in enumerate([item.source, item.url, item.status]):
+                self.inbox_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+
+    def mark_selected_inbox_imported(self) -> None:
+        selected = self.inbox_table.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        if row >= len(self.current_inbox_rows):
+            return
+        self.vm.mark_inbox_imported(self.current_inbox_rows[row].id)
+        self.refresh_inbox()
+
 
 STYLESHEET = """
 QMainWindow, QWidget { background: #0e1117; color: #eef2f6; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI"; font-size: 14px; }
 #sidebar { background: #111722; border-right: 1px solid #293241; }
 #brand { font-size: 22px; font-weight: 800; padding-bottom: 16px; }
 #title { font-size: 36px; font-weight: 800; }
+#sectionTitle { font-size: 17px; font-weight: 800; color: #eef2f6; }
 #previewTitle { font-size: 25px; font-weight: 800; }
 #muted { color: #8e9bad; }
 #preview { background: #111722; border-left: 1px solid #293241; }
