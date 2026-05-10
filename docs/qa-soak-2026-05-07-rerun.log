@@ -1,0 +1,133 @@
+soak qa rerun start 2026-05-07T03:08:41Z
+--- iteration 1 2026-05-07T03:08:41Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.47s
+Sound Vault loaded 1084 records from /nas/TikTok Sound Vault
+--- iteration 2 2026-05-07T03:13:42Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 1.10s
+Sound Vault loaded 1091 records from /nas/TikTok Sound Vault
+--- iteration 3 2026-05-07T03:18:45Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.74s
+Sound Vault loaded 1098 records from /nas/TikTok Sound Vault
+--- iteration 4 2026-05-07T03:23:46Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.69s
+Sound Vault loaded 1105 records from /nas/TikTok Sound Vault
+--- iteration 5 2026-05-07T03:28:47Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.60s
+Sound Vault loaded 1112 records from /nas/TikTok Sound Vault
+--- iteration 6 2026-05-07T03:33:49Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.79s
+Sound Vault loaded 1119 records from /nas/TikTok Sound Vault
+--- iteration 7 2026-05-07T03:38:50Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.50s
+Sound Vault loaded 1126 records from /nas/TikTok Sound Vault
+--- iteration 8 2026-05-07T03:43:51Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.48s
+Sound Vault loaded 1133 records from /nas/TikTok Sound Vault
+--- iteration 9 2026-05-07T03:48:52Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.60s
+Sound Vault loaded 1140 records from /nas/TikTok Sound Vault
+--- iteration 10 2026-05-07T03:53:54Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.50s
+Sound Vault loaded 1147 records from /nas/TikTok Sound Vault
+--- iteration 11 2026-05-07T03:58:55Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.49s
+Sound Vault loaded 1154 records from /nas/TikTok Sound Vault
+--- iteration 12 2026-05-07T04:03:56Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.52s
+Sound Vault loaded 1161 records from /nas/TikTok Sound Vault
+--- iteration 13 2026-05-07T04:08:57Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.51s
+Sound Vault loaded 1169 records from /nas/TikTok Sound Vault
+--- iteration 14 2026-05-07T04:13:58Z ---
+All checks passed!
+..................................                                       [100%]
+34 passed in 0.51s
+Sound Vault loaded 1176 records from /nas/TikTok Sound Vault
+--- iteration 15 2026-05-07T04:18:59Z ---
+F401 [*] `json` imported but unused
+ --> src/sound_vault/ui/desktop.py:4:8
+  |
+3 | from pathlib import Path
+4 | import json
+  |        ^^^^
+5 | import urllib.error
+6 | import urllib.request
+  |
+help: Remove unused import: `json`
+
+F401 [*] `urllib.request` imported but unused
+ --> src/sound_vault/ui/desktop.py:6:8
+  |
+4 | import json
+5 | import urllib.error
+6 | import urllib.request
+  |        ^^^^^^^^^^^^^^
+7 |
+8 | from PySide6.QtCore import Qt, QTimer, QUrl
+  |
+help: Remove unused import: `urllib.request`
+
+F401 [*] `PySide6.QtWidgets.QDialog` imported but unused
+  --> src/sound_vault/ui/desktop.py:13:5
+   |
+11 |     QApplication,
+12 |     QAbstractItemView,
+13 |     QDialog,
+   |     ^^^^^^^
+14 |     QFileDialog,
+15 |     QFormLayout,
+   |
+help: Remove unused import
+
+F401 [*] `PySide6.QtWidgets.QFormLayout` imported but unused
+  --> src/sound_vault/ui/desktop.py:15:5
+   |
+13 |     QDialog,
+14 |     QFileDialog,
+15 |     QFormLayout,
+   |     ^^^^^^^^^^^
+16 |     QFrame,
+17 |     QGridLayout,
+   |
+help: Remove unused import
+
+F401 [*] `PySide6.QtWidgets.QMessageBox` imported but unused
+  --> src/sound_vault/ui/desktop.py:23:5
+   |
+21 |     QLineEdit,
+22 |     QMainWindow,
+23 |     QMessageBox,
+   |     ^^^^^^^^^^^
+24 |     QPushButton,
+25 |     QTableWidget,
+   |
+help: Remove unused import
+
+Found 5 errors.
+[*] 5 fixable with the `--fix` option.

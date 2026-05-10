@@ -4,12 +4,21 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile.relay"
 
+[env]
+  SOUND_VAULT_RELAY_HOST = "0.0.0.0"
+  SOUND_VAULT_RELAY_PORT = "43117"
+  SOUND_VAULT_RELAY_STORAGE_PATH = "/data/relay.sqlite3"
+
 [http_service]
   internal_port = 43117
   force_https = true
   auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 0
+
+[[mounts]]
+  source = "relay_data"
+  destination = "/data"
 
 [[vm]]
   memory = "256mb"

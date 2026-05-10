@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Any, Callable
 import urllib.parse
 import urllib.request
+
+from sound_vault.ingest.shortcut_inbox import ShortcutInboxStore
 
 
 @dataclass(frozen=True)
@@ -45,14 +47,28 @@ class RelayClient:
             headers={"x-device-id": self.device_id, "x-device-secret": self.device_secret},
             timeout=20.0,
         )
-        return [RelayInboxItem(id=str(item["id"]), url=str(item["url"]), source=str(item.get("source", "unknown"))) for item in payload.get("items", [])]
+        items = []
+        for item in payload.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if not item_id or not url:
+                continue
+            items.append(
+                RelayInboxItem(
+                    id=item_id,
+                    url=url,
+                    source=str(item.get("source") or "unknown"),
+                )
+            )
+        return items
 
     def poll_to_inbox(self, inbox_path: Path) -> list[RelayInboxItem]:
         items = self.poll()
         if not items:
             return []
-        inbox_path.parent.mkdir(parents=True, exist_ok=True)
-        with inbox_path.open("a", encoding="utf-8") as handle:
-            for item in items:
-                handle.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
+        store = ShortcutInboxStore(inbox_path)
+        for item in items:
+            store.add_url(item.url, source=item.source, relay_id=item.id)
         return items

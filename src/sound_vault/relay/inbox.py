@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from pathlib import Path
 import secrets
+import sqlite3
 import time
+
+DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS = 24 * 60 * 60
 
 
 def _hash_pair_code(pair_code: str) -> str:
@@ -20,17 +24,69 @@ class InboxItem:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class RegisteredPairCode:
+    expires_at: float
+    device_id: str
+
+
 class InboxStore:
     """Tiny relay inbox. Stores links until a paired desktop pulls them once."""
 
-    def __init__(self, *, now=time.time, item_ttl_seconds: int = 7 * 24 * 60 * 60) -> None:
+    def __init__(
+        self,
+        *,
+        now=time.time,
+        item_ttl_seconds: int = 7 * 24 * 60 * 60,
+        pair_code_ttl_seconds: int = DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS,
+        db_path: Path | None = None,
+    ) -> None:
         self._now = now
         self._item_ttl_seconds = item_ttl_seconds
+        self._pair_code_ttl_seconds = pair_code_ttl_seconds
+        self._db_path = db_path
         self._devices: dict[str, str] = {}
+        self._pair_codes: dict[str, RegisteredPairCode] = {}
         self._items: list[InboxItem] = []
+        if self._db_path is not None:
+            self._ensure_schema()
+            self._load_from_db()
 
     def register_device(self, *, device_id: str, device_secret: str) -> None:
         self._devices[device_id] = device_secret
+        if self._db_path is not None:
+            with self._connect() as db:
+                db.execute(
+                    "INSERT OR REPLACE INTO devices (device_id, device_secret) VALUES (?, ?)",
+                    (device_id, device_secret),
+                )
+
+    def register_pair_code(self, pair_code: str, *, device_id: str) -> None:
+        code_hash = _hash_pair_code(pair_code)
+        expires_at = self._now() + self._pair_code_ttl_seconds
+        self._pair_codes[code_hash] = RegisteredPairCode(expires_at=expires_at, device_id=device_id)
+        if self._db_path is not None:
+            with self._connect() as db:
+                db.execute(
+                    """
+                    INSERT OR REPLACE INTO pair_codes (pair_code_hash, expires_at, device_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (code_hash, expires_at, device_id),
+                )
+
+    def can_accept_pair_code(self, pair_code: str) -> bool:
+        code_hash = _hash_pair_code(pair_code)
+        registered = self._pair_codes.get(code_hash)
+        if registered is None:
+            return False
+        if registered.expires_at < self._now():
+            self._pair_codes.pop(code_hash, None)
+            if self._db_path is not None:
+                with self._connect() as db:
+                    db.execute("DELETE FROM pair_codes WHERE pair_code_hash = ?", (code_hash,))
+            return False
+        return True
 
     def submit_link(self, *, pair_code: str, url: str, source: str) -> InboxItem:
         now = self._now()
@@ -43,6 +99,16 @@ class InboxStore:
             expires_at=now + self._item_ttl_seconds,
         )
         self._items.append(item)
+        if self._db_path is not None:
+            with self._connect() as db:
+                db.execute(
+                    """
+                    INSERT OR REPLACE INTO inbox_items
+                    (id, pair_code_hash, url, source, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (item.id, item.pair_code_hash, item.url, item.source, item.created_at, item.expires_at),
+                )
         return item
 
     def poll(self, *, device_id: str, device_secret: str, pair_code: str) -> list[InboxItem]:
@@ -50,14 +116,106 @@ class InboxStore:
             return []
         now = self._now()
         wanted = _hash_pair_code(pair_code)
+        registered = self._pair_codes.get(wanted)
+        if registered is None:
+            return []
+        if registered.expires_at < now:
+            self._pair_codes.pop(wanted, None)
+            if self._db_path is not None:
+                with self._connect() as db:
+                    db.execute("DELETE FROM pair_codes WHERE pair_code_hash = ?", (wanted,))
+            return []
+        if registered.device_id != device_id:
+            return []
         delivered: list[InboxItem] = []
         remaining: list[InboxItem] = []
+        expired_ids: list[str] = []
         for item in self._items:
             if item.expires_at < now:
+                expired_ids.append(item.id)
                 continue
             if item.pair_code_hash == wanted:
                 delivered.append(item)
             else:
                 remaining.append(item)
         self._items = remaining
+        if self._db_path is not None:
+            delivered_ids = [item.id for item in delivered]
+            delete_ids = delivered_ids + expired_ids
+            if delete_ids:
+                with self._connect() as db:
+                    db.executemany("DELETE FROM inbox_items WHERE id = ?", [(item_id,) for item_id in delete_ids])
         return delivered
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._db_path is None:
+            raise RuntimeError("persistent inbox db is not configured")
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(self._db_path, timeout=5.0)
+        db.execute("PRAGMA busy_timeout = 5000")
+        db.execute("PRAGMA journal_mode = WAL")
+        db.execute("PRAGMA synchronous = NORMAL")
+        return db
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS devices (
+                    device_id TEXT PRIMARY KEY,
+                    device_secret TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pair_codes (
+                    pair_code_hash TEXT PRIMARY KEY,
+                    expires_at REAL NOT NULL,
+                    device_id TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS inbox_items (
+                    id TEXT PRIMARY KEY,
+                    pair_code_hash TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+                """
+            )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(pair_codes)")}
+            if "device_id" not in columns:
+                db.execute("ALTER TABLE pair_codes ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
+
+    def _load_from_db(self) -> None:
+        now = self._now()
+        with self._connect() as db:
+            db.execute("DELETE FROM pair_codes WHERE expires_at < ?", (now,))
+            db.execute("DELETE FROM inbox_items WHERE expires_at < ?", (now,))
+            self._devices = {
+                device_id: device_secret
+                for device_id, device_secret in db.execute(
+                    "SELECT device_id, device_secret FROM devices"
+                )
+            }
+            self._pair_codes = {
+                code_hash: RegisteredPairCode(expires_at=expires_at, device_id=device_id)
+                for code_hash, expires_at, device_id in db.execute(
+                    """
+                    SELECT pair_code_hash, expires_at, device_id
+                    FROM pair_codes
+                    WHERE device_id != ''
+                    """
+                )
+            }
+            self._items = [
+                InboxItem(
+                    id=str(row[0]),
+                    pair_code_hash=str(row[1]),
+                    url=str(row[2]),
+                    source=str(row[3]),
+                    created_at=float(row[4]),
+                    expires_at=float(row[5]),
+                )
+                for row in db.execute(
+                    "SELECT id, pair_code_hash, url, source, created_at, expires_at FROM inbox_items ORDER BY created_at"
+                )
+            ]

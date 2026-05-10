@@ -1,14 +1,19 @@
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    SOUND_VAULT_RELAY_HOST=0.0.0.0 \
+    SOUND_VAULT_RELAY_PORT=43117
 
 WORKDIR /app
 COPY pyproject.toml README.md /app/
 COPY src /app/src
 
-RUN pip install --no-cache-dir fastapi uvicorn pydantic
+RUN useradd --create-home --shell /usr/sbin/nologin soundvault \
+    && pip install --no-cache-dir ".[relay]"
 
-ENV PYTHONPATH=/app/src
+USER soundvault
 EXPOSE 43117
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD python -c "import os, urllib.request; port=os.getenv('SOUND_VAULT_RELAY_PORT', '43117'); urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health', timeout=3).read()"
 CMD ["python", "-m", "sound_vault.relay.server"]

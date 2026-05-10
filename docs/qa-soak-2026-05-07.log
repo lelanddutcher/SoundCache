@@ -1,0 +1,61 @@
+soak qa start 2026-05-07T02:26:02Z
+--- iteration 1 2026-05-07T02:26:02Z ---
+All checks passed!
+..........................                                               [100%]
+26 passed in 0.45s
+Sound Vault loaded 1023 records from /nas/TikTok Sound Vault
+--- iteration 2 2026-05-07T02:31:03Z ---
+All checks passed!
+..........................                                               [100%]
+26 passed in 0.45s
+Sound Vault loaded 1031 records from /nas/TikTok Sound Vault
+--- iteration 3 2026-05-07T02:36:04Z ---
+All checks passed!
+..........................                                               [100%]
+26 passed in 0.44s
+Sound Vault loaded 1038 records from /nas/TikTok Sound Vault
+--- iteration 4 2026-05-07T02:41:05Z ---
+All checks passed!
+..........................                                               [100%]
+26 passed in 0.43s
+Sound Vault loaded 1045 records from /nas/TikTok Sound Vault
+--- iteration 5 2026-05-07T02:46:06Z ---
+All checks passed!
+..........................                                               [100%]
+26 passed in 0.68s
+Sound Vault loaded 1052 records from /nas/TikTok Sound Vault
+--- iteration 6 2026-05-07T02:51:08Z ---
+All checks passed!
+..........................                                               [100%]
+26 passed in 0.46s
+Sound Vault loaded 1059 records from /nas/TikTok Sound Vault
+--- iteration 7 2026-05-07T02:56:09Z ---
+All checks passed!
+.................FF.........                                             [100%]
+=================================== FAILURES ===================================
+_________ test_sqlite_inbox_store_survives_restart_for_submit_and_poll _________
+
+tmp_path = PosixPath('/tmp/pytest-of-hermes/pytest-30/test_sqlite_inbox_store_surviv0')
+
+    def test_sqlite_inbox_store_survives_restart_for_submit_and_poll(tmp_path):
+        db_path = tmp_path / "relay.sqlite3"
+>       first = InboxStore(db_path=db_path, now=lambda: 1000.0)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: InboxStore.__init__() got an unexpected keyword argument 'db_path'
+
+tests/test_relay_persistence.py:6: TypeError
+______________ test_sqlite_pair_code_acceptance_survives_restart _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-hermes/pytest-30/test_sqlite_pair_code_acceptan0')
+
+    def test_sqlite_pair_code_acceptance_survives_restart(tmp_path):
+        db_path = tmp_path / "relay.sqlite3"
+>       first = InboxStore(db_path=db_path, now=lambda: 1000.0, pair_code_ttl_seconds=30)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: InboxStore.__init__() got an unexpected keyword argument 'db_path'
+
+tests/test_relay_persistence.py:20: TypeError
+=========================== short test summary info ============================
+FAILED tests/test_relay_persistence.py::test_sqlite_inbox_store_survives_restart_for_submit_and_poll
+FAILED tests/test_relay_persistence.py::test_sqlite_pair_code_acceptance_survives_restart
+2 failed, 26 passed in 0.47s
