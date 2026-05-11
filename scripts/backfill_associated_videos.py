@@ -11,6 +11,13 @@ import time
 from typing import Any
 
 
+@dataclass(frozen=True)
+class CaptureResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -70,6 +77,33 @@ def update_metadata_from_manifest(folder: Path) -> None:
     metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def attempted_music_ids(log_path: Path) -> set[str]:
+    attempted: set[str] = set()
+    if not log_path.exists():
+        return attempted
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        music_id = str(row.get("music_id") or "").strip()
+        if music_id:
+            attempted.add(music_id)
+    return attempted
+
+
+def run_capture(cmd: list[str], *, cwd: Path, timeout: int) -> CaptureResult:
+    try:
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode(errors="replace")
+        stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode(errors="replace")
+        message = f"timed out after {timeout} seconds"
+        stderr = (stderr + "\n" + message).strip()
+        return CaptureResult(returncode=124, stdout=stdout, stderr=stderr)
+    return CaptureResult(result.returncode, result.stdout, result.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Retry associated-video backfill from disk audit, not checkpoint state.")
     parser.add_argument("--vault", type=Path, default=Path("/nas/TikTok Sound Vault"))
@@ -78,11 +112,17 @@ def main() -> int:
     parser.add_argument("--minimum-videos", type=int, default=3)
     parser.add_argument("--limit", type=int, default=0, help="0 means no limit")
     parser.add_argument("--delay", type=float, default=15.0)
+    parser.add_argument("--timeout", type=int, default=300, help="Per sound capture timeout in seconds")
+    parser.add_argument("--retry-attempted", action="store_true", help="Retry music IDs that already have rows in the log")
+    parser.add_argument("--fail-on-errors", action="store_true", help="Exit nonzero when any item remains below the requested video count")
     parser.add_argument("--log", type=Path, default=Path("/nas/TikTok Sound Vault/workers/associated-video-backfill.jsonl"))
     args = parser.parse_args()
 
     args.log.parent.mkdir(parents=True, exist_ok=True)
     queue = audit_queue(args.vault, minimum_videos=args.minimum_videos)
+    if not args.retry_attempted:
+        attempted = attempted_music_ids(args.log)
+        queue = [item for item in queue if item.music_id not in attempted]
     if args.limit > 0:
         queue = queue[: args.limit]
     ok = 0
@@ -90,10 +130,10 @@ def main() -> int:
     with args.log.open("a", encoding="utf-8") as log:
         for index, item in enumerate(queue, start=1):
             cmd = ["node", str(args.capture_script), item.source_music_url, str(item.folder), item.music_id, str(args.minimum_videos)]
-            result = subprocess.run(cmd, cwd=args.project, capture_output=True, text=True, timeout=300, check=False)
+            result = run_capture(cmd, cwd=args.project, timeout=args.timeout)
             update_metadata_from_manifest(item.folder)
-            after = audit_queue(args.vault, minimum_videos=args.minimum_videos)
-            still_missing = {row.music_id for row in after}
+            refreshed = audit_queue(args.vault, minimum_videos=args.minimum_videos)
+            still_missing = {row.music_id for row in refreshed}
             passed = result.returncode == 0 and item.music_id not in still_missing
             ok += int(passed)
             errors += int(not passed)
@@ -104,7 +144,7 @@ def main() -> int:
             if index < len(queue) and args.delay > 0:
                 time.sleep(args.delay)
     print(json.dumps({"queued": len(queue), "ok": ok, "errors": errors, "log": str(args.log)}, indent=2))
-    return 0 if errors == 0 else 1
+    return 1 if args.fail_on_errors and errors else 0
 
 
 if __name__ == "__main__":
