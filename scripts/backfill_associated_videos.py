@@ -36,6 +36,45 @@ class QueueItem:
     status: str
 
 
+def valid_video_records(folder: Path) -> list[dict[str, Any]]:
+    manifest = read_json(folder / "associated_videos_manifest.json")
+    manifest_records = manifest.get("records") if isinstance(manifest.get("records"), list) else []
+    sidecar_records = []
+    for sidecar_path in sorted((folder / "videos").glob("*.json")):
+        record = read_json(sidecar_path)
+        if record:
+            sidecar_records.append(record)
+
+    records_by_video_id: dict[str, dict[str, Any]] = {}
+    for record in [*manifest_records, *sidecar_records]:
+        if not isinstance(record, dict):
+            continue
+        video_path = Path(str(record.get("downloaded_video_path") or ""))
+        if not video_path.exists():
+            continue
+        video_id = str(record.get("video_id") or video_path.stem).strip()
+        records_by_video_id[video_id] = record
+    return sorted(records_by_video_id.values(), key=lambda record: int(record.get("rank") or 9999))
+
+
+def repair_manifest_from_video_sidecars(folder: Path) -> None:
+    manifest_path = folder / "associated_videos_manifest.json"
+    manifest = read_json(manifest_path)
+    valid_records = valid_video_records(folder)
+    if not valid_records:
+        return
+    existing_records = manifest.get("records") if isinstance(manifest.get("records"), list) else []
+    existing_valid_count = sum(
+        1 for record in existing_records if isinstance(record, dict) and Path(str(record.get("downloaded_video_path") or "")).exists()
+    )
+    if existing_valid_count >= len(valid_records):
+        return
+    manifest["records"] = valid_records
+    manifest["captured_count"] = len(valid_records)
+    manifest.setdefault("source_music_id", folder.name.split(" -", 1)[0])
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def audit_queue(vault: Path, *, minimum_videos: int) -> list[QueueItem]:
     queue: list[QueueItem] = []
     for metadata_path in sorted((vault / "sounds").glob("*/metadata.json")):
@@ -43,9 +82,9 @@ def audit_queue(vault: Path, *, minimum_videos: int) -> list[QueueItem]:
         metadata = read_json(metadata_path)
         music_id = str(metadata.get("tiktok_music_id") or folder.name.split(" -", 1)[0]).strip()
         manifest = read_json(folder / "associated_videos_manifest.json")
-        records = manifest.get("records") if isinstance(manifest.get("records"), list) else []
-        captured_count = int(manifest.get("captured_count") or len(records) or 0)
-        mp4_count = sum(1 for path in records if isinstance(path, dict) and Path(str(path.get("downloaded_video_path") or "")).exists())
+        valid_records = valid_video_records(folder)
+        captured_count = int(manifest.get("captured_count") or len(valid_records) or 0)
+        mp4_count = len(valid_records)
         if mp4_count < minimum_videos:
             source_url = str(manifest.get("source_music_url") or metadata.get("canonical_url") or metadata.get("mobile_music_url") or f"https://www.tiktok.com/music/-{music_id}")
             status = "missing_all_associated_videos" if mp4_count == 0 else "partial_associated_videos"
@@ -54,11 +93,10 @@ def audit_queue(vault: Path, *, minimum_videos: int) -> list[QueueItem]:
 
 
 def update_metadata_from_manifest(folder: Path) -> None:
+    repair_manifest_from_video_sidecars(folder)
     metadata_path = folder / "metadata.json"
     metadata = read_json(metadata_path)
-    manifest = read_json(folder / "associated_videos_manifest.json")
-    records = manifest.get("records") if isinstance(manifest.get("records"), list) else []
-    valid_records = [record for record in records if isinstance(record, dict) and Path(str(record.get("downloaded_video_path") or "")).exists()]
+    valid_records = valid_video_records(folder)
     metadata["associated_video_count"] = len(valid_records)
     paths = metadata.setdefault("paths", {})
     if isinstance(paths, dict):
