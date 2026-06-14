@@ -89,6 +89,52 @@ def test_external_progress_estimates_position(tmp_path, monkeypatch):
         w.close()
 
 
+def test_continuous_play_toggle_tracks_button(tmp_path, monkeypatch):
+    w = _window(tmp_path, monkeypatch)
+    try:
+        w.continuous_play_button.setChecked(True)
+        w.toggle_continuous_play()
+        assert w.continuous_play_enabled is True
+        w.continuous_play_button.setChecked(False)
+        w.toggle_continuous_play()
+        assert w.continuous_play_enabled is False
+    finally:
+        w.close()
+
+
+def test_continuous_play_advances_to_next_playable_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_RELAY_POLL", "1")
+    vault = tmp_path / "vault"
+    _seed(vault, "a", "Alpha")
+    # add a second playable sound to the same catalog
+    catalog = vault / "catalog"
+    d = vault / "sounds" / "b"; d.mkdir(parents=True)
+    audio = d / "b.m4a"; audio.write_bytes(b"\x00a")
+    md = {"tiktok_music_id": "b", "tiktok_visible_title": "Beta", "source_artist": "C",
+          "usage_count": 5, "duration": 30, "paths": {"folder": str(d), "audio": str(audio)}}
+    (d / "metadata.json").write_text(json.dumps(md))
+    (catalog / "sounds.jsonl").write_text(
+        (catalog / "sounds.jsonl").read_text() + json.dumps(md) + "\n"
+    )
+    app = _app()
+    w = SoundVaultWindow(vault_root=vault)
+    w.show(); app.processEvents()
+    w.vm.rebuild_index(); w.refresh_table(); app.processEvents()
+    try:
+        assert w.table.rowCount() == 2
+        w.continuous_play_enabled = True
+        w.table.selectRow(0)
+        calls = []
+        monkeypatch.setattr(w, "_select_library_row", lambda row, play=False: calls.append((row, play)))
+        w._play_next_continuous_sound()
+        assert calls == [(1, True)]  # advanced to the next playable row and played it
+    finally:
+        w.close()
+
+
 def test_toggle_favorite_updates_row_in_place(tmp_path, monkeypatch):
     w = _window(tmp_path, monkeypatch)
     try:

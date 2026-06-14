@@ -1759,6 +1759,9 @@ class SoundVaultWindow(QMainWindow):
         if hasattr(self, "transport_play_button"):
             self.transport_play_button.setText("▶")
             self.transport_play_button.setToolTip("Play selected sound")
+        # afplay reports no EndOfMedia signal, so drive continuous play from here.
+        if self.continuous_play_enabled:
+            QTimer.singleShot(0, self._play_next_continuous_sound)
 
     def _ensure_audio_player(self) -> bool:
         if self.audio_player is not None:
@@ -3379,6 +3382,13 @@ QMainWindow, QWidget {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 #ff6ad5, stop:1 #b793ff);
     color: #0a0518;
+}
+#transportButton:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #66ecff, stop:1 #ff6ad5);
+    color: #0a0518;
+    border: 1px solid #ffffff;
+    font-weight: 700;
 }
 
 /* Now-Playing HUD capsule */
