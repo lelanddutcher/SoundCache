@@ -23,3 +23,7 @@ build/
 *.m4a
 *.mov
 *.webm
+
+# deploy + node tooling (Vercel link, Playwright capture deps)
+.vercel
+node_modules/

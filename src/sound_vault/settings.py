@@ -117,6 +117,15 @@ class AppSettings:
             return f"Relay configured\n{base_url}\nPairing code needed"
         return f"Relay configured\n{base_url}\n{_mask_pair_code(pair_code)}"
 
+    def telemetry_enabled(self) -> bool:
+        # Opt-out: anonymized save events feed the global leaderboard, ON by default.
+        value = self._data.get("telemetry_enabled")
+        return True if value is None else bool(value)
+
+    def set_telemetry_enabled(self, enabled: bool) -> None:
+        self._data["telemetry_enabled"] = bool(enabled)
+        self._write()
+
     def table_layout(self, table_name: str) -> bytes | None:
         layouts = self._data.get("table_layouts")
         if not isinstance(layouts, dict):
