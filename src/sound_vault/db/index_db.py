@@ -331,6 +331,15 @@ class IndexDatabase:
             return ""
         return " ".join(f"{token}*" for token in tokens)
 
+    def count_usage_at_least(self, threshold: int) -> int:
+        """Cheap COUNT for the popularity stat — avoids building full records just to len()."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM sounds WHERE usage_count IS NOT NULL AND usage_count >= ?",
+                (int(threshold),),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def get(self, music_id: str) -> SoundRecord | None:
         sql = f"SELECT {self._select_columns()} FROM sounds WHERE music_id = ? LIMIT 1"
         with self._connect() as db:

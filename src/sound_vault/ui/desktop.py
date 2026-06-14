@@ -7,6 +7,7 @@ import platform
 import random
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 
@@ -384,11 +385,18 @@ class PlayButtonDelegate(QStyledItemDelegate):
     def __init__(self, play_callback, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.play_callback = play_callback
+        # music_id of the row currently playing, so its button shows ▮▮.
+        self.playing_music_id: str | None = None
 
     def paint(self, painter, option, index) -> None:  # noqa: D102, N802 - Qt override
         button = QStyleOptionButton()
         button.rect = option.rect.adjusted(5, 2, -5, -2)
-        button.text = "▶" if index.data(PLAYABLE_ROLE) else "—"
+        if not index.data(PLAYABLE_ROLE):
+            button.text = "—"
+        elif self.playing_music_id is not None and str(index.data(Qt.ItemDataRole.UserRole)) == self.playing_music_id:
+            button.text = "▮▮"
+        else:
+            button.text = "▶"
         button.state = QStyle.StateFlag.State_Raised
         if index.data(PLAYABLE_ROLE):
             button.state |= QStyle.StateFlag.State_Enabled
@@ -800,6 +808,9 @@ class SoundVaultWindow(QMainWindow):
         self.audio_player = None
         self.external_audio_process: subprocess.Popen | None = None
         self.external_audio_target: Path | None = None
+        self._external_audio_started_at: float | None = None
+        self._external_audio_duration_ms: int = 0
+        self.playing_music_id: str | None = None
         self._external_audio_timer = QTimer(self)
         self._external_audio_timer.setInterval(300)
         self._external_audio_timer.timeout.connect(self._poll_external_audio)
@@ -1265,7 +1276,8 @@ class SoundVaultWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setSortingEnabled(False)
         self.table.setItemDelegateForColumn(FAVORITE_COL, FavoriteButtonDelegate(self.toggle_favorite_by_id, self.table))
-        self.table.setItemDelegateForColumn(PLAY_COL, PlayButtonDelegate(self.play_record_by_id, self.table))
+        self.play_delegate = PlayButtonDelegate(self.play_record_by_id, self.table)
+        self.table.setItemDelegateForColumn(PLAY_COL, self.play_delegate)
         self.table.setDragEnabled(True)
         self.table.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.table.setDragDropOverwriteMode(False)
@@ -1565,7 +1577,8 @@ class SoundVaultWindow(QMainWindow):
             total = health["total"]
             evidence = total - health["missing_evidence"]
             transcripts = total - health["missing_transcript"]
-            popularity = len(self.vm.search("", usage_filter="over_100k"))
+            # Cheap COUNT instead of building every 100k+ record just to len() it.
+            popularity = self.vm.db.count_usage_at_least(100_000)
         except Exception:
             return
         if hasattr(self, "archive_health_panel"):
@@ -1679,6 +1692,7 @@ class SoundVaultWindow(QMainWindow):
             process.terminate()
         self.external_audio_process = None
         self.external_audio_target = None
+        self._external_audio_started_at = None
         self._external_audio_timer.stop()
 
     def _play_external_audio(self, target: Path) -> bool:
@@ -1699,21 +1713,49 @@ class SoundVaultWindow(QMainWindow):
             self.external_audio_target = None
             return False
         self.external_audio_target = target
+        # afplay reports no position, so estimate the scrubber from elapsed wall time.
+        self._external_audio_started_at = time.monotonic()
+        self._external_audio_duration_ms = self._duration_ms_for_record(self.current_preview_record)
+        if self._external_audio_duration_ms > 0:
+            self.progress_slider.setRange(0, self._external_audio_duration_ms)
+            self.progress_slider.setValue(0)
         self._external_audio_timer.start()
         write_event("gui.external_audio_started", target=str(target), backend="afplay")
         self.playback_status.setText(f"Playing {target.name} via macOS audio")
         return True
 
+    def _update_external_progress(self) -> None:
+        started = self._external_audio_started_at
+        if started is None:
+            return
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        duration = self._external_audio_duration_ms
+        if duration > 0:
+            position = min(elapsed_ms, duration)
+            if not self.progress_slider.isSliderDown():
+                self.progress_slider.setValue(position)
+            self.time_label.setText(f"{self._format_ms(position)} / {self._format_ms(duration)}")
+        else:
+            self.time_label.setText(self._format_ms(elapsed_ms))
+
     def _poll_external_audio(self) -> None:
         process = self.external_audio_process
-        if process is None or process.poll() is None:
+        if process is None:
+            return
+        if process.poll() is None:
+            # still playing — advance the estimated scrubber/time
+            self._update_external_progress()
             return
         code = process.returncode
         target = self.external_audio_target
         self.external_audio_process = None
         self.external_audio_target = None
+        self._external_audio_started_at = None
         self._external_audio_timer.stop()
+        if self._external_audio_duration_ms > 0:
+            self.progress_slider.setValue(self._external_audio_duration_ms)
         write_event("gui.external_audio_finished", target=str(target or ""), returncode=code)
+        self._set_playing(None)
         if hasattr(self, "transport_play_button"):
             self.transport_play_button.setText("▶")
             self.transport_play_button.setToolTip("Play selected sound")
@@ -1753,12 +1795,25 @@ class SoundVaultWindow(QMainWindow):
         if self.audio_player is not None:
             self.audio_player.pause()
         self.playback_status.setText("Playback paused")
+        self._set_playing(None)
 
     def toggle_play_pause(self) -> None:
         if self._is_audio_playing():
             self.pause_playback()
         else:
             self.play_selected_sound()
+
+    def _set_playing(self, music_id: str | None) -> None:
+        """Mark which library row is playing so its ▶ button shows ▮▮. Cheap repaint, no rebuild."""
+        music_id = str(music_id) if music_id else None
+        if music_id == self.playing_music_id:
+            return
+        self.playing_music_id = music_id
+        delegate = getattr(self, "play_delegate", None)
+        if delegate is not None:
+            delegate.playing_music_id = music_id
+            if hasattr(self, "table"):
+                self.table.viewport().update()
 
     def _drag_audio_path(self, music_id: str) -> Path | None:
         """Local audio file for a dragged row, so dragging out copies the real sound."""
@@ -2471,7 +2526,20 @@ class SoundVaultWindow(QMainWindow):
             2200,
         )
         self.refresh_library_sidebar()
-        self.refresh_table()
+        # Update just the toggled row's star in place — a full refresh_table()
+        # re-queries + re-sorts + rebuilds 2000+ QTableWidgetItems and beach-balls.
+        # Only the Favorites view needs a real refresh (membership changed).
+        if self.active_library_filter == "favorites":
+            self.schedule_refresh_table()
+            return
+        for row in range(self.table.rowCount()):
+            play_item = self.table.item(row, PLAY_COL)
+            if play_item is not None and str(play_item.data(Qt.ItemDataRole.UserRole)) == str(music_id):
+                fav_item = self.table.item(row, FAVORITE_COL)
+                if fav_item is not None:
+                    fav_item.setData(FAVORITE_ROLE, is_favorite)
+                self.table.viewport().update()
+                break
 
     def open_library_context_menu(self, point) -> None:
         item = self.table.itemAt(point)
@@ -2599,6 +2667,7 @@ class SoundVaultWindow(QMainWindow):
             if self.audio_player is not None:
                 self.audio_player.stop()
             if self._play_external_audio(target):
+                self._set_playing(self.current_preview_record.music_id)
                 if hasattr(self, "transport_play_button"):
                     self.transport_play_button.setText("▮▮")
                     self.transport_play_button.setToolTip("Stop playback")
@@ -2606,10 +2675,12 @@ class SoundVaultWindow(QMainWindow):
         if self.audio_player.source() == source and self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.audio_player.pause()
             self.playback_status.setText("Playback paused")
+            self._set_playing(None)
             return
         if self.audio_player.source() != source:
             self.audio_player.setSource(source)
         self.audio_player.play()
+        self._set_playing(self.current_preview_record.music_id)
         self.playback_status.setText(f"Playing {self._playback_label_for(target)}")
 
     @staticmethod
@@ -2650,6 +2721,10 @@ class SoundVaultWindow(QMainWindow):
         if hasattr(self, "transport_play_button"):
             self.transport_play_button.setText("▮▮" if playing else "▶")
             self.transport_play_button.setToolTip("Pause playback" if playing else "Play selected sound")
+        if playing and self.current_preview_record is not None:
+            self._set_playing(self.current_preview_record.music_id)
+        elif not playing:
+            self._set_playing(None)
 
     def _player_media_status_changed(self, status) -> None:
         from PySide6.QtMultimedia import QMediaPlayer

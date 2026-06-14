@@ -323,7 +323,8 @@ def test_desktop_library_has_duration_filters_visible_counts_and_real_row_play_c
     assert "displayed /" in source
     assert "class PlayButtonDelegate" in source
     assert "self.table.itemDoubleClicked.connect(lambda _item: self.play_selected_sound())" in source
-    assert "self.table.setItemDelegateForColumn(PLAY_COL, PlayButtonDelegate(self.play_record_by_id, self.table))" in source
+    assert "self.play_delegate = PlayButtonDelegate(self.play_record_by_id, self.table)" in source
+    assert "self.table.setItemDelegateForColumn(PLAY_COL, self.play_delegate)" in source
     assert "item.setData(PLAYABLE_ROLE, has_playable_pointer)" in source
     assert "def _record_has_playable_pointer" in source
     assert "NoEditTriggers" in source
