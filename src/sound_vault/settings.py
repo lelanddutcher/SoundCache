@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,13 @@ def default_vault_root() -> Path:
 
 def default_index_path() -> Path:
     return user_data_dir() / "index.sqlite3"
+
+
+def index_path_for_vault(vault_root: Path) -> Path:
+    """Return a SQLite cache path scoped to the selected vault root."""
+    normalized = str(vault_root.expanduser())
+    digest = hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+    return user_data_dir() / "indexes" / f"{digest}.sqlite3"
 
 
 class AppSettings:
@@ -140,6 +148,7 @@ class AppSettings:
             "media_filter",
             "status_filter",
             "usage_filter",
+            "library_filter",
             "selected_music_id",
         }
         self._data["library_search_state"] = {
@@ -148,6 +157,100 @@ class AppSettings:
             if key in allowed and value is not None
         }
         self._write()
+
+    def transcription_config(self) -> dict[str, Any]:
+        defaults = {
+            "preferred_provider": "cloud",
+            "cloud_provider": "openai",
+            "cloud_base_url": "https://api.openai.com/v1",
+            "cloud_model": "gpt-4o-transcribe",
+            "local_engine": "faster-whisper",
+            "local_model": "base",
+            "model_cache_dir": "",
+            "demucs_enabled": False,
+            "demucs_model": "htdemucs_ft",
+        }
+        value = self._data.get("transcription")
+        if isinstance(value, dict):
+            defaults.update({key: value for key, value in value.items() if key in defaults})
+        return defaults
+
+    def set_transcription_config(
+        self,
+        *,
+        preferred_provider: str,
+        cloud_provider: str,
+        cloud_base_url: str,
+        cloud_model: str,
+        local_engine: str,
+        local_model: str,
+        model_cache_dir: str = "",
+        demucs_enabled: bool = False,
+        demucs_model: str = "htdemucs_ft",
+    ) -> None:
+        self._data["transcription"] = {
+            "preferred_provider": preferred_provider if preferred_provider in {"cloud", "local"} else "cloud",
+            "cloud_provider": cloud_provider.strip() or "openai",
+            "cloud_base_url": cloud_base_url.strip().rstrip("/") or "https://api.openai.com/v1",
+            "cloud_model": cloud_model.strip() or "gpt-4o-transcribe",
+            "local_engine": local_engine.strip() or "faster-whisper",
+            "local_model": local_model.strip() or "base",
+            "model_cache_dir": model_cache_dir.strip(),
+            "demucs_enabled": bool(demucs_enabled),
+            "demucs_model": demucs_model.strip() or "htdemucs_ft",
+        }
+        self._write()
+
+    def capture_config(self) -> dict[str, Any]:
+        defaults = {
+            "aggressiveness": "metadata_only",
+            "require_manual_login": True,
+            "max_batch_items": 25,
+            "delay_seconds": 10,
+            "stop_on_checkpoint": True,
+        }
+        value = self._data.get("capture")
+        if isinstance(value, dict):
+            defaults.update({key: value for key, value in value.items() if key in defaults})
+        return defaults
+
+    def set_capture_config(
+        self,
+        *,
+        aggressiveness: str,
+        require_manual_login: bool = True,
+        max_batch_items: int = 25,
+        delay_seconds: int = 10,
+        stop_on_checkpoint: bool = True,
+    ) -> None:
+        allowed = {"metadata_only", "artwork", "preview_audio", "full_audio", "associated_videos"}
+        self._data["capture"] = {
+            "aggressiveness": aggressiveness if aggressiveness in allowed else "metadata_only",
+            "require_manual_login": bool(require_manual_login),
+            "max_batch_items": max(1, int(max_batch_items)),
+            "delay_seconds": max(0, int(delay_seconds)),
+            "stop_on_checkpoint": bool(stop_on_checkpoint),
+        }
+        self._write()
+
+    def set_secret_reference(self, name: str, reference: str) -> None:
+        secrets = self._data.setdefault("secret_references", {})
+        if not isinstance(secrets, dict):
+            secrets = {}
+            self._data["secret_references"] = secrets
+        # Store only keyring/env references, never raw pasted credentials.
+        if reference.startswith(("keyring:", "env:")):
+            secrets[name] = reference
+        else:
+            secrets[name] = ""
+        self._write()
+
+    def secret_reference(self, name: str) -> str:
+        secrets = self._data.get("secret_references")
+        if not isinstance(secrets, dict):
+            return ""
+        value = secrets.get(name)
+        return str(value) if isinstance(value, str) else ""
 
     def hidden_table_columns(self, table_name: str) -> list[int]:
         tables = self._data.get("hidden_table_columns")

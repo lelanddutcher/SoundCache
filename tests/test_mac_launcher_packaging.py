@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import plistlib
 import stat
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -48,7 +49,57 @@ def test_mac_launcher_packager_uses_supplied_project_root_version_and_stamp(tmp_
         assert plist["CFBundlePackageType"] == "APPL"
         assert plist["CFBundleShortVersionString"] == version
         assert plist["CFBundleVersion"] == version
+        for directory in (
+            f"{expected_prefix}/",
+            f"{expected_prefix}/Sound Vault.app/",
+            f"{expected_prefix}/Sound Vault.app/Contents/",
+            f"{expected_prefix}/Sound Vault.app/Contents/MacOS/",
+            f"{expected_prefix}/Sound Vault.app/Contents/Resources/",
+            f"{expected_prefix}/Sound Vault.app/Contents/Resources/wheelhouse/",
+        ):
+            assert zf.getinfo(directory).is_dir(), directory
+        command_text = zf.read(f"{expected_prefix}/Open Sound Vault.command").decode("utf-8")
+        assert 'LAUNCHER="$SCRIPT_DIR/Sound Vault.app/Contents/MacOS/SoundVault"' in command_text
+        assert 'HARNESS_LOG="$LOG_DIR/launch-harness.log"' in command_text
+        assert 'exec > >(tee -a "$HARNESS_LOG") 2>&1' in command_text
+        assert 'section "macOS / shell environment"' in command_text
+        assert 'section "artifact structure"' in command_text
+        assert 'section "quarantine / gatekeeper hints"' in command_text
+        assert 'section "python candidates"' in command_text
+        assert 'section "cached venv state before launch"' in command_text
+        assert 'section "direct launcher execution"' in command_text
+        assert 'dump_tail "$LOG" 160' in command_text
+        assert '"$LAUNCHER"' in command_text
+        assert "tail -80 \"$LOG\"" in command_text
+        assert "Press return to close this window" in command_text
+        assert 'open "$APP"' not in command_text
         launcher_text = zf.read(f"{expected_prefix}/Sound Vault.app/Contents/MacOS/SoundVault").decode("utf-8")
+        assert "set -eu" in launcher_text
+        assert "trap alert_failure EXIT" in launcher_text
+        assert 'phase "preflight artifact paths"' in launcher_text
+        assert 'phase "python discovery"' in launcher_text
+        assert 'APPLE_SILICON="$(/usr/sbin/sysctl -n hw.optional.arm64' in launcher_text
+        assert 'python_ok()' in launcher_text
+        assert 'platform.machine() != "arm64"' in launcher_text
+        assert "selected python architecture" in launcher_text
+        assert "Native arm64 Python is preferred for PySide stability" in launcher_text
+        assert 'phase "venv install/update"' in launcher_text
+        assert 'phase "dependency smoke"' in launcher_text
+        assert 'phase "app diagnostics"' in launcher_text
+        assert 'needs_rebuild=0' in launcher_text
+        assert 'cache invalid: console script missing' in launcher_text
+        assert 'cache invalid: pip check failed' in launcher_text
+        assert 'python -m pip check' in launcher_text
+        assert '[[ ! -x "$APP_SUPPORT/venv/bin/sound-vault" ]]' in launcher_text
+        assert 'ERROR: console script missing after install' in launcher_text
+        assert 'run_logged "$APP_SUPPORT/venv/bin/sound-vault" --diagnose' in launcher_text
+        assert launcher_text.index('phase "dependency smoke"') < launcher_text.index('echo "$VERSION" > "$APP_SUPPORT/.launcher-version"')
+        assert 'sys.version.replace(chr(10), " ")' in launcher_text
+        assert 'sys.version.replace("\\n", " ")' not in launcher_text
+        assert 'from PySide6.QtWidgets import QApplication' in launcher_text
+        assert 'QT_DEBUG_PLUGINS' in launcher_text
+        assert "display alert \"Sound Vault failed to launch\"" in launcher_text
+        assert 'display alert "Sound Vault failed to launch" message "Exit code: $code' not in launcher_text
         assert 'LAUNCHER="${0:A}"' in launcher_text
         assert 'CONTENTS="${LAUNCHER:h:h}"' in launcher_text
         assert 'APP_DIR="${CONTENTS:h}"' in launcher_text
@@ -154,3 +205,14 @@ def test_mac_launcher_packager_fails_when_expected_wheel_is_missing(tmp_path):
         assert "sound_vault_desktop-1.2.3-py3-none-any.whl" in str(exc)
     else:
         raise AssertionError("missing wheel should fail closed")
+
+
+def test_source_worker_package_is_not_gitignored():
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "src/sound_vault/workers/dedupe_review.py"],
+        cwd=root,
+        check=False,
+    )
+
+    assert result.returncode == 1

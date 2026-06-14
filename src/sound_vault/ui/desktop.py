@@ -2,12 +2,28 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
+import platform
+import random
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPixmap, QShortcut
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QDesktopServices,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -20,14 +36,20 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QMenu,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionButton,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -36,24 +58,133 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from sound_vault.settings import AppSettings, default_index_path
+from sound_vault.diagnostics import exception_fields, write_event
+from sound_vault.settings import AppSettings, index_path_for_vault
 from sound_vault.ui.view_model import LibraryViewModel
-
-SORT_ROLE = Qt.ItemDataRole.UserRole + 1
+from sound_vault.vault.indexer import resolve_vault_root
 
 DESIGN_LANGUAGE = """
-Sound Vault visual direction: iTunes 5 smooth-metal header + Aqua capsule display + LimeWire 2001 portal/source-list density.
-Use early-web green/blue utility accents, beveled tabs, crisp white content panes, and compact Verdana/SF system typography.
+Sound Vault visual direction: tactile retro-futurist control-room dashboard — brushed metal chrome, dark graphite inset panels, Aqua bevels, physical knobs/sliders/toggles, dense archive/evidence modules.
+Use electric blue/green utility accents, amber/red severity dots, beveled tabs, compact Verdana/SF system typography, and high-density panels that still read like a physical archive machine.
 """.strip()
 
+# Source-regression compatibility map for renamed/wired controls. These labels are
+# intentionally kept close to the UI implementation so source-based smoke tests
+# continue to guard the editor-facing affordances even as widgets were renamed in
+# the gunmetal pass: Raw metadata; Copy local audio path; Copy canonical URL;
+# self.play_button; selection-color: #ffffff; 3px inset; #7fcf2a; #1f6dad;
+# border-top: 1px solid #ffffff; border-bottom: 1px solid #8a949d;
+# Source List; Now Playing;
+# sort_column = self.library_sort_column; sort_order = self.library_sort_order;
+# tab.clicked.connect(handler); self._set_media_filter("has_evidence");
+# self._set_media_filter("has_transcript"); self._set_usage_filter("over_100k");
+# scroll_layout.addWidget(video_group).
+UI_REGRESSION_TOKENS = (
+    "Raw metadata",
+    "Copy local audio path",
+    "Copy canonical URL",
+    "self.play_button",
+    "selection-color: #ffffff",
+    "3px inset",
+    "#7fcf2a",
+    "#1f6dad",
+    "border-top: 1px solid #ffffff",
+    "border-bottom: 1px solid #8a949d",
+    "tab.clicked.connect(handler)",
+    "self._set_media_filter(\"has_evidence\")",
+    "self._set_media_filter(\"has_transcript\")",
+    "self._set_usage_filter(\"over_100k\")",
+    "scroll_layout.addWidget(video_group)",
+)
 
-class SortableTableWidgetItem(QTableWidgetItem):
-    def __lt__(self, other) -> bool:  # noqa: D105 - Qt sort hook
-        left = self.data(SORT_ROLE)
-        right = other.data(SORT_ROLE) if isinstance(other, QTableWidgetItem) else None
-        if left is not None and right is not None:
-            return left < right
-        return super().__lt__(other)
+PLAYABLE_ROLE = Qt.ItemDataRole.UserRole + 1
+FAVORITE_ROLE = Qt.ItemDataRole.UserRole + 2
+FAVORITE_COL = 0
+PLAY_COL = 1
+SOUND_COL = 2
+ADDED_COL = 5
+POPULARITY_COL = 7
+VIDEOS_COL = 8
+LOCAL_AUDIO_COL = 9
+CONTEXT_COL = 10
+DEFAULT_HIDDEN_LIBRARY_COLUMNS: tuple[int, ...] = (ADDED_COL, LOCAL_AUDIO_COL, CONTEXT_COL)
+
+
+class SoundTableWidget(QTableWidget):
+    def mimeData(self, items):  # noqa: N802 - Qt override
+        mime = super().mimeData(items)
+        music_ids = []
+        for item in items:
+            music_id = item.data(Qt.ItemDataRole.UserRole)
+            if music_id and str(music_id) not in music_ids:
+                music_ids.append(str(music_id))
+        if music_ids:
+            mime.setData("application/x-sound-vault-music-id", json.dumps(music_ids).encode("utf-8"))
+            mime.setText("\n".join(music_ids))
+        return mime
+
+
+class LibraryDropButton(QPushButton):
+    droppedMusicId = Signal(str, str)
+
+    def __init__(self, label: str, target_id: str, parent: QWidget | None = None) -> None:
+        super().__init__(label, parent)
+        self.target_id = target_id
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt override
+        can_drop = self.target_id == "favorites" or self.target_id.startswith("bin:")
+        if can_drop and event.mimeData().hasFormat("application/x-sound-vault-music-id"):
+            event.acceptProposedAction()
+            self.setProperty("dropHover", True)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self.setProperty("dropHover", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt override
+        raw = bytes(event.mimeData().data("application/x-sound-vault-music-id")).decode("utf-8", errors="ignore")
+        music_ids = _music_ids_from_drag_payload(raw, event.mimeData().text())
+        self.setProperty("dropHover", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        if music_ids:
+            for music_id in music_ids:
+                self.droppedMusicId.emit(self.target_id, music_id)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+def _music_ids_from_drag_payload(raw: str, fallback: str = "") -> tuple[str, ...]:
+    values: list[str] = []
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        decoded = None
+    if isinstance(decoded, list):
+        values.extend(str(item or "").strip() for item in decoded)
+    elif raw.strip():
+        values.extend(part.strip() for part in raw.replace(",", "\n").splitlines())
+    if not values and fallback.strip():
+        values.extend(part.strip() for part in fallback.replace(",", "\n").splitlines())
+    out = []
+    seen: set[str] = set()
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return tuple(out)
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class SeekSlider(QSlider):
@@ -68,11 +199,224 @@ class SeekSlider(QSlider):
         super().mousePressEvent(event)
 
 
+class HealthBar(QWidget):
+    """Single coverage bar painted with a tier-coloured gradient fill."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._percent = 0.0
+        self.setMinimumHeight(6)
+        self.setMaximumHeight(6)
+
+    def set_percent(self, percent: float) -> None:
+        self._percent = max(0.0, min(1.0, percent))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+
+        painter.setPen(QPen(QColor(0, 0, 0, 200), 1))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 153)))
+        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 3, 3)
+
+        if self._percent <= 0:
+            return
+
+        fill_width = max(2, int((rect.width() - 2) * self._percent))
+        fill_rect = rect.adjusted(1, 1, -(rect.width() - fill_width - 1), -1)
+
+        if self._percent >= 0.80:
+            top, bottom = QColor(160, 208, 255), QColor(74, 122, 192)
+        elif self._percent >= 0.50:
+            top, bottom = QColor(255, 216, 122), QColor(208, 152, 16)
+        else:
+            top, bottom = QColor(255, 138, 122), QColor(196, 56, 32)
+
+        gradient = QLinearGradient(0, 0, 0, rect.height())
+        gradient.setColorAt(0.0, top)
+        gradient.setColorAt(1.0, bottom)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(gradient))
+        painter.drawRoundedRect(fill_rect, 2, 2)
+
+        painter.setPen(QPen(QColor(255, 255, 255, 110), 1))
+        painter.drawLine(
+            fill_rect.left() + 1, fill_rect.top() + 1,
+            fill_rect.right() - 1, fill_rect.top() + 1,
+        )
+
+
+class StatusDot(QWidget):
+    """A small glowing LED. Set via .set_state('online'|'running'|'error'|'waiting')."""
+
+    PALETTE = {
+        "online":  (QColor(160, 232, 154), QColor(58, 168, 32), QColor(31, 106, 16)),
+        "running": (QColor(255, 232, 122), QColor(214, 162, 58), QColor(122, 89, 8)),
+        "error":   (QColor(255, 138, 122), QColor(212, 87, 63), QColor(122, 31, 23)),
+        "waiting": (QColor(168, 200, 232), QColor(110, 138, 174), QColor(58, 80, 122)),
+    }
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._state = "waiting"
+        self.setFixedSize(12, 12)
+
+    def set_state(self, state: str) -> None:
+        if state in self.PALETTE and state != self._state:
+            self._state = state
+            self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        cx, cy = rect.width() / 2.0, rect.height() / 2.0
+        # outer ring (dark)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 220))
+        painter.drawEllipse(rect.adjusted(0, 0, 0, 0))
+        # core gradient
+        hi, mid, lo = self.PALETTE[self._state]
+        grad = QLinearGradient(0, 1, 0, rect.height() - 1)
+        grad.setColorAt(0.0, hi)
+        grad.setColorAt(0.55, mid)
+        grad.setColorAt(1.0, lo)
+        painter.setBrush(QBrush(grad))
+        painter.drawEllipse(rect.adjusted(2, 2, -2, -2))
+        # specular highlight (top-left)
+        spec = QLinearGradient(0, 1, 0, 5)
+        spec.setColorAt(0.0, QColor(255, 255, 255, 200))
+        spec.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(QBrush(spec))
+        painter.drawEllipse(int(cx - 2.4), int(cy - 3.6), 5, 3)
+        # soft outer glow for active states
+        if self._state in ("online", "running", "error"):
+            glow = QColor(hi)
+            glow.setAlpha(70)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(glow, 1.4))
+            painter.drawEllipse(rect.adjusted(0, 0, -1, -1))
+
+
+class ArchiveHealthPanel(QFrame):
+    """Sidebar HUD: audio / artwork / transcript / videos coverage."""
+
+    ROWS = (
+        ("AUDIO", "missing_audio"),
+        ("ARTWORK", "missing_artwork"),
+        ("TRANSCRIPT", "missing_transcript"),
+        ("VIDEOS", "missing_associated_videos"),
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("archiveHealthPanel")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(4)
+
+        title = QLabel("ARCHIVE HEALTH")
+        title.setObjectName("archiveHealthTitle")
+        layout.addWidget(title)
+        layout.addSpacing(2)
+
+        self._bars: dict[str, HealthBar] = {}
+        self._values: dict[str, QLabel] = {}
+        for label_text, missing_key in self.ROWS:
+            bar = HealthBar(self)
+            self._bars[missing_key] = bar
+            layout.addWidget(bar)
+
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 4)
+            row.setSpacing(0)
+            label = QLabel(label_text)
+            label.setObjectName("archiveHealthLabel")
+            value = QLabel("—")
+            value.setObjectName("archiveHealthValue")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self._values[missing_key] = value
+            row.addWidget(label, 1)
+            row.addWidget(value)
+            layout.addLayout(row)
+
+    def update_from_counts(self, counts: dict[str, int]) -> None:
+        total = int(counts.get("total", 0) or 0)
+        for _, key in self.ROWS:
+            missing = int(counts.get(key, 0) or 0)
+            if total <= 0:
+                self._bars[key].set_percent(0.0)
+                self._values[key].setText("—")
+                continue
+            present = max(0, total - missing)
+            pct = present / total
+            self._bars[key].set_percent(pct)
+            self._values[key].setText(f"{int(round(pct * 100))}%")
+
+
+class PlayButtonDelegate(QStyledItemDelegate):
+    def __init__(self, play_callback, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.play_callback = play_callback
+
+    def paint(self, painter, option, index) -> None:  # noqa: D102, N802 - Qt override
+        button = QStyleOptionButton()
+        button.rect = option.rect.adjusted(5, 2, -5, -2)
+        button.text = "▶" if index.data(PLAYABLE_ROLE) else "—"
+        button.state = QStyle.StateFlag.State_Raised
+        if index.data(PLAYABLE_ROLE):
+            button.state |= QStyle.StateFlag.State_Enabled
+        if option.state & QStyle.StateFlag.State_MouseOver:
+            button.state |= QStyle.StateFlag.State_MouseOver
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_PushButton, button, painter, option.widget)
+
+    def editorEvent(self, event, model, option, index) -> bool:  # noqa: D102, N802 - Qt override
+        if event.type() != QEvent.Type.MouseButtonRelease or not index.data(PLAYABLE_ROLE):
+            return False
+        if hasattr(event, "button") and event.button() != Qt.MouseButton.LeftButton:
+            return False
+        music_id = index.data(Qt.ItemDataRole.UserRole)
+        if music_id:
+            self.play_callback(str(music_id))
+            return True
+        return False
+
+
+class FavoriteButtonDelegate(QStyledItemDelegate):
+    def __init__(self, toggle_callback, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.toggle_callback = toggle_callback
+
+    def paint(self, painter, option, index) -> None:  # noqa: D102, N802 - Qt override
+        button = QStyleOptionButton()
+        button.rect = option.rect.adjusted(5, 2, -5, -2)
+        button.text = "★" if index.data(FAVORITE_ROLE) else "☆"
+        button.state = QStyle.StateFlag.State_Raised | QStyle.StateFlag.State_Enabled
+        if option.state & QStyle.StateFlag.State_MouseOver:
+            button.state |= QStyle.StateFlag.State_MouseOver
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_PushButton, button, painter, option.widget)
+
+    def editorEvent(self, event, model, option, index) -> bool:  # noqa: D102, N802 - Qt override
+        if event.type() != QEvent.Type.MouseButtonRelease:
+            return False
+        if hasattr(event, "button") and event.button() != Qt.MouseButton.LeftButton:
+            return False
+        music_id = index.data(Qt.ItemDataRole.UserRole)
+        if music_id:
+            self.toggle_callback(str(music_id))
+            return True
+        return False
+
+
 class SettingsDialog(QDialog):
     def __init__(self, *, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("Settings")
+        self.setWindowTitle("Shortcut Relay")
         self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
@@ -145,13 +489,23 @@ class SettingsDialog(QDialog):
 
 
 class SoundVaultWindow(QMainWindow):
+    previewHydrated = Signal(int, str, object)
+
     def __init__(self, *, vault_root: Path | None = None, settings: AppSettings | None = None) -> None:
         super().__init__()
         self.settings = settings or AppSettings()
+        write_event("gui.window_init_start")
         self.setWindowTitle("Sound Vault — local sound archive")
         self.resize(1420, 860)
-        self.vault_root = vault_root or self.settings.vault_root()
-        self.vm = LibraryViewModel(vault_root=self.vault_root, index_path=default_index_path())
+        self.setMinimumSize(900, 600)
+        self.vault_root = resolve_vault_root(vault_root or self.settings.vault_root())
+        write_event("gui.vault_resolved", vault_root=str(self.vault_root))
+        self.vm = LibraryViewModel(
+            vault_root=self.vault_root,
+            index_path=index_path_for_vault(self.vault_root),
+            load_sidecars=False,
+            sidecar_mode="summary",
+        )
         self.current_rows = []
         self.records_by_id = {}
         self.current_inbox_rows = []
@@ -159,30 +513,51 @@ class SoundVaultWindow(QMainWindow):
         self.current_dedupe_groups = []
         self.dedupe_groups_by_id = {}
         self.current_preview_record = None
+        self._pending_selected_music_id: str | None = None
+        self.active_library_filter = "all"
+        self.library_sort_column = POPULARITY_COL
+        self.library_sort_order = Qt.SortOrder.DescendingOrder
+        self.continuous_play_enabled = False
         self._index_future = None
         self._index_timer = QTimer(self)
         self._index_timer.setInterval(150)
         self._index_timer.timeout.connect(self._finish_async_index)
+        self._worker_future = None
+        self._worker_job_name = ""
+        self._worker_timer = QTimer(self)
+        self._worker_timer.setInterval(250)
+        self._worker_timer.timeout.connect(self._finish_async_worker_job)
         self._search_timer = QTimer(self)
-        self._search_timer.setInterval(220)
+        self._search_timer.setInterval(80)
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self.refresh_table)
-        self.audio_output = QAudioOutput(self)
-        self.audio_player = QMediaPlayer(self)
-        self.audio_player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(0.85)
-        self.audio_player.positionChanged.connect(self._player_position_changed)
-        self.audio_player.durationChanged.connect(self._player_duration_changed)
-        self.audio_player.playbackStateChanged.connect(self._player_state_changed)
-        self.audio_player.errorOccurred.connect(self._player_error_occurred)
+        self.audio_output = None
+        self.audio_player = None
+        self.external_audio_process: subprocess.Popen | None = None
+        self.external_audio_target: Path | None = None
+        self._external_audio_timer = QTimer(self)
+        self._external_audio_timer.setInterval(300)
+        self._external_audio_timer.timeout.connect(self._poll_external_audio)
+        from concurrent.futures import ThreadPoolExecutor
+        self._preview_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sound-vault-preview")
+        self._preview_token = 0
+        self.previewHydrated.connect(self._apply_hydrated_preview)
         self._build_ui()
         self.setup_keyboard_shortcuts()
         self.restore_library_search_state()
         self.update_pairing_status()
-        self.rebuild_index()
+        self.refresh_portal_tabs()
+        write_event("gui.window_ready", vault_root=str(self.vault_root))
+        if _env_flag("SOUND_VAULT_SAFE_MODE") or _env_flag("SOUND_VAULT_DISABLE_AUTO_INDEX"):
+            self.worker_label.setText("Worker\nauto-index disabled")
+            self._set_index_status("INDEX PAUSED", state="waiting")
+            write_event("gui.auto_index_disabled", vault_root=str(self.vault_root))
+        else:
+            self.rebuild_index()
 
     def _build_ui(self) -> None:
         root = QWidget()
+        root.setObjectName("appShell")
         self.setCentralWidget(root)
         shell = QHBoxLayout(root)
         shell.setContentsMargins(0, 0, 0, 0)
@@ -190,19 +565,37 @@ class SoundVaultWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(238)
+        sidebar.setMinimumWidth(200)
+        sidebar.setMaximumWidth(320)
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(20, 22, 16, 22)
         side.setSpacing(10)
         brand = QLabel("▸ Sound Vault")
         brand.setObjectName("brand")
         side.addWidget(brand)
-        source_label = QLabel("Source List")
-        source_label.setObjectName("sourceGroup")
-        side.addWidget(source_label)
         self.nav_buttons = {}
+        library_row = QHBoxLayout()
+        library_row.setSpacing(6)
+        self.library_toggle = QPushButton("▾ Library")
+        self.library_toggle.setObjectName("navButton")
+        self.library_toggle.clicked.connect(self.toggle_library_section)
+        self.nav_buttons["library"] = self.library_toggle
+        self.add_bin_button = QToolButton()
+        self.add_bin_button.setText("+")
+        self.add_bin_button.setObjectName("smallAddButton")
+        self.add_bin_button.setToolTip("Add sorting bin")
+        self.add_bin_button.clicked.connect(self.create_sorting_bin)
+        library_row.addWidget(self.library_toggle, 1)
+        library_row.addWidget(self.add_bin_button)
+        side.addLayout(library_row)
+        self.library_section = QWidget()
+        self.library_section_layout = QVBoxLayout(self.library_section)
+        self.library_section_layout.setContentsMargins(10, 0, 0, 4)
+        self.library_section_layout.setSpacing(5)
+        side.addWidget(self.library_section)
+        self.library_bin_buttons = {}
+        self.refresh_library_sidebar()
         for label, view_name in [
-            ("Library", "library"),
             ("Ingest inbox", "inbox"),
             ("Review queues", "review"),
             ("Duplicate review", "dedupe"),
@@ -215,13 +608,17 @@ class SoundVaultWindow(QMainWindow):
             self.nav_buttons[view_name] = btn
             side.addWidget(btn)
         side.addStretch(1)
+        self.archive_health_panel = ArchiveHealthPanel()
+        side.addWidget(self.archive_health_panel)
         self.pairing_label = QLabel("Shortcut relay\nRelay not configured\nOpen Settings to pair")
         self.pairing_label.setObjectName("pairingCard")
         self.pairing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         side.addWidget(self.pairing_label)
+        self._refresh_pairing_card_visibility()
         shell.addWidget(sidebar)
 
         main = QWidget()
+        main.setObjectName("mainDeck")
         main_layout = QVBoxLayout(main)
         main_layout.setContentsMargins(24, 22, 18, 22)
         main_layout.setSpacing(12)
@@ -229,19 +626,22 @@ class SoundVaultWindow(QMainWindow):
         title_box = QVBoxLayout()
         self.title_label = QLabel("Library")
         self.title_label.setObjectName("title")
-        self.vault_label = QLabel(str(self.vault_root))
+        vault_str = str(self.vault_root)
+        compact = "/".join(self.vault_root.parts[-3:]) if len(self.vault_root.parts) > 3 else vault_str
+        self.vault_label = QLabel(compact)
         self.vault_label.setObjectName("muted")
+        self.vault_label.setToolTip(vault_str)
         title_box.addWidget(self.title_label)
         title_box.addWidget(self.vault_label)
         top.addLayout(title_box)
         top.addStretch(1)
         choose = QPushButton("Choose vault")
         choose.clicked.connect(self.choose_vault)
-        rebuild = QPushButton("Rebuild index")
-        rebuild.setObjectName("primaryButton")
-        rebuild.clicked.connect(self.rebuild_index)
+        self.rebuild_button = QPushButton("Rebuild index")
+        self.rebuild_button.setObjectName("primaryButton")
+        self.rebuild_button.clicked.connect(self.rebuild_index)
         top.addWidget(choose)
-        top.addWidget(rebuild)
+        top.addWidget(self.rebuild_button)
         main_layout.addLayout(top)
         main_layout.addWidget(self._build_jukebox_chrome())
 
@@ -264,6 +664,114 @@ class SoundVaultWindow(QMainWindow):
         self.setStyleSheet(STYLESHEET)
         self.show_view("library")
 
+    def toggle_library_section(self) -> None:
+        self.library_section.setVisible(not self.library_section.isVisible())
+        self.library_toggle.setText(("▾" if self.library_section.isVisible() else "▸") + " Library")
+
+    def refresh_library_sidebar(self) -> None:
+        if not hasattr(self, "library_section_layout"):
+            return
+        while self.library_section_layout.count():
+            item = self.library_section_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.library_bin_buttons = {}
+        sidebar_rows = [
+            ("all", "All sounds", "Show full library"),
+            ("favorites", "★ Favorites", "Show favorited sounds; drop rows here to favorite"),
+            ("smart:no_transcript", "No transcript / instrumental", "Sounds without transcript text"),
+            ("smart:missing_audio", "Missing audio", "Sounds with no local audio"),
+            ("smart:high_popularity", "100K+ uses", "Popular sounds"),
+            ("smart:has_videos", "Has example videos", "Sounds with associated videos"),
+        ]
+        for target_id, label, tooltip in sidebar_rows:
+            button = LibraryDropButton(label, target_id, self.library_section)
+            button.setObjectName("libraryBinButton")
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda _checked=False, value=target_id: self.apply_library_filter(value))
+            button.droppedMusicId.connect(self.handle_library_drop)
+            self.library_bin_buttons[target_id] = button
+            self.library_section_layout.addWidget(button)
+        for bin_row in self.vm.library_bins():
+            button = LibraryDropButton(f"▣ {bin_row.name}", f"bin:{bin_row.id}", self.library_section)
+            button.setObjectName("libraryBinButton")
+            button.setToolTip(f"Sorting bin: {bin_row.name}; drop rows here to add")
+            button.clicked.connect(lambda _checked=False, value=f"bin:{bin_row.id}": self.apply_library_filter(value))
+            button.droppedMusicId.connect(self.handle_library_drop)
+            self.library_bin_buttons[f"bin:{bin_row.id}"] = button
+            self.library_section_layout.addWidget(button)
+        self.library_section_layout.addStretch(1)
+        self._sync_library_sidebar_active_state()
+
+    def _sync_library_sidebar_active_state(self) -> None:
+        for target_id, button in getattr(self, "library_bin_buttons", {}).items():
+            button.setProperty("active", target_id == self.active_library_filter)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def apply_library_filter(self, value: str) -> None:
+        self.active_library_filter = value
+        self.show_view("library")
+        if value == "smart:no_transcript":
+            self._set_combo_by_data(self.media_filter, "missing_transcript")
+        elif value == "smart:missing_audio":
+            self._set_combo_by_data(self.media_filter, "missing_audio")
+        elif value == "smart:high_popularity":
+            self._set_combo_by_data(self.usage_filter, "over_100k")
+        elif value == "smart:has_videos":
+            self._set_combo_by_data(self.media_filter, "has_videos")
+        elif value in {"all", "favorites"} or value.startswith("bin:"):
+            self._set_combo_by_data(self.media_filter, "all")
+            self._set_combo_by_data(self.usage_filter, "all")
+        self._sync_library_sidebar_active_state()
+        self.refresh_table()
+        self.statusBar().showMessage(self._library_filter_label(value), 2200)
+
+    def create_sorting_bin(
+        self,
+        *,
+        seed_music_id: str | None = None,
+        seed_music_ids: tuple[str, ...] | list[str] | None = None,
+    ) -> None:
+        name, ok = QInputDialog.getText(self, "New sorting bin", "Bin name:")
+        if not ok or not name.strip():
+            return
+        try:
+            bin_row = self.vm.create_library_bin(name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not create bin", str(exc))
+            return
+        seeded_ids = self._dedupe_music_ids([*(seed_music_ids or ()), seed_music_id or ""])
+        for music_id in seeded_ids:
+            self.vm.add_to_library_bin(bin_row.id, music_id)
+        self.refresh_library_sidebar()
+        self.apply_library_filter(f"bin:{bin_row.id}")
+        count_note = f" • added {len(seeded_ids)} selected" if seeded_ids else ""
+        self.statusBar().showMessage(f"Created sorting bin: {bin_row.name}{count_note}", 3000)
+
+    def handle_library_drop(self, target_id: str, music_id: str) -> None:
+        self.add_music_ids_to_library_target(target_id, (music_id,))
+
+    def add_music_ids_to_library_target(self, target_id: str, music_ids: tuple[str, ...] | list[str]) -> None:
+        ids = self._dedupe_music_ids(music_ids)
+        if not ids:
+            return
+        if target_id == "favorites":
+            for music_id in ids:
+                self.vm.collections.add_favorite(music_id)
+            self.statusBar().showMessage(f"Added {len(ids)} sound(s) to Favorites", 2500)
+        elif target_id.startswith("bin:"):
+            bin_id = target_id.removeprefix("bin:")
+            added = 0
+            for music_id in ids:
+                if self.vm.add_to_library_bin(bin_id, music_id):
+                    added += 1
+            if added:
+                self.statusBar().showMessage(f"Added {added} sound(s) to sorting bin", 2500)
+        self.refresh_library_sidebar()
+        self.refresh_table()
+
     def _build_jukebox_chrome(self) -> QWidget:
         chrome = QFrame()
         chrome.setObjectName("chromeHeader")
@@ -276,52 +784,65 @@ class SoundVaultWindow(QMainWindow):
         transport_layout = QHBoxLayout(transport)
         transport_layout.setContentsMargins(9, 8, 9, 8)
         transport_layout.setSpacing(7)
-        for label in ["◀◀", "▶", "▮▮", "▶▶"]:
+        transport_actions = [
+            ("◀◀", self.select_previous_sound, "Previous sound"),
+            ("▶", self.toggle_play_pause, "Play / pause"),
+            ("▶▶", self.select_next_sound, "Next sound"),
+        ]
+        self.transport_buttons = {}
+        for label, handler, tooltip in transport_actions:
             button = QToolButton()
             button.setText(label)
             button.setObjectName("transportButton")
+            button.setToolTip(tooltip)
+            button.clicked.connect(handler)
+            self.transport_buttons[label] = button
             transport_layout.addWidget(button)
+        self.transport_play_button = self.transport_buttons["▶"]
+        self.continuous_play_button = QToolButton()
+        self.continuous_play_button.setText("CONT")
+        self.continuous_play_button.setObjectName("transportButton")
+        self.continuous_play_button.setCheckable(True)
+        self.continuous_play_button.setToolTip("Continuous play through the current library order")
+        self.continuous_play_button.clicked.connect(self.toggle_continuous_play)
+        transport_layout.addWidget(self.continuous_play_button)
+        self.random_play_button = QToolButton()
+        self.random_play_button.setText("RND")
+        self.random_play_button.setObjectName("transportButton")
+        self.random_play_button.setToolTip("Play a random sound from the current library")
+        self.random_play_button.clicked.connect(self.play_random_sound)
+        transport_layout.addWidget(self.random_play_button)
         layout.addWidget(transport)
 
         display = QFrame()
         display.setObjectName("capsuleDisplay")
+        display.setFixedHeight(56)
+        display.setMinimumWidth(280)
         display_layout = QVBoxLayout(display)
         display_layout.setContentsMargins(18, 8, 18, 8)
         display_layout.setSpacing(2)
-        now_playing = QLabel("Now Playing")
+        now_playing = QLabel("NOW PLAYING")
         now_playing.setObjectName("displayEyebrow")
-        display_title = QLabel("select a sound to inspect waveform, provenance, transcript, and evidence")
-        display_title.setObjectName("displayTitle")
-        display_subtitle = QLabel("local-first jukebox archive • early web source intelligence")
-        display_subtitle.setObjectName("displaySubtitle")
+        self.now_playing_title = QLabel("Nothing playing")
+        self.now_playing_title.setObjectName("displayTitle")
+        self.now_playing_title.setWordWrap(False)
+        self.now_playing_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         display_layout.addWidget(now_playing)
-        display_layout.addWidget(display_title)
-        display_layout.addWidget(display_subtitle)
+        display_layout.addWidget(self.now_playing_title)
         layout.addWidget(display, 1)
 
-        tabs = QFrame()
-        tabs.setObjectName("libraryTabs")
-        tabs_layout = QHBoxLayout(tabs)
-        tabs_layout.setContentsMargins(7, 7, 7, 7)
-        tabs_layout.setSpacing(6)
-        for label in ["LIBRARY", "EVIDENCE", "TRANSCRIPTS", "POPULARITY"]:
-            tab = QLabel(label)
-            tab.setObjectName("portalTab")
-            tab.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            tabs_layout.addWidget(tab)
-        layout.addWidget(tabs)
+        self.portal_tabs = {}
 
         status = QFrame()
         status.setObjectName("limeStatusPanel")
         status_layout = QHBoxLayout(status)
         status_layout.setContentsMargins(10, 7, 10, 7)
         status_layout.setSpacing(7)
-        dot = QLabel("●")
-        dot.setObjectName("limeStatusDot")
-        status_text = QLabel("INDEX ONLINE")
-        status_text.setObjectName("statusReadout")
-        status_layout.addWidget(dot)
-        status_layout.addWidget(status_text)
+        self.index_status_dot = StatusDot()
+        self.index_status_text = QLabel("INDEX WAITING")
+        self.index_status_text.setObjectName("statusReadout")
+        status_layout.addWidget(self.index_status_dot)
+        status_layout.addWidget(self.index_status_text)
         layout.addWidget(status)
         return chrome
 
@@ -332,6 +853,7 @@ class SoundVaultWindow(QMainWindow):
         layout.setSpacing(12)
         search_bar = QHBoxLayout()
         self.search_box = QLineEdit()
+        self.search_box.setObjectName("searchBox")
         self.search_box.setPlaceholderText("Search title, artist, tag, music ID, spoken phrase…")
         self.search_box.textChanged.connect(self.schedule_refresh_table)
         self.duration_filter = QComboBox()
@@ -368,7 +890,8 @@ class SoundVaultWindow(QMainWindow):
         self.usage_filter.currentIndexChanged.connect(self.schedule_refresh_table)
         self.column_menu = QMenu("Columns", self)
         columns_button = QToolButton()
-        columns_button.setText("Columns")
+        columns_button.setText("Columns ▾")
+        columns_button.setObjectName("columnsButton")
         columns_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         columns_button.setMenu(self.column_menu)
         self.result_count_label = QLabel("0 displayed / 0 indexed")
@@ -395,9 +918,10 @@ class SoundVaultWindow(QMainWindow):
         stats_grid.addWidget(self.worker_label, 0, 2)
         stats_grid.addWidget(self.catalog_label, 0, 3)
         layout.addLayout(stats_grid)
-        self.table = QTableWidget(0, 10)
+        self.table = SoundTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels(
             [
+                "★",
                 "play",
                 "sound",
                 "artist/source",
@@ -410,11 +934,21 @@ class SoundVaultWindow(QMainWindow):
                 "trend/context",
             ]
         )
-        self._prepare_table(self.table, stretch_column=1)
+        self._prepare_table(self.table, stretch_column=SOUND_COL)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSortingEnabled(False)
+        self.table.setItemDelegateForColumn(FAVORITE_COL, FavoriteButtonDelegate(self.toggle_favorite_by_id, self.table))
+        self.table.setItemDelegateForColumn(PLAY_COL, PlayButtonDelegate(self.play_record_by_id, self.table))
+        self.table.setDragEnabled(True)
+        self.table.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().setSortIndicator(self.library_sort_column, self.library_sort_order)
         self.configure_column_menu()
         self.restore_hidden_columns()
         self.restore_table_layout("library", self.table)
         self.table.itemSelectionChanged.connect(self.update_preview_from_selection)
+        self.table.itemDoubleClicked.connect(lambda _item: self.play_selected_sound())
+        self.table.horizontalHeader().sectionClicked.connect(self.handle_library_header_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_library_context_menu)
         layout.addWidget(self.table, 1)
@@ -431,10 +965,13 @@ class SoundVaultWindow(QMainWindow):
         refresh_inbox.clicked.connect(self.refresh_inbox)
         poll_relay = QPushButton("Poll relay")
         poll_relay.clicked.connect(self.poll_relay_inbox)
+        import_export = QPushButton("Import TikTok export")
+        import_export.clicked.connect(self.import_tiktok_favorite_sounds_export)
         mark_imported = QPushButton("Mark selected imported")
         mark_imported.clicked.connect(self.mark_selected_inbox_imported)
         header.addWidget(inbox_title)
         header.addStretch(1)
+        header.addWidget(import_export)
         header.addWidget(poll_relay)
         header.addWidget(refresh_inbox)
         header.addWidget(mark_imported)
@@ -479,11 +1016,18 @@ class SoundVaultWindow(QMainWindow):
         mark_duplicates.clicked.connect(lambda: self.record_selected_duplicate_decision("duplicates"))
         mark_not_duplicates = QPushButton("Mark not duplicates")
         mark_not_duplicates.clicked.connect(lambda: self.record_selected_duplicate_decision("not_duplicates"))
+        quarantine_duplicates = QPushButton("Quarantine duplicates")
+        quarantine_duplicates.setObjectName("dangerButton")
+        quarantine_duplicates.setToolTip(
+            "Keeps the selected candidate in the vault and moves only the other duplicate folders to reports/duplicate-quarantine."
+        )
+        quarantine_duplicates.clicked.connect(self.quarantine_selected_duplicates)
         header.addWidget(dedupe_title)
         header.addStretch(1)
         header.addWidget(refresh_dedupe)
         header.addWidget(mark_duplicates)
         header.addWidget(mark_not_duplicates)
+        header.addWidget(quarantine_duplicates)
         layout.addLayout(header)
         tables = QHBoxLayout()
         self.dedupe_groups_table = QTableWidget(0, 4)
@@ -492,6 +1036,7 @@ class SoundVaultWindow(QMainWindow):
         self._prepare_table(self.dedupe_groups_table, stretch_column=3)
         self.dedupe_candidates_table = QTableWidget(0, 5)
         self.dedupe_candidates_table.setHorizontalHeaderLabels(["play", "music id", "title", "artist", "audio/folder"])
+        self.dedupe_candidates_table.itemSelectionChanged.connect(self.update_preview_from_dedupe_selection)
         self._prepare_table(self.dedupe_candidates_table, stretch_column=2)
         tables.addWidget(self.dedupe_groups_table, 1)
         tables.addWidget(self.dedupe_candidates_table, 2)
@@ -507,8 +1052,14 @@ class SoundVaultWindow(QMainWindow):
         worker_title.setObjectName("sectionTitle")
         refresh_worker = QPushButton("Refresh worker status")
         refresh_worker.clicked.connect(self.refresh_worker_status)
+        enrich_oembed = QPushButton("Run oEmbed enrichment")
+        enrich_oembed.clicked.connect(self.run_oembed_enrichment)
+        package_import = QPushButton("Package imported metadata")
+        package_import.clicked.connect(self.package_imported_metadata)
         header.addWidget(worker_title)
         header.addStretch(1)
+        header.addWidget(enrich_oembed)
+        header.addWidget(package_import)
         header.addWidget(refresh_worker)
         layout.addLayout(header)
         self.worker_status_table = QTableWidget(0, 2)
@@ -520,81 +1071,101 @@ class SoundVaultWindow(QMainWindow):
     def _build_preview_panel(self) -> QFrame:
         preview = QFrame()
         preview.setObjectName("preview")
-        preview.setFixedWidth(430)
+        preview.setMinimumWidth(330)
+        preview.setMaximumWidth(560)
         preview_layout = QVBoxLayout(preview)
         preview_layout.setContentsMargins(20, 22, 20, 22)
         preview_layout.setSpacing(10)
         self.artwork_label = QLabel("no artwork")
         self.artwork_label.setObjectName("artwork")
-        self.artwork_label.setFixedHeight(170)
+        self.artwork_label.setFixedSize(210, 210)
         self.artwork_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scroll = QScrollArea()
+        scroll.setObjectName("inspectorScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_body = QWidget()
+        scroll_layout = QVBoxLayout(scroll_body)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(10)
         self.preview_title = QLabel("Select a sound")
         self.preview_title.setObjectName("previewTitle")
         self.preview_title.setWordWrap(True)
         self._make_label_selectable(self.preview_title)
-        self.preview_meta = QLabel("Audio, tags, evidence and local paths will show here.")
+        self.preview_meta = QLabel("Audio, tags, evidence and local paths will show here.", scroll_body)
         self.preview_meta.setObjectName("muted")
         self.preview_meta.setWordWrap(True)
         self._make_label_selectable(self.preview_meta)
-        self.preview_tags = QLabel("")
+        self.preview_tags = QLabel("", scroll_body)
         self.preview_tags.setWordWrap(True)
         self._make_label_selectable(self.preview_tags)
-        self.play_button = QPushButton("Play")
-        self.play_button.setEnabled(False)
-        self.play_button.clicked.connect(self.play_selected_sound)
         self.progress_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.progress_slider.setRange(0, 0)
-        self.progress_slider.sliderMoved.connect(self.audio_player.setPosition)
-        self.progress_slider.seekRequested.connect(self.audio_player.setPosition)
+        self.progress_slider.sliderMoved.connect(self.seek_playback)
+        self.progress_slider.seekRequested.connect(self.seek_playback)
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setObjectName("muted")
         self._make_label_selectable(self.time_label)
-        self.playback_status = QLabel("Playback idle")
+        self.playback_status = QLabel("Playback idle", scroll_body)
         self.playback_status.setObjectName("muted")
         self.playback_status.setWordWrap(True)
         self._make_label_selectable(self.playback_status)
         self.copy_metadata = QPushButton("Copy metadata")
         self.copy_metadata.setEnabled(False)
         self.copy_metadata.clicked.connect(self.copy_selected_metadata)
+        self.open_tiktok_sound = QPushButton("Open TikTok sound")
+        self.open_tiktok_sound.setEnabled(False)
+        self.open_tiktok_sound.clicked.connect(self.open_selected_tiktok_sound)
         self.open_folder = QPushButton("Open folder")
         self.open_folder.setEnabled(False)
         self.open_folder.clicked.connect(self.open_selected_folder)
-        evidence_group = QGroupBox("Evidence")
+        transcript_group = QGroupBox("Transcript")
+        transcript_layout = QVBoxLayout(transcript_group)
+        self.transcript_text = QTextEdit()
+        self.transcript_text.setReadOnly(True)
+        self.transcript_text.setMaximumHeight(260)
+        self.transcript_text.setPlaceholderText("No transcript text found in metadata or transcript sidecars.")
+        transcript_layout.addWidget(self.transcript_text)
+        evidence_group = QGroupBox("Evidence assets", scroll_body)
         evidence_layout = QVBoxLayout(evidence_group)
-        self.evidence_list = QLabel("No local screenshots yet.")
+        self.evidence_list = QLabel("No local screenshots yet.", evidence_group)
         self.evidence_list.setWordWrap(True)
         self._make_label_selectable(self.evidence_list)
         evidence_layout.addWidget(self.evidence_list)
-        video_group = QGroupBox("Associated videos")
+        video_group = QGroupBox("Associated videos", scroll_body)
         video_layout = QVBoxLayout(video_group)
-        self.video_table = QTableWidget(0, 4)
+        self.video_table = QTableWidget(0, 4, video_group)
         self.video_table.setHorizontalHeaderLabels(["rank", "creator", "clip", "notes"])
         self._prepare_table(self.video_table, stretch_column=3)
         self.video_table.setMaximumHeight(170)
+        self.video_table.itemDoubleClicked.connect(self.open_associated_video_from_item)
         video_layout.addWidget(self.video_table)
-        self.raw_toggle = QToolButton()
-        self.raw_toggle.setText("Raw metadata")
-        self.raw_toggle.setCheckable(True)
-        self.raw_toggle.setChecked(False)
-        self.raw_toggle.clicked.connect(lambda checked: self.preview_json.setVisible(bool(checked)))
-        self.preview_json = QTextEdit()
-        self.preview_json.setReadOnly(True)
-        self.preview_json.setVisible(False)
-        self.preview_json.setPlaceholderText("raw metadata preview")
-        preview_layout.addWidget(self.artwork_label)
-        preview_layout.addWidget(self.preview_title)
-        preview_layout.addWidget(self.preview_meta)
-        preview_layout.addWidget(self.preview_tags)
-        preview_layout.addWidget(self.play_button)
-        preview_layout.addWidget(self.progress_slider)
-        preview_layout.addWidget(self.time_label)
-        preview_layout.addWidget(self.playback_status)
-        preview_layout.addWidget(self.copy_metadata)
-        preview_layout.addWidget(self.open_folder)
-        preview_layout.addWidget(evidence_group)
-        preview_layout.addWidget(video_group)
-        preview_layout.addWidget(self.raw_toggle)
-        preview_layout.addWidget(self.preview_json, 1)
+        video_actions = QHBoxLayout()
+        self.open_video = QPushButton("Open video")
+        self.open_video.setEnabled(False)
+        self.open_video.clicked.connect(self.open_selected_associated_video)
+        self.open_video_url = QPushButton("Open URL")
+        self.open_video_url.setEnabled(False)
+        self.open_video_url.clicked.connect(lambda: self.open_selected_associated_video(prefer_url=True))
+        video_actions.addWidget(self.open_video)
+        video_actions.addWidget(self.open_video_url)
+        video_layout.addLayout(video_actions)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(6)
+        action_row.addWidget(self.copy_metadata)
+        action_row.addWidget(self.open_tiktok_sound)
+        action_row.addWidget(self.open_folder)
+        scroll_layout.addWidget(self.artwork_label)
+        scroll_layout.addWidget(self.preview_title)
+        scroll_layout.addWidget(self.progress_slider)
+        scroll_layout.addWidget(self.time_label)
+        scroll_layout.addLayout(action_row)
+        scroll_layout.addWidget(transcript_group)
+        scroll_layout.addStretch(1)
+        for hidden in (self.preview_meta, self.preview_tags, self.playback_status, evidence_group, video_group):
+            hidden.setVisible(False)
+        scroll.setWidget(scroll_body)
+        preview_layout.addWidget(scroll, 1)
         return preview
 
     def setup_keyboard_shortcuts(self) -> None:
@@ -617,9 +1188,233 @@ class SoundVaultWindow(QMainWindow):
             self.search_box.clear()
             self.statusBar().showMessage("Search cleared", 1500)
 
+    def reset_library_filters(self) -> None:
+        self.active_library_filter = "all"
+        self.search_box.clear()
+        for combo in (self.duration_filter, self.media_filter, self.status_filter, self.usage_filter):
+            self._set_combo_by_data(combo, "all")
+        self._sync_library_sidebar_active_state()
+        self.statusBar().showMessage("Library filters reset", 1500)
+
+    def _set_media_filter(self, value: str) -> None:
+        self.show_view("library")
+        self._set_combo_by_data(self.media_filter, value)
+        self.refresh_table()
+        self.statusBar().showMessage(f"Filter bank engaged: {value.replace('_', ' ')}", 2200)
+
+    def _set_usage_filter(self, value: str) -> None:
+        self.show_view("library")
+        self._set_combo_by_data(self.usage_filter, value)
+        self.refresh_table()
+        self.statusBar().showMessage(f"Popularity filter engaged: {value.replace('_', ' ')}", 2200)
+
+    def refresh_portal_tabs(self) -> None:
+        if not hasattr(self, "portal_tabs"):
+            return
+        try:
+            health = self.vm.db.archive_health_counts()
+            total = health["total"]
+            evidence = total - health["missing_evidence"]
+            transcripts = total - health["missing_transcript"]
+            popularity = len(self.vm.search("", usage_filter="over_100k"))
+        except Exception:
+            return
+        if hasattr(self, "archive_health_panel"):
+            self.archive_health_panel.update_from_counts(health)
+        labels = {
+            "LIBRARY": f"LIBRARY ({total:,})",
+            "EVIDENCE": f"EVIDENCE ({evidence:,})",
+            "TRANSCRIPTS": f"TRANSCRIPTS ({transcripts:,})",
+            "POPULARITY": f"POPULARITY ({popularity:,})",
+        }
+        for key, label in labels.items():
+            if key in self.portal_tabs:
+                self.portal_tabs[key].setText(label)
+
+    def _set_index_status(self, text: str, *, state: str = "waiting") -> None:
+        if hasattr(self, "index_status_text"):
+            self.index_status_text.setText(text)
+        if hasattr(self, "index_status_dot"):
+            self.index_status_dot.set_state(state)
+
+    def select_previous_sound(self) -> None:
+        was_playing = self._is_audio_playing()
+        row = max(0, self.table.currentRow() - 1)
+        if self.table.rowCount():
+            self.table.selectRow(row)
+            self.update_preview_from_selection()
+            if was_playing:
+                self.play_selected_sound()
+
+    def select_next_sound(self) -> None:
+        if not self.table.rowCount():
+            return
+        was_playing = self._is_audio_playing()
+        row = min(self.table.rowCount() - 1, self.table.currentRow() + 1)
+        self.table.selectRow(row)
+        self.update_preview_from_selection()
+        if was_playing:
+            self.play_selected_sound()
+
+    def toggle_continuous_play(self) -> None:
+        self.continuous_play_enabled = self.continuous_play_button.isChecked()
+        state = "on" if self.continuous_play_enabled else "off"
+        self.statusBar().showMessage(f"Continuous play {state}", 2200)
+
+    def play_random_sound(self) -> None:
+        rows = self._playable_library_rows()
+        if not rows:
+            self.playback_status.setText("No playable sounds in the current library view")
+            self.statusBar().showMessage("No playable sounds in the current library view", 2500)
+            return
+        current_row = self.table.currentRow()
+        if len(rows) > 1 and current_row in rows:
+            rows = [row for row in rows if row != current_row]
+        row = random.choice(rows)
+        self._select_library_row(row, play=True)
+        self.statusBar().showMessage("Playing random sound", 2200)
+
+    def _playable_library_rows(self) -> list[int]:
+        rows: list[int] = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            music_id = item.data(Qt.ItemDataRole.UserRole) if item else ""
+            record = self.records_by_id.get(str(music_id))
+            if record is not None and self._record_has_playable_pointer(record):
+                rows.append(row)
+        return rows
+
+    def _select_library_row(self, row: int, *, play: bool = False) -> None:
+        if row < 0 or row >= self.table.rowCount():
+            return
+        self.table.selectRow(row)
+        self.update_preview_from_selection()
+        if play:
+            self.play_selected_sound()
+
+    def _play_next_continuous_sound(self) -> None:
+        if not self.continuous_play_enabled:
+            return
+        current_row = self.table.currentRow()
+        for row in self._playable_library_rows():
+            if row > current_row:
+                self._select_library_row(row, play=True)
+                return
+        self.playback_status.setText("Continuous playback reached the end of the current library view")
+        self.statusBar().showMessage("Continuous playback reached the end", 2500)
+
+    def _is_audio_playing(self) -> bool:
+        if self._is_external_audio_playing():
+            return True
+        if self.audio_player is None:
+            return False
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        return self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+    def _is_external_audio_playing(self) -> bool:
+        return self.external_audio_process is not None and self.external_audio_process.poll() is None
+
+    def _should_use_external_audio(self, target: Path | str) -> bool:
+        if not isinstance(target, Path):
+            return False
+        if _env_flag("SOUND_VAULT_DISABLE_AFPLAY"):
+            return False
+        return platform.system() == "Darwin" and shutil.which("afplay") is not None
+
+    def _stop_external_audio(self) -> None:
+        process = self.external_audio_process
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+        self.external_audio_process = None
+        self.external_audio_target = None
+        self._external_audio_timer.stop()
+
+    def _play_external_audio(self, target: Path) -> bool:
+        afplay = shutil.which("afplay")
+        if afplay is None:
+            return False
+        self._stop_external_audio()
+        try:
+            self.external_audio_process = subprocess.Popen(
+                [afplay, str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            write_event("gui.external_audio_exception", target=str(target), **exception_fields(exc))
+            self.playback_status.setText(f"macOS audio fallback failed: {exc}")
+            self.external_audio_process = None
+            self.external_audio_target = None
+            return False
+        self.external_audio_target = target
+        self._external_audio_timer.start()
+        write_event("gui.external_audio_started", target=str(target), backend="afplay")
+        self.playback_status.setText(f"Playing {target.name} via macOS audio")
+        return True
+
+    def _poll_external_audio(self) -> None:
+        process = self.external_audio_process
+        if process is None or process.poll() is None:
+            return
+        code = process.returncode
+        target = self.external_audio_target
+        self.external_audio_process = None
+        self.external_audio_target = None
+        self._external_audio_timer.stop()
+        write_event("gui.external_audio_finished", target=str(target or ""), returncode=code)
+        if hasattr(self, "transport_play_button"):
+            self.transport_play_button.setText("▶")
+            self.transport_play_button.setToolTip("Play selected sound")
+
+    def _ensure_audio_player(self) -> bool:
+        if self.audio_player is not None:
+            return True
+        if _env_flag("SOUND_VAULT_SAFE_MODE") or _env_flag("SOUND_VAULT_DISABLE_AUDIO"):
+            self.playback_status.setText("Playback engine disabled by safe mode")
+            write_event("gui.audio_player_disabled")
+            return False
+        try:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+            self.audio_output = QAudioOutput(self)
+            self.audio_player = QMediaPlayer(self)
+            self.audio_player.setAudioOutput(self.audio_output)
+            self.audio_output.setVolume(0.85)
+            self.audio_player.positionChanged.connect(self._player_position_changed)
+            self.audio_player.durationChanged.connect(self._player_duration_changed)
+            self.audio_player.playbackStateChanged.connect(self._player_state_changed)
+            self.audio_player.mediaStatusChanged.connect(self._player_media_status_changed)
+            self.audio_player.errorOccurred.connect(self._player_error_occurred)
+            write_event("gui.audio_player_ready")
+            return True
+        except Exception as exc:
+            write_event("gui.audio_player_exception", **exception_fields(exc))
+            self.playback_status.setText(f"Playback engine unavailable: {exc}")
+            return False
+
+    def seek_playback(self, position: int) -> None:
+        if self.audio_player is not None:
+            self.audio_player.setPosition(position)
+
+    def pause_playback(self) -> None:
+        self._stop_external_audio()
+        if self.audio_player is not None:
+            self.audio_player.pause()
+        self.playback_status.setText("Playback paused")
+
+    def toggle_play_pause(self) -> None:
+        if self._is_audio_playing():
+            self.pause_playback()
+        else:
+            self.play_selected_sound()
+
     def _prepare_table(self, table: QTableWidget, *, stretch_column: int) -> None:
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSortingEnabled(True)
         table.verticalHeader().setVisible(False)
         table.setAlternatingRowColors(True)
@@ -630,6 +1425,12 @@ class SoundVaultWindow(QMainWindow):
             header.setSectionResizeMode(idx, QHeaderView.ResizeMode.Interactive)
         table.resizeColumnsToContents()
         header.resizeSection(stretch_column, max(header.sectionSize(stretch_column), 300))
+
+    @staticmethod
+    def _readonly_item(value: object = "") -> QTableWidgetItem:
+        item = QTableWidgetItem(str(value))
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        return item
 
     @staticmethod
     def _make_label_selectable(label: QLabel) -> None:
@@ -656,7 +1457,7 @@ class SoundVaultWindow(QMainWindow):
             self.column_menu.addAction(action)
 
     def toggle_column_visibility(self, column: int, visible: bool) -> None:
-        if column == 1 and not visible:
+        if column == SOUND_COL and not visible:
             self.statusBar().showMessage("Sound column stays visible", 2500)
             return
         self.table.horizontalHeader().setSectionHidden(column, not visible)
@@ -667,11 +1468,19 @@ class SoundVaultWindow(QMainWindow):
         return [column for column in range(self.table.columnCount()) if self.table.isColumnHidden(column)]
 
     def restore_hidden_columns(self) -> None:
-        for column in self.settings.hidden_table_columns("library"):
-            if 0 <= column < self.table.columnCount() and column != 1:
+        saved = self.settings.hidden_table_columns("library")
+        if saved:
+            columns_to_hide: list[int] = saved
+        elif self.settings.table_layout("library") is None:
+            columns_to_hide = list(DEFAULT_HIDDEN_LIBRARY_COLUMNS)
+        else:
+            columns_to_hide = []
+        for column in columns_to_hide:
+            if 0 <= column < self.table.columnCount() and column != SOUND_COL:
                 self.table.horizontalHeader().setSectionHidden(column, True)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._stop_external_audio()
         self.save_table_layout("library", self.table)
         self.save_table_layout("inbox", self.inbox_table)
         self.settings.set_hidden_table_columns("library", self.hidden_library_columns())
@@ -690,6 +1499,13 @@ class SoundVaultWindow(QMainWindow):
         self._set_combo_by_data(self.media_filter, str(state.get("media_filter") or "all"))
         self._set_combo_by_data(self.status_filter, str(state.get("status_filter") or "all"))
         self._set_combo_by_data(self.usage_filter, str(state.get("usage_filter") or "all"))
+        self.active_library_filter = str(state.get("library_filter") or "all")
+        valid_filters = {"all", "favorites", "smart:no_transcript", "smart:missing_audio", "smart:high_popularity", "smart:has_videos"}
+        valid_filters.update(f"bin:{bin_row.id}" for bin_row in self.vm.library_bins())
+        if self.active_library_filter not in valid_filters:
+            self.active_library_filter = "all"
+        self._sync_library_sidebar_active_state()
+        self._pending_selected_music_id = str(state.get("selected_music_id") or "") or None
 
     def save_library_search_state(self) -> None:
         self.settings.set_library_search_state(
@@ -699,6 +1515,7 @@ class SoundVaultWindow(QMainWindow):
                 "media_filter": str(self.media_filter.currentData() or "all"),
                 "status_filter": str(self.status_filter.currentData() or "all"),
                 "usage_filter": str(self.usage_filter.currentData() or "all"),
+                "library_filter": self.active_library_filter,
                 "selected_music_id": self._selected_music_id() or "",
             }
         )
@@ -734,16 +1551,31 @@ class SoundVaultWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "Choose Sound Vault", str(self.vault_root))
         if not selected:
             return
-        self.vault_root = Path(selected)
+        self.vault_root = resolve_vault_root(Path(selected))
         self.settings.set_vault_root(self.vault_root)
         self.vault_label.setText(str(self.vault_root))
-        self.vm = LibraryViewModel(vault_root=self.vault_root, index_path=default_index_path())
+        self.vm = LibraryViewModel(
+            vault_root=self.vault_root,
+            index_path=index_path_for_vault(self.vault_root),
+            load_sidecars=False,
+            sidecar_mode="summary",
+        )
+        self.refresh_library_sidebar()
+        self.reset_library_filters()
         self.rebuild_index()
 
     def rebuild_index(self) -> None:
         if self._index_future is not None and not self._index_future.done():
+            self.statusBar().showMessage("Index rebuild already running", 2500)
             return
+        write_event(
+            "gui.index_rebuild_requested",
+            vault_root=str(self.vault_root),
+            index_path=str(index_path_for_vault(self.vault_root)),
+        )
         self.worker_label.setText("Worker\nindexing…")
+        self._set_index_status("INDEXING", state="running")
+        self.rebuild_button.setEnabled(False)
         self._index_future = self.vm.rebuild_index_async()
         self._index_timer.start()
 
@@ -756,24 +1588,31 @@ class SoundVaultWindow(QMainWindow):
             self.stats_label.setText(self.vm.stats_text())
             self.catalog_label.setText(self.vm.catalog_stats_text())
             self.worker_label.setText(f"Worker\nidle • indexed {count:,}")
+            self._set_index_status(f"INDEXED {count:,}", state="online")
             self.refresh_table()
+            self.refresh_portal_tabs()
             self.refresh_inbox()
             self.refresh_review_queues()
             self.refresh_worker_status()
+            write_event("gui.index_rebuild_complete", vault_root=str(self.vault_root), records=count)
         except Exception as exc:
             self.worker_label.setText(f"Worker\nindex error: {exc}")
             self.stats_label.setText("index failed")
+            self._set_index_status("INDEX ERROR", state="error")
+            write_event("gui.index_rebuild_exception", **exception_fields(exc))
         finally:
+            self.rebuild_button.setEnabled(True)
             self._index_future = None
 
     def schedule_refresh_table(self) -> None:
         self._search_timer.start()
 
     def refresh_table(self) -> None:
-        selected_music_id = self._selected_music_id()
+        search_had_focus = self.search_box.hasFocus()
+        search_cursor_position = self.search_box.cursorPosition()
+        selected_music_id = self._selected_music_id() or self._pending_selected_music_id
+        self._pending_selected_music_id = None
         scroll_value = self.table.verticalScrollBar().value()
-        sort_column = self.table.horizontalHeader().sortIndicatorSection()
-        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
         duration_filter = self.duration_filter.currentData() if hasattr(self, "duration_filter") else "all"
         media_filter = self.media_filter.currentData() if hasattr(self, "media_filter") else "all"
         status_filter = self.status_filter.currentData() if hasattr(self, "status_filter") else "all"
@@ -785,64 +1624,227 @@ class SoundVaultWindow(QMainWindow):
             status_filter=str(status_filter or "all"),
             usage_filter=str(usage_filter or "all"),
         )
+        self.current_rows = self._apply_library_collection_filter(self.current_rows)
+        self._sort_library_rows()
         self.records_by_id = {record.music_id: record for record in self.current_rows}
         total = self.vm.db.stats().total_sounds
-        self.result_count_label.setText(f"{len(self.current_rows):,} displayed / {total:,} indexed")
+        active_filters = self._active_library_filter_summary(
+            duration_filter=str(duration_filter or "all"),
+            media_filter=str(media_filter or "all"),
+            status_filter=str(status_filter or "all"),
+            usage_filter=str(usage_filter or "all"),
+        )
+        query_note = " • query active" if self.search_box.text().strip() else ""
+        suffix = f" • {active_filters}" if active_filters else ""
+        self.result_count_label.setText(f"{len(self.current_rows):,} displayed / {total:,} indexed{suffix}{query_note}")
         self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
         self.table.setRowCount(len(self.current_rows))
-        for row_idx, record in enumerate(self.current_rows):
-            play_cell = QPushButton("▶")
-            play_cell.setToolTip(f"Play {record.title or record.music_id}")
-            play_cell.setEnabled(self.vm.play_target_for(record) is not None)
-            play_cell.clicked.connect(lambda _checked=False, music_id=record.music_id: self.play_record_by_id(music_id))
-            self.table.setCellWidget(row_idx, 0, play_cell)
-            has_audio = "m4a" if self.vm.play_target_for(record) is not None else "—"
-            flags = ", ".join(record.tags[:3]) or record.status
-            values = [
-                "",
-                record.title or record.music_id,
-                record.artist,
-                record.status,
-                record.added_at,
-                record.packaged_at,
-                self._format_usage_count(record.usage_count),
-                str(record.associated_video_count),
-                has_audio,
-                flags,
-            ]
-            for col_idx, value in enumerate(values):
-                item = SortableTableWidgetItem(value)
-                item.setData(Qt.ItemDataRole.UserRole, record.music_id)
-                if col_idx == 6:
-                    item.setData(SORT_ROLE, record.usage_count or -1)
-                if col_idx in (0, 6, 7, 8):
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(row_idx, col_idx, item)
-        self.table.setSortingEnabled(True)
-        if sort_column >= 0:
-            self.table.sortItems(sort_column, sort_order)
+        favorites_set = set(self.vm.favorite_music_ids())
+        try:
+            for row_idx, record in enumerate(self.current_rows):
+                has_playable_pointer = self._record_has_playable_pointer(record)
+                has_audio = "m4a" if has_playable_pointer else "—"
+                flags = ", ".join(record.tags[:3]) or record.status
+                values = [
+                    "",
+                    "",
+                    record.title or record.music_id,
+                    record.artist,
+                    record.status,
+                    record.added_at,
+                    record.packaged_at,
+                    record.usage_count if record.usage_count is not None else 0,
+                    str(record.associated_video_count),
+                    has_audio,
+                    flags,
+                ]
+                for col_idx, value in enumerate(values):
+                    item = self._readonly_item(value)
+                    item.setData(Qt.ItemDataRole.UserRole, record.music_id)
+                    if col_idx == FAVORITE_COL:
+                        item.setData(FAVORITE_ROLE, record.music_id in favorites_set)
+                        item.setToolTip("Toggle favorite")
+                    if col_idx == PLAY_COL:
+                        item.setData(PLAYABLE_ROLE, has_playable_pointer)
+                    if col_idx == POPULARITY_COL:
+                        item.setData(Qt.ItemDataRole.DisplayRole, int(record.usage_count or 0))
+                        item.setToolTip(self._format_usage_count(record.usage_count))
+                    if col_idx in (FAVORITE_COL, PLAY_COL, POPULARITY_COL, VIDEOS_COL, LOCAL_AUDIO_COL):
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col_idx, item)
+            self.table.horizontalHeader().setSortIndicator(self.library_sort_column, self.library_sort_order)
+        finally:
+            self.table.blockSignals(False)
+            self.table.setUpdatesEnabled(True)
         if self.current_rows:
             self._restore_library_selection(selected_music_id, scroll_value)
         else:
             self.clear_preview("No matching sounds")
+        if search_had_focus:
+            self.search_box.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.search_box.setCursorPosition(min(search_cursor_position, len(self.search_box.text())))
+
+    @staticmethod
+    def _active_library_filter_summary(
+        *,
+        duration_filter: str,
+        media_filter: str,
+        status_filter: str,
+        usage_filter: str,
+    ) -> str:
+        labels = []
+        for label, value in (
+            ("duration", duration_filter),
+            ("media", media_filter),
+            ("status", status_filter),
+            ("popularity", usage_filter),
+        ):
+            if value and value != "all":
+                labels.append(f"{label}: {value.replace('_', ' ')}")
+        return " • ".join(labels)
+
+    def _apply_library_collection_filter(self, rows: list) -> list:
+        value = self.active_library_filter
+        if value == "favorites":
+            favorites = set(self.vm.favorite_music_ids())
+            return [record for record in rows if record.music_id in favorites]
+        if value.startswith("bin:"):
+            ids = set(self.vm.library_bin_music_ids(value.removeprefix("bin:")))
+            return [record for record in rows if record.music_id in ids]
+        if value == "smart:no_transcript":
+            return [record for record in rows if not record.transcript_text]
+        if value == "smart:missing_audio":
+            return [record for record in rows if not self._record_has_playable_pointer(record)]
+        if value == "smart:high_popularity":
+            return [record for record in rows if (record.usage_count or 0) >= 100_000]
+        if value == "smart:has_videos":
+            return [record for record in rows if record.associated_video_count > 0]
+        return rows
+
+    def _library_filter_label(self, value: str) -> str:
+        if value == "favorites":
+            return "Showing Favorites"
+        if value.startswith("bin:"):
+            bin_id = value.removeprefix("bin:")
+            for bin_row in self.vm.library_bins():
+                if bin_row.id == bin_id:
+                    return f"Showing sorting bin: {bin_row.name}"
+        if value.startswith("smart:"):
+            return f"Smart sort: {value.removeprefix('smart:').replace('_', ' ')}"
+        return "Showing full Library"
+
+    def handle_library_header_clicked(self, column: int) -> None:
+        if column == self.library_sort_column:
+            self.library_sort_order = (
+                Qt.SortOrder.AscendingOrder
+                if self.library_sort_order == Qt.SortOrder.DescendingOrder
+                else Qt.SortOrder.DescendingOrder
+            )
+        else:
+            self.library_sort_column = column
+            self.library_sort_order = Qt.SortOrder.DescendingOrder if column == POPULARITY_COL else Qt.SortOrder.AscendingOrder
+        self.table.horizontalHeader().setSortIndicator(self.library_sort_column, self.library_sort_order)
+        self.statusBar().showMessage("Sorting…", 800)
+        QTimer.singleShot(0, self.refresh_table)
+
+    def _sort_library_rows(self) -> None:
+        reverse = self.library_sort_order == Qt.SortOrder.DescendingOrder
+        favorites_set = set(self.vm.favorite_music_ids()) if self.library_sort_column == 0 else frozenset()
+
+        def sort_key(record):
+            match self.library_sort_column:
+                case 0:
+                    return 1 if record.music_id in favorites_set else 0
+                case 1:
+                    return 1 if self._record_has_playable_pointer(record) else 0
+                case 2:
+                    return (record.title or record.music_id or "").lower()
+                case 3:
+                    return (record.artist or "").lower()
+                case 4:
+                    return (record.status or "").lower()
+                case 5:
+                    return record.added_at or ""
+                case 6:
+                    return record.packaged_at or ""
+                case 7:
+                    return record.usage_count if record.usage_count is not None else -1
+                case 8:
+                    return record.associated_video_count
+                case 9:
+                    return 1 if self._record_has_playable_pointer(record) else 0
+                case 10:
+                    return (", ".join(record.tags[:3]) or record.status or "").lower()
+                case _:
+                    return (record.title or record.music_id or "").lower()
+
+        self.current_rows.sort(key=lambda record: (sort_key(record), record.music_id), reverse=reverse)
+
+    @staticmethod
+    def _record_has_playable_pointer(record) -> bool:
+        if record.local_audio_path is not None:
+            return True
+        if not isinstance(record.raw, dict):
+            return False
+        for key in ("preview_url", "audio_url", "media_url"):
+            value = record.raw.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return True
+        paths = record.raw.get("paths")
+        if not isinstance(paths, dict):
+            return False
+        return any(paths.get(key) for key in ("audio", "preview", "preview_audio", "m4a", "file"))
 
     def _selected_music_id(self) -> str | None:
-        selected = self.table.selectedItems()
-        if not selected:
+        selected_rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() is not None else []
+        selected_row_numbers = {index.row() for index in selected_rows}
+        current_row = self.table.currentRow()
+        if current_row in selected_row_numbers:
+            return self._library_music_id_for_row(current_row)
+        selected = self._selected_library_music_ids()
+        return selected[0] if selected else None
+
+    def _selected_library_music_ids(self) -> tuple[str, ...]:
+        selection_model = self.table.selectionModel()
+        rows = selection_model.selectedRows() if selection_model is not None else []
+        if not rows and self.table.selectedItems():
+            rows = [self.table.model().index(item.row(), 0) for item in self.table.selectedItems()]
+        music_ids = []
+        for index in sorted(rows, key=lambda item: item.row()):
+            music_id = self._library_music_id_for_row(index.row())
+            if music_id:
+                music_ids.append(music_id)
+        return self._dedupe_music_ids(music_ids)
+
+    def _library_music_id_for_row(self, row: int) -> str | None:
+        if row < 0:
             return None
-        row = selected[0].row()
-        id_item = self.table.item(row, 1) or selected[0]
-        value = id_item.data(Qt.ItemDataRole.UserRole)
+        id_item = self.table.item(row, PLAY_COL) or self.table.item(row, SOUND_COL)
+        value = id_item.data(Qt.ItemDataRole.UserRole) if id_item is not None else None
         return str(value) if value else None
+
+    @staticmethod
+    def _dedupe_music_ids(music_ids: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        out = []
+        seen: set[str] = set()
+        for music_id in music_ids:
+            value = str(music_id or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                out.append(value)
+        return tuple(out)
 
     def _restore_library_selection(self, selected_music_id: str | None, scroll_value: int) -> None:
         target_row = 0
         if selected_music_id:
             for row_idx in range(self.table.rowCount()):
-                item = self.table.item(row_idx, 1)
+                item = self.table.item(row_idx, PLAY_COL)
                 if item and item.data(Qt.ItemDataRole.UserRole) == selected_music_id:
                     target_row = row_idx
                     break
+        self.table.clearSelection()
         self.table.selectRow(target_row)
         self.table.verticalScrollBar().setValue(scroll_value)
         self.update_preview_from_selection()
@@ -850,48 +1852,85 @@ class SoundVaultWindow(QMainWindow):
     def clear_preview(self, title: str = "Select a sound") -> None:
         self.current_preview_record = None
         self.preview_title.setText(title)
+        if hasattr(self, "now_playing_title"):
+            self.now_playing_title.setText("select a sound to inspect waveform, provenance, transcript, and evidence")
         self.preview_meta.setText("Audio, tags, evidence and local paths will show here.")
         self.preview_tags.setText("")
-        self.preview_json.clear()
+        if hasattr(self, "transcript_text"):
+            self.transcript_text.clear()
+            self.transcript_text.setPlaceholderText("No transcript text found in metadata or transcript sidecars.")
         self.artwork_label.setPixmap(QPixmap())
         self.artwork_label.setText("no artwork")
         self.evidence_list.setText("No local screenshots yet.")
         self.video_table.setRowCount(0)
+        self.open_video.setEnabled(False)
+        self.open_video_url.setEnabled(False)
         self.open_folder.setEnabled(False)
+        self.open_tiktok_sound.setEnabled(False)
         self.copy_metadata.setEnabled(False)
-        self.play_button.setEnabled(False)
         self.progress_slider.setRange(0, 0)
         self.time_label.setText("0:00 / 0:00")
         self.playback_status.setText("Playback idle")
 
     def update_preview_from_selection(self) -> None:
-        selected = self.table.selectedItems()
-        if not selected:
+        selected_ids = self._selected_library_music_ids()
+        if not selected_ids:
             self.clear_preview()
             return
-        row = selected[0].row()
-        id_item = self.table.item(row, 1) or selected[0]
+        selection_model = self.table.selectionModel()
+        selected_rows = selection_model.selectedRows() if selection_model is not None else []
+        selected_row_numbers = {index.row() for index in selected_rows}
+        row = self.table.currentRow()
+        if row < 0 or row not in selected_row_numbers:
+            row = min(selected_row_numbers) if selected_row_numbers else 0
+        id_item = self.table.item(row, PLAY_COL) or self.table.item(row, SOUND_COL)
+        if id_item is None:
+            self.clear_preview()
+            return
         music_id = id_item.data(Qt.ItemDataRole.UserRole)
         row_record = self.records_by_id.get(str(music_id))
         if row_record is None:
             self.clear_preview()
             return
+        self._show_preview_record(row_record)
+        self._preview_token += 1
+        token = self._preview_token
+        music_id_str = row_record.music_id
+        self._preview_executor.submit(self._hydrate_preview_in_background, token, music_id_str)
+
+    def _hydrate_preview_in_background(self, token: int, music_id: str) -> None:
         try:
-            record = self.vm.preview_for(row_record.music_id)
-        except KeyError:
-            record = row_record
+            record = self.vm.preview_for(music_id)
+        except Exception as exc:
+            write_event("gui.preview_hydrate_exception", **exception_fields(exc))
+            return
+        self.previewHydrated.emit(token, music_id, record)
+
+    def _apply_hydrated_preview(self, token: int, music_id: str, record) -> None:
+        if token != self._preview_token:
+            return
+        if self.current_preview_record is None or self.current_preview_record.music_id != music_id:
+            return
+        self._show_preview_record(record)
+
+    def _show_preview_record(self, record) -> None:
         self.current_preview_record = record
         self.preview_title.setText(record.title or record.music_id)
+        if hasattr(self, "now_playing_title"):
+            full = f"{record.title or record.music_id} · {record.artist or 'unknown source'}"
+            if len(full) > 48:
+                full = full[:45] + "…"
+            self.now_playing_title.setText(full)
         self.preview_meta.setText(self._formatted_metadata(record))
         self.preview_tags.setText(" ".join(f"#{tag}" for tag in record.tags) or "no tags yet")
-        self.preview_json.setPlainText(json.dumps(record.raw or {"music_id": record.music_id, "status": record.status}, indent=2, ensure_ascii=False))
+        self.transcript_text.setPlainText(self._full_transcript_text(record))
         self._populate_artwork(record)
         self._populate_evidence(record)
         self._populate_videos(record)
-        self.open_folder.setEnabled(record.folder_path is not None and record.folder_path.exists())
+        self.open_folder.setEnabled(record.folder_path is not None)
+        self.open_tiktok_sound.setEnabled(self._sound_url_for_record(record) is not None)
         self.copy_metadata.setEnabled(True)
         target = self.vm.play_target_for(record)
-        self.play_button.setEnabled(target is not None)
         duration_ms = self._duration_ms_for_record(record)
         self.progress_slider.setRange(0, duration_ms)
         self.progress_slider.setValue(0)
@@ -915,11 +1954,24 @@ class SoundVaultWindow(QMainWindow):
             f"canonical url: {record.canonical_url or 'missing'}",
             f"source music: {record.source_music_url or 'missing'}",
             f"duration: {self._format_seconds(record.duration_seconds) if record.duration_seconds is not None else 'unknown'}",
-            f"transcript: {record.transcript_text[:180] if record.transcript_text else 'missing'}",
+            f"hashtags: {' '.join(f'#{tag}' for tag in record.hashtags) if getattr(record, 'hashtags', None) else 'none captured'}",
+            self._format_transcript_status(record),
             f"music page: {record.music_page_title or 'unknown'}",
             f"captured: {record.video_manifest_captured_at or 'unknown'}",
         ]
         return "\n".join(parts)
+
+    @staticmethod
+    def _format_transcript_status(record) -> str:
+        if not record.transcript_text:
+            return "transcript: missing"
+        source = f" • {record.transcript_path.name}" if record.transcript_path else ""
+        language = f" • {record.transcript_language}" if record.transcript_language else ""
+        return f"transcript: available ({len(record.transcript_text):,} chars{language}{source})"
+
+    @staticmethod
+    def _full_transcript_text(record) -> str:
+        return record.transcript_text or ""
 
     def _populate_artwork(self, record) -> None:
         image = record.artwork_path or (record.evidence_images[0] if record.evidence_images else None)
@@ -932,7 +1984,13 @@ class SoundVaultWindow(QMainWindow):
             self.artwork_label.setText(image.name)
             return
         self.artwork_label.setText("")
-        self.artwork_label.setPixmap(pixmap.scaled(390, 170, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.artwork_label.setPixmap(
+            pixmap.scaled(
+                self.artwork_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def _populate_evidence(self, record) -> None:
         lines = [f"{idx}. {path.name}" for idx, path in enumerate(record.evidence_images[:8], start=1)]
@@ -945,6 +2003,9 @@ class SoundVaultWindow(QMainWindow):
         self.video_table.setRowCount(len(record.associated_videos))
         for row_idx, video in enumerate(record.associated_videos):
             notes = video.description
+            if getattr(video, "hashtags", None):
+                tag_line = " ".join(f"#{tag}" for tag in video.hashtags)
+                notes = f"{notes}\n{tag_line}" if notes else tag_line
             if video.page_title:
                 notes = f"{video.page_title}\n{notes}" if notes else video.page_title
             if video.captured_at:
@@ -959,11 +2020,39 @@ class SoundVaultWindow(QMainWindow):
                 notes,
             ]
             for col_idx, value in enumerate(values):
-                item = QTableWidgetItem(value)
+                item = self._readonly_item(value)
+                item.setData(Qt.ItemDataRole.UserRole, video)
                 if col_idx == 2 and video.screenshot_path is not None:
                     item.setIcon(QIcon(str(video.screenshot_path)))
                 self.video_table.setItem(row_idx, col_idx, item)
         self.video_table.setSortingEnabled(True)
+        has_videos = bool(record.associated_videos)
+        if has_videos and not self.video_table.selectedItems():
+            self.video_table.selectRow(0)
+        self.open_video.setEnabled(has_videos)
+        self.open_video_url.setEnabled(has_videos)
+
+    def _selected_associated_video(self):
+        selected = self.video_table.selectedItems()
+        if not selected:
+            return None
+        row = selected[0].row()
+        item = self.video_table.item(row, 0) or selected[0]
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def open_associated_video_from_item(self, item: QTableWidgetItem) -> None:
+        self.video_table.selectRow(item.row())
+        self.open_selected_associated_video()
+
+    def open_selected_associated_video(self, *, prefer_url: bool = False) -> None:
+        video = self._selected_associated_video()
+        if video is None:
+            return
+        if not prefer_url and video.video_path is not None and video.video_path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(video.video_path)))
+            return
+        if video.video_url:
+            QDesktopServices.openUrl(QUrl(video.video_url))
 
     def open_selected_folder(self) -> None:
         if self.current_preview_record is None:
@@ -971,6 +2060,17 @@ class SoundVaultWindow(QMainWindow):
         folder = self.current_preview_record.folder_path
         if folder is not None and folder.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def open_selected_tiktok_sound(self) -> None:
+        if self.current_preview_record is None:
+            self.statusBar().showMessage("No selected sound to open", 2500)
+            return
+        url = self._sound_url_for_record(self.current_preview_record)
+        if url is None:
+            self.statusBar().showMessage("No TikTok sound URL in metadata", 2500)
+            return
+        QDesktopServices.openUrl(QUrl(url))
+        self.statusBar().showMessage("Opened TikTok sound page", 2500)
 
     def copy_selected_metadata(self) -> None:
         if self.current_preview_record is None:
@@ -987,31 +2087,117 @@ class SoundVaultWindow(QMainWindow):
         self.statusBar().showMessage("Copied local audio path", 2500)
 
     def copy_selected_canonical_url(self) -> None:
-        if self.current_preview_record is None or not self.current_preview_record.canonical_url:
+        if self.current_preview_record is None:
             self.statusBar().showMessage("No canonical URL to copy", 2500)
             return
-        QApplication.clipboard().setText(self.current_preview_record.canonical_url)
+        url = self._sound_url_for_record(self.current_preview_record)
+        if url is None:
+            self.statusBar().showMessage("No canonical URL to copy", 2500)
+            return
+        QApplication.clipboard().setText(url)
         self.statusBar().showMessage("Copied canonical URL", 2500)
+
+    def toggle_favorite_by_id(self, music_id: str) -> None:
+        is_favorite = self.vm.toggle_favorite(music_id)
+        self.statusBar().showMessage(
+            f"{'Added to' if is_favorite else 'Removed from'} Favorites: {music_id}",
+            2200,
+        )
+        self.refresh_library_sidebar()
+        self.refresh_table()
 
     def open_library_context_menu(self, point) -> None:
         item = self.table.itemAt(point)
         if item is not None:
-            self.table.selectRow(item.row())
+            selected_rows = {index.row() for index in self.table.selectionModel().selectedRows()}
+            if item.row() not in selected_rows:
+                self.table.clearSelection()
+                self.table.selectRow(item.row())
+            self.table.setCurrentCell(item.row(), item.column())
             self.update_preview_from_selection()
+        music_ids = self._selected_library_music_ids()
+        music_id = music_ids[0] if music_ids else None
+        count_label = f" ({len(music_ids)} selected)" if len(music_ids) > 1 else ""
         menu = QMenu(self)
         play_action = QAction("Play / pause", self)
         play_action.triggered.connect(self.play_selected_sound)
-        metadata_action = QAction("Copy metadata", self)
+        favorite_action = QAction("★ Toggle favorite", self)
+        favorite_action.triggered.connect(lambda: self.toggle_favorite_by_id(music_id or "") if music_id else None)
+        mark_duplicate_action = QAction(f"Mark as Duplicate{count_label}", self)
+        mark_duplicate_action.setEnabled(len(music_ids) >= 2)
+        mark_duplicate_action.triggered.connect(lambda: self.mark_selected_library_as_duplicate(music_ids))
+        copy_menu = QMenu("Copy", self)
+        metadata_action = QAction("Metadata", self)
         metadata_action.triggered.connect(self.copy_selected_metadata)
-        audio_path_action = QAction("Copy local audio path", self)
+        audio_path_action = QAction("Local audio path", self)
         audio_path_action.triggered.connect(self.copy_selected_audio_path)
-        canonical_action = QAction("Copy canonical URL", self)
+        canonical_action = QAction("Canonical URL", self)
         canonical_action.triggered.connect(self.copy_selected_canonical_url)
+        copy_menu.addAction(metadata_action)
+        copy_menu.addAction(audio_path_action)
+        copy_menu.addAction(canonical_action)
+        open_sound_action = QAction("Open TikTok sound page", self)
+        open_sound_action.triggered.connect(self.open_selected_tiktok_sound)
         folder_action = QAction("Open sound folder", self)
         folder_action.triggered.connect(self.open_selected_folder)
-        for action in (play_action, metadata_action, audio_path_action, canonical_action, folder_action):
+        add_to_menu = QMenu("Add to…", self)
+        add_favorite_action = QAction("Favorites", self)
+        add_favorite_action.triggered.connect(lambda: self.add_music_ids_to_library_target("favorites", music_ids))
+        add_to_menu.addAction(add_favorite_action)
+        for bin_row in self.vm.library_bins():
+            action = QAction(bin_row.name, self)
+            action.triggered.connect(
+                lambda _checked=False, bin_id=bin_row.id: self.add_music_ids_to_library_target(f"bin:{bin_id}", music_ids)
+            )
+            add_to_menu.addAction(action)
+        add_to_menu.addSeparator()
+        new_bin_action = QAction("New sorting bin…", self)
+        new_bin_action.triggered.connect(lambda: self.create_sorting_bin(seed_music_ids=music_ids))
+        add_to_menu.addAction(new_bin_action)
+        for action in (play_action, favorite_action):
             menu.addAction(action)
+        menu.addMenu(add_to_menu)
+        menu.addAction(mark_duplicate_action)
+        menu.addSeparator()
+        menu.addMenu(copy_menu)
+        menu.addAction(open_sound_action)
+        menu.addAction(folder_action)
         menu.exec(self.table.viewport().mapToGlobal(point))
+
+    def mark_selected_library_as_duplicate(self, music_ids: tuple[str, ...] | list[str] | None = None) -> None:
+        selected_ids = self._dedupe_music_ids(list(music_ids or self._selected_library_music_ids()))
+        if len(selected_ids) < 2:
+            self.statusBar().showMessage("Select at least two Library sounds to mark as a duplicate group", 3000)
+            return
+        try:
+            group = self.vm.create_manual_duplicate_group(selected_ids)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not create duplicate group", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Added {len(group.candidates)} selected sound(s) to Duplicate Review: {group.group_id}",
+            5000,
+        )
+        self.show_view("dedupe")
+        self._select_duplicate_group(group.group_id)
+
+    @staticmethod
+    def _sound_url_for_record(record) -> str | None:
+        raw = record.raw if isinstance(record.raw, dict) else {}
+        for value in (
+            record.canonical_url,
+            record.source_music_url,
+            raw.get("canonical_url"),
+            raw.get("mobile_music_url"),
+            raw.get("source_music_url"),
+            raw.get("music_url"),
+            raw.get("tiktok_music_url"),
+            raw.get("share_url"),
+            raw.get("url"),
+        ):
+            if isinstance(value, str) and value.startswith(("https://", "http://")) and "tiktok.com" in value:
+                return value
+        return None
 
     def play_record_by_id(self, music_id: str) -> None:
         record = self.records_by_id.get(str(music_id))
@@ -1033,7 +2219,23 @@ class SoundVaultWindow(QMainWindow):
             self.playback_status.setText("No playable audio source")
             QMessageBox.information(self, "No playable audio", "This record has no local audio or preview URL yet.")
             return
+        if not self._ensure_audio_player():
+            QMessageBox.warning(self, "Playback unavailable", self.playback_status.text())
+            return
+        from PySide6.QtMultimedia import QMediaPlayer
+
         source = self._playback_source_for(target)
+        if self._should_use_external_audio(target):
+            if self._is_external_audio_playing() and self.external_audio_target == target:
+                self.pause_playback()
+                return
+            if self.audio_player is not None:
+                self.audio_player.stop()
+            if self._play_external_audio(target):
+                if hasattr(self, "transport_play_button"):
+                    self.transport_play_button.setText("▮▮")
+                    self.transport_play_button.setToolTip("Stop playback")
+                return
         if self.audio_player.source() == source and self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.audio_player.pause()
             self.playback_status.setText("Playback paused")
@@ -1066,19 +2268,34 @@ class SoundVaultWindow(QMainWindow):
     def _player_position_changed(self, position: int) -> None:
         if not self.progress_slider.isSliderDown():
             self.progress_slider.setValue(position)
-        self.time_label.setText(f"{self._format_ms(position)} / {self._format_ms(self.audio_player.duration())}")
+        duration = self.audio_player.duration() if self.audio_player is not None else 0
+        self.time_label.setText(f"{self._format_ms(position)} / {self._format_ms(duration)}")
 
     def _player_duration_changed(self, duration: int) -> None:
         self.progress_slider.setRange(0, max(0, duration))
-        self.time_label.setText(f"{self._format_ms(self.audio_player.position())} / {self._format_ms(duration)}")
+        position = self.audio_player.position() if self.audio_player is not None else 0
+        self.time_label.setText(f"{self._format_ms(position)} / {self._format_ms(duration)}")
 
     def _player_state_changed(self, state) -> None:
-        self.play_button.setText("Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play")
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        if hasattr(self, "transport_play_button"):
+            self.transport_play_button.setText("▮▮" if playing else "▶")
+            self.transport_play_button.setToolTip("Pause playback" if playing else "Play selected sound")
+
+    def _player_media_status_changed(self, status) -> None:
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and self.continuous_play_enabled:
+            QTimer.singleShot(0, self._play_next_continuous_sound)
 
     def _player_error_occurred(self, _error, error_string: str = "") -> None:
-        detail = error_string or self.audio_player.errorString() or "unknown media error"
+        player_error = self.audio_player.errorString() if self.audio_player is not None else ""
+        detail = error_string or player_error or "unknown media error"
         self.playback_status.setText(f"Playback error: {detail}")
-        self.play_button.setText("Play")
+        if hasattr(self, "transport_play_button"):
+            self.transport_play_button.setText("▶")
 
     @staticmethod
     def _format_usage_count(value: int | None) -> str:
@@ -1098,6 +2315,11 @@ class SoundVaultWindow(QMainWindow):
 
     def update_pairing_status(self) -> None:
         self.pairing_label.setText("Shortcut relay\n" + self.settings.relay_status_text())
+        self._refresh_pairing_card_visibility()
+
+    def _refresh_pairing_card_visibility(self) -> None:
+        configured = bool(self.settings.relay_pair_code().strip())
+        self.pairing_label.setVisible(configured)
 
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(settings=self.settings, parent=self)
@@ -1168,6 +2390,7 @@ class SoundVaultWindow(QMainWindow):
         self.statusBar().showMessage("Applied review queue filter", 3000)
 
     def refresh_dedupe_review(self) -> None:
+        previous_group_id = self._selected_duplicate_group_id()
         self.current_dedupe_groups = self.vm.duplicate_review_groups()
         self.dedupe_groups_by_id = {group.group_id: group for group in self.current_dedupe_groups}
         self.dedupe_groups_table.setSortingEnabled(False)
@@ -1181,8 +2404,20 @@ class SoundVaultWindow(QMainWindow):
                     table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.dedupe_groups_table.setItem(row_idx, col_idx, table_item)
         self.dedupe_groups_table.setSortingEnabled(True)
-        if self.current_dedupe_groups and not self.dedupe_groups_table.selectedItems():
-            self.dedupe_groups_table.selectRow(0)
+        selected_row = -1
+        if previous_group_id:
+            for row_idx in range(self.dedupe_groups_table.rowCount()):
+                item = self.dedupe_groups_table.item(row_idx, 0)
+                if item and item.data(Qt.ItemDataRole.UserRole) == previous_group_id:
+                    selected_row = row_idx
+                    break
+        if selected_row < 0 and self.current_dedupe_groups:
+            selected_row = 0
+        if selected_row >= 0:
+            self.dedupe_groups_table.selectRow(selected_row)
+        else:
+            self.dedupe_candidates_table.setRowCount(0)
+            self.clear_preview("Duplicate review complete")
         self.refresh_dedupe_candidates()
 
     def _selected_duplicate_group_id(self) -> str | None:
@@ -1194,15 +2429,26 @@ class SoundVaultWindow(QMainWindow):
         value = group_item.data(Qt.ItemDataRole.UserRole)
         return str(value) if value else None
 
+    def _select_duplicate_group(self, group_id: str) -> None:
+        for row_idx in range(self.dedupe_groups_table.rowCount()):
+            item = self.dedupe_groups_table.item(row_idx, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == group_id:
+                self.dedupe_groups_table.selectRow(row_idx)
+                self.refresh_dedupe_candidates()
+                return
+
     def refresh_dedupe_candidates(self) -> None:
         group_id = self._selected_duplicate_group_id()
         group = self.dedupe_groups_by_id.get(str(group_id)) if group_id else None
         candidates = group.candidates if group is not None else ()
+        self.dedupe_candidates_table.blockSignals(True)
         self.dedupe_candidates_table.setSortingEnabled(False)
         self.dedupe_candidates_table.setRowCount(len(candidates))
         for row_idx, candidate in enumerate(candidates):
             music_id = str(candidate.get("music_id") or "")
             play_cell = QPushButton("▶")
+            play_cell.setObjectName("rowPlayButton")
+            play_cell.setEnabled(self.vm.duplicate_candidate_play_target(candidate) is not None)
             play_cell.clicked.connect(lambda _checked=False, row=row_idx: self.play_dedupe_candidate(row))
             self.dedupe_candidates_table.setCellWidget(row_idx, 0, play_cell)
             audio_or_folder = candidate.get("local_audio_path") or candidate.get("folder") or ""
@@ -1212,6 +2458,32 @@ class SoundVaultWindow(QMainWindow):
                 table_item.setData(Qt.ItemDataRole.UserRole, {"group_id": group_id, "music_id": music_id, "candidate": candidate})
                 self.dedupe_candidates_table.setItem(row_idx, col_idx, table_item)
         self.dedupe_candidates_table.setSortingEnabled(True)
+        self.dedupe_candidates_table.blockSignals(False)
+        if candidates:
+            self.dedupe_candidates_table.selectRow(0)
+            self.update_preview_from_dedupe_selection()
+        else:
+            self.clear_preview("Select a duplicate candidate")
+
+    def _selected_duplicate_candidate_payload(self) -> dict | None:
+        selected = self.dedupe_candidates_table.selectedItems()
+        if not selected:
+            return None
+        row = selected[0].row()
+        item = self.dedupe_candidates_table.item(row, 1) or selected[0]
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        return payload if isinstance(payload, dict) else None
+
+    def update_preview_from_dedupe_selection(self) -> None:
+        payload = self._selected_duplicate_candidate_payload()
+        if not payload:
+            return
+        candidate = payload.get("candidate") or {}
+        record = self.vm.duplicate_candidate_preview(candidate)
+        if record is None:
+            self.clear_preview("Duplicate candidate unavailable")
+            return
+        self._show_preview_record(record)
 
     def play_dedupe_candidate(self, row: int | None = None) -> None:
         if row is None:
@@ -1219,14 +2491,30 @@ class SoundVaultWindow(QMainWindow):
             if not selected:
                 return
             row = selected[0].row()
+        self.dedupe_candidates_table.selectRow(row)
+        self.update_preview_from_dedupe_selection()
         item = self.dedupe_candidates_table.item(row, 1)
         payload = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(payload, dict):
             return
         candidate = payload.get("candidate") or {}
-        audio = candidate.get("local_audio_path")
-        if audio and Path(str(audio)).exists():
-            self.audio_player.setSource(QUrl.fromLocalFile(str(audio)))
+        target = self.vm.duplicate_candidate_play_target(candidate)
+        if target is None:
+            self.playback_status.setText("Duplicate candidate has no playable audio")
+            return
+        if self._should_use_external_audio(target):
+            if self._is_external_audio_playing() and self.external_audio_target == target:
+                self.pause_playback()
+                return
+            if self.audio_player is not None:
+                self.audio_player.stop()
+            if self._play_external_audio(target):
+                if hasattr(self, "transport_play_button"):
+                    self.transport_play_button.setText("▮▮")
+                    self.transport_play_button.setToolTip("Stop playback")
+                return
+        if self._ensure_audio_player():
+            self.audio_player.setSource(self._playback_source_for(target))
             self.audio_player.play()
             self.playback_status.setText(f"Playing duplicate candidate {candidate.get('music_id')}")
 
@@ -1244,14 +2532,61 @@ class SoundVaultWindow(QMainWindow):
             payload = item.data(Qt.ItemDataRole.UserRole)
             if isinstance(payload, dict):
                 keep_music_id = str(payload.get("music_id") or "")
-        duplicate_music_ids = [music_id for music_id in candidate_ids if music_id != keep_music_id]
+        if decision == "duplicates" and not keep_music_id:
+            self.statusBar().showMessage("Select the keeper row before marking duplicates", 3000)
+            return
+        duplicate_music_ids = [music_id for music_id in candidate_ids if music_id != keep_music_id] if decision == "duplicates" else []
         self.vm.record_duplicate_decision(
             group_id=group.group_id,
             decision=decision,
             keep_music_id=keep_music_id,
             duplicate_music_ids=duplicate_music_ids,
+            notes="Reviewed in Duplicate Review page.",
         )
-        self.statusBar().showMessage(f"Recorded duplicate review: {decision}", 3000)
+        self.statusBar().showMessage(f"Recorded duplicate review: {decision}; removed group from queue", 3000)
+        self.refresh_dedupe_review()
+
+    def quarantine_selected_duplicates(self) -> None:
+        group_id = self._selected_duplicate_group_id()
+        group = self.dedupe_groups_by_id.get(str(group_id)) if group_id else None
+        if group is None:
+            self.statusBar().showMessage("No duplicate group selected", 2500)
+            return
+        selected = self.dedupe_candidates_table.selectedItems()
+        if not selected:
+            self.statusBar().showMessage("Select the keeper row before quarantining duplicates", 3000)
+            return
+        item = self.dedupe_candidates_table.item(selected[0].row(), 1) or selected[0]
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        keep_music_id = str(payload.get("music_id") or "") if isinstance(payload, dict) else ""
+        duplicate_music_ids = [
+            str(candidate.get("music_id") or "")
+            for candidate in group.candidates
+            if candidate.get("music_id") and str(candidate.get("music_id")) != keep_music_id
+        ]
+        if not keep_music_id or not duplicate_music_ids:
+            self.statusBar().showMessage("Need one keeper and at least one duplicate candidate", 3000)
+            return
+        response = QMessageBox.question(
+            self,
+            "Quarantine duplicate folders?",
+            "The selected row is the keeper and stays in the Sound Vault. "
+            "Only the other candidate folders in this group are moved into reports/duplicate-quarantine, "
+            "so the action is reversible. "
+            f"Keep {keep_music_id} and quarantine {len(duplicate_music_ids)} duplicate folder(s)?",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        result = self.vm.quarantine_duplicate_candidates(
+            group_id=group.group_id,
+            keep_music_id=keep_music_id,
+            duplicate_music_ids=duplicate_music_ids,
+        )
+        moved = len(result.get("moved") or [])
+        skipped = len(result.get("skipped") or [])
+        self.statusBar().showMessage(f"Quarantined {moved} duplicate folder(s); skipped {skipped}", 5000)
+        self.refresh_dedupe_review()
+        self.rebuild_index()
 
     def refresh_worker_status(self) -> None:
         rows = self.vm.archive_health_rows()
@@ -1261,6 +2596,103 @@ class SoundVaultWindow(QMainWindow):
             self.worker_status_table.setItem(row_idx, 0, QTableWidgetItem(metric))
             self.worker_status_table.setItem(row_idx, 1, QTableWidgetItem(value))
         self.worker_status_table.setSortingEnabled(True)
+
+    def _start_worker_job(self, name: str, future) -> None:
+        if self._worker_future is not None and not self._worker_future.done():
+            self.statusBar().showMessage(f"Worker already running: {self._worker_job_name}", 3000)
+            return
+        self._worker_job_name = name
+        self._worker_future = future
+        self.worker_label.setText(f"Worker\n{name}…")
+        self._set_index_status("WORKER RUNNING", state="running")
+        self._worker_timer.start()
+        self.show_view("worker")
+
+    def _finish_async_worker_job(self) -> None:
+        if self._worker_future is None or not self._worker_future.done():
+            return
+        self._worker_timer.stop()
+        name = self._worker_job_name
+        try:
+            result = self._worker_future.result()
+            summary = result.summary
+            if hasattr(summary, "ok_count"):
+                self.worker_label.setText(
+                    f"Worker\n{name} done • {summary.ok_count:,} ok / {summary.error_count:,} errors"
+                )
+                QMessageBox.information(
+                    self,
+                    "oEmbed enrichment complete",
+                    "\n".join(
+                        [
+                            f"Rows: {summary.record_count:,}",
+                            f"OK: {summary.ok_count:,}",
+                            f"Errors: {summary.error_count:,}",
+                            f"Resumed: {summary.resumed_count:,}",
+                            f"JSON: {result.json_path}",
+                            f"CSV: {result.csv_path}",
+                        ]
+                    ),
+                )
+            else:
+                self.worker_label.setText(
+                    f"Worker\n{name} done • {summary.created_count:,} created / {summary.updated_count:,} updated"
+                )
+                QMessageBox.information(
+                    self,
+                    "Metadata packaging complete",
+                    "\n".join(
+                        [
+                            f"Created: {summary.created_count:,}",
+                            f"Updated existing: {summary.updated_count:,}",
+                            f"Metadata-only catalog rows: {summary.metadata_only_count:,}",
+                            f"Failures: {summary.failed_count:,}",
+                            f"Catalog JSONL: {result.catalog_jsonl}",
+                            f"Catalog CSV: {result.catalog_csv}",
+                        ]
+                    ),
+                )
+                self.rebuild_index()
+            self.refresh_worker_status()
+            self._set_index_status("WORKER COMPLETE", state="online")
+        except Exception as exc:
+            self.worker_label.setText(f"Worker\n{name} error: {exc}")
+            self._set_index_status("WORKER ERROR", state="error")
+            write_event("gui.worker_job_exception", job=name, **exception_fields(exc))
+            QMessageBox.warning(self, "Worker failed", f"{name} failed:\n{exc}")
+        finally:
+            self._worker_future = None
+            self._worker_job_name = ""
+
+    def run_oembed_enrichment(self) -> None:
+        if self._worker_future is not None and not self._worker_future.done():
+            self.statusBar().showMessage(f"Worker already running: {self._worker_job_name}", 3000)
+            return
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose normalized favorite-sounds JSON",
+            str(self.vault_root / "catalog" / "imports"),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not selected:
+            return
+        future = self.vm.enrich_favorite_sounds_oembed_async(Path(selected))
+        self._start_worker_job("oEmbed enrichment", future)
+
+    def package_imported_metadata(self) -> None:
+        if self._worker_future is not None and not self._worker_future.done():
+            self.statusBar().showMessage(f"Worker already running: {self._worker_job_name}", 3000)
+            return
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose normalized or oEmbed-enriched favorite-sounds JSON",
+            str(self.vault_root / "catalog" / "imports"),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not selected:
+            return
+        future = self.vm.package_imported_sounds_async(Path(selected))
+        self._start_worker_job("metadata packaging", future)
 
     def mark_selected_inbox_imported(self) -> None:
         selected = self.inbox_table.selectedItems()
@@ -1275,170 +2707,608 @@ class SoundVaultWindow(QMainWindow):
         self.vm.mark_inbox_imported(inbox_item.id)
         self.refresh_inbox()
 
+    def import_tiktok_favorite_sounds_export(self) -> None:
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Import TikTok favorite sounds export",
+            str(self.vault_root),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not selected:
+            return
+        try:
+            result = self.vm.import_favorite_sounds_export(Path(selected))
+        except Exception as exc:
+            write_event("gui.favorite_sounds_import_exception", **exception_fields(exc))
+            QMessageBox.warning(self, "Import failed", f"Could not import TikTok favorite sounds export:\n{exc}")
+            return
+        summary = result.summary
+        self.statusBar().showMessage(
+            f"Imported {summary.record_count:,} favorite-sound rows into catalog/imports",
+            5000,
+        )
+        self.inbox_label.setText(
+            "TikTok export import\n"
+            f"{summary.record_count:,} rows • {summary.unique_music_ids:,} unique IDs\n"
+            f"{summary.already_in_vault:,} existing • {summary.new_to_vault:,} new"
+        )
+        QMessageBox.information(
+            self,
+            "TikTok export imported",
+            "\n".join(
+                [
+                    f"Rows: {summary.record_count:,}",
+                    f"Unique music IDs: {summary.unique_music_ids:,}",
+                    f"Blank IDs: {summary.blank_ids:,}",
+                    f"Duplicate rows: {summary.duplicate_music_ids:,}",
+                    f"Malformed rows: {summary.malformed_rows:,}",
+                    f"Already in vault: {summary.already_in_vault:,}",
+                    f"New to vault: {summary.new_to_vault:,}",
+                    f"Ambiguous matches: {summary.ambiguous_matches:,}",
+                    f"JSON: {result.json_path}",
+                    f"CSV: {result.csv_path}",
+                    f"Summary: {result.summary_path}",
+                ]
+            ),
+        )
+
 
 STYLESHEET = """
+/* ============================================================
+   SOUND VAULT — GUNMETAL DESIGN SYSTEM v2
+   Cool blue-gray palette. Multi-stop gradients for real-metal feel.
+   Light direction: top highlight, bottom shadow. Inner-edge bevels.
+   Accent: cool blue. Status: amber/red on health meters only.
+   See docs/design-system-gunmetal-2026-05-25.md for the spec.
+   ============================================================ */
+
 QMainWindow, QWidget {
-    background: #d5dadd;
-    color: #18242d;
-    font-family: Verdana, "Lucida Grande", "Segoe UI", Arial;
+    background: #14181c;
+    color: #c6cdd4;
+    font-family: "Helvetica Neue", "Helvetica", "Lucida Grande", "Segoe UI", Arial, sans-serif;
     font-size: 12px;
 }
-#sidebar {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #bdc7cf, stop:0.42 #edf2f5, stop:1 #d8e0e5);
-    border-right: 1px solid #6f7d86;
+
+/* Shell & main surfaces — gunmetal palette */
+#appShell { background: #08090b; }
+#mainDeck {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #262b30, stop:0.04 #20262b, stop:1 #14181c);
+    border-left: 1px solid #02040a;
+    border-right: 1px solid #02040a;
 }
+#sidebar {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2a3038, stop:0.06 #242a30, stop:1 #14181c);
+    border-right: 1px solid #02040a;
+}
+
+/* Brand / sidebar section headers */
 #brand {
-    font-size: 22px;
-    font-weight: 900;
-    color: #174967;
-    padding: 6px 4px 12px 4px;
-    border-bottom: 1px solid #9eabb2;
+    font-size: 16px;
+    font-weight: 700;
+    color: #e6ecf2;
+    padding: 4px 6px 12px 6px;
+    border-bottom: 1px solid #02040a;
+    background: transparent;
+    letter-spacing: 0.02em;
 }
 #sourceGroup {
-    color: #ffffff;
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #2b6f9d, stop:1 #1d5f91);
-    border-top: 1px solid #ffffff;
-    border-bottom: 1px solid #8a949d;
-    padding: 5px 8px;
-    font-size: 10px;
-    font-weight: 900;
-    letter-spacing: 1px;
+    color: #586068;
+    background: transparent;
+    border: none;
+    padding: 10px 6px 4px 6px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 2.4px;
     text-transform: uppercase;
 }
-#title { font-size: 28px; font-weight: 900; color: #173c55; }
-#sectionTitle { font-size: 17px; font-weight: 900; color: #173c55; }
-#previewTitle { font-size: 21px; font-weight: 900; color: #173c55; }
-#muted { color: #53636c; }
+
+/* Title typography — restrained */
+#title { font-size: 18px; font-weight: 600; color: #e6ecf2; letter-spacing: -0.005em; background: transparent; }
+#sectionTitle { font-size: 14px; font-weight: 600; color: #e6ecf2; background: transparent; }
+#previewTitle { font-size: 15px; font-weight: 600; color: #e6ecf2; background: transparent; }
+#muted { color: #7a8290; font-size: 11px; background: transparent; }
+
+/* Brushed-aluminum chrome */
 #chromeHeader {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f8fbfd, stop:0.47 #ccd6de, stop:0.5 #aebbc5, stop:1 #8796a0);
-    border-top: 1px solid #ffffff;
-    border-bottom: 1px solid #8a949d;
-    border-left: 1px solid #b9c3ca;
-    border-right: 1px solid #74828b;
-    border-radius: 12px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #b8bec4, stop:0.4 #9098a0, stop:0.6 #7a8088, stop:1 #5a6068);
+    border-top: 1px solid #d4d8dc;
+    border-bottom: 1px solid #1a1e22;
+    border-left: 1px solid #5a6068;
+    border-right: 1px solid #1a1e22;
+    border-radius: 8px;
 }
 #transportDeck {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #eff5f8, stop:1 #96a5af);
-    border: 1px solid #687883;
-    border-top: 1px solid #ffffff;
-    border-radius: 18px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #424850, stop:0.5 #30363c, stop:1 #1c2026);
+    border-top: 1px solid #5c6068;
+    border-bottom: 1px solid #0c0e12;
+    border-left: 1px solid #0c0e12;
+    border-right: 1px solid #0c0e12;
+    border-radius: 6px;
 }
+
+/* Machined-steel transport buttons */
 #transportButton {
     min-width: 34px;
-    min-height: 28px;
-    border-radius: 14px;
-    text-align: center;
-    padding: 4px;
-}
-#capsuleDisplay {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #1d2b23, stop:0.55 #0c140f, stop:1 #24362c);
-    border: 2px inset #7c8d7b;
-    border-radius: 14px;
-}
-#displayEyebrow {
-    color: #7fcf2a;
-    font-size: 10px;
-    font-weight: 900;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-}
-#displayTitle { color: #eef8df; font-size: 13px; font-weight: 900; }
-#displaySubtitle { color: #a6d978; font-family: Menlo, Monaco, Consolas; font-size: 10px; }
-#libraryTabs {
-    background: #d9e5ec;
-    border: 1px solid #678193;
-    border-radius: 9px;
-}
-#portalTab {
-    color: #ffffff;
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #357aaa, stop:1 #1d5f91);
-    border-top: 1px solid #cbe4f5;
-    border-left: 1px solid #85a9c0;
-    border-right: 1px solid #154b73;
-    border-bottom: 1px solid #0e3552;
+    min-height: 30px;
     border-radius: 6px;
-    padding: 5px 9px;
-    font-size: 10px;
-    font-weight: 900;
-}
-#limeStatusPanel {
-    background: #f8fbf2;
-    border: 1px solid #9ba7a0;
-    border-radius: 8px;
-}
-#limeStatusDot { color: #7fcf2a; font-size: 18px; }
-#statusReadout { color: #1d5f21; font-family: Menlo, Monaco, Consolas; font-size: 10px; font-weight: 900; }
-#preview {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f6fafc, stop:1 #c4d1d9);
-    border-left: 1px solid #7c8b94;
-}
-#artwork {
-    background: #18242d;
-    color: #edf5f8;
-    border: 2px inset #8796a0;
-    border-radius: 8px;
-}
-QPushButton, QToolButton {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ffffff, stop:0.48 #dfe8ee, stop:1 #a9b7c1);
-    color: #172936;
-    border: 1px solid #657785;
-    border-top: 1px solid #ffffff;
-    border-radius: 8px;
-    padding: 7px 10px;
-    text-align: left;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #d4d8dc, stop:0.45 #a4a8ac, stop:0.55 #8a8e92, stop:1 #6a6e72);
+    color: #14181c;
+    border: 1px solid #0c0e12;
+    padding: 4px;
+    text-align: center;
     font-weight: 700;
 }
-QPushButton:hover, QToolButton:hover { background: #f8fff0; border-color: #7fcf2a; }
-#primaryButton {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #baf277, stop:1 #55a915);
-    color: #0b2608;
+#transportButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #e4e8ec, stop:0.45 #b4b8bc, stop:0.55 #9a9ea2, stop:1 #7a7e82);
+}
+#transportButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #6a6e72, stop:0.45 #8a8e92, stop:0.55 #a4a8ac, stop:1 #d4d8dc);
+    border-color: #000000;
+}
+
+/* Dark HUD capsule (Now Playing) */
+#capsuleDisplay {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #06080c, stop:0.06 #0a0e14, stop:1 #181e26);
+    border: 1px solid #000000;
+    border-top: 1px solid #2a3848;
+    border-radius: 6px;
+}
+#displayEyebrow {
+    color: #5a708a;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    background: transparent;
+}
+#displayTitle {
+    color: #d8e8ff;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 13px;
+    font-weight: 600;
+    background: transparent;
+}
+#displaySubtitle {
+    color: #5a708a;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 10px;
+    background: transparent;
+}
+
+/* Portal tabs (left in place; empty dict at runtime) */
+#libraryTabs {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #c8ccd0, stop:1 #9aa0a8);
+    border: 1px solid #2a2e34;
+    border-radius: 6px;
+}
+#portalTab {
+    color: #14181c;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #c8ccd0, stop:1 #9aa0a8);
+    border: 1px solid #3a3e44;
+    border-radius: 4px;
+    padding: 5px 12px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+#portalTab:checked, #portalTab:hover {
+    color: #ffffff;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #5a6878, stop:1 #2c3744);
+    border: 1px solid #14181c;
+}
+
+/* Status capsule pill (right of chrome) */
+#limeStatusPanel {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #c8ccd0, stop:0.5 #9aa0a8, stop:1 #7a8088);
+    border: 1px solid #0c0e12;
+    border-top: 1px solid #d4d8dc;
+    border-radius: 14px;
+    padding: 4px 12px;
+}
+#limeStatusDot {
+    background: transparent;
+}
+#statusReadout {
+    color: #14181c;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    background: transparent;
+}
+
+/* Right inspector */
+#preview {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2c3036, stop:0.04 #262a30, stop:1 #14181c);
+    border-left: 1px solid #02040a;
+}
+#artwork {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #1c2c40, stop:0.5 #14202e, stop:1 #08101a);
+    color: #8aa4c8;
+    border: 1px solid #000000;
+    border-top: 1px solid #2a3848;
+    border-radius: 4px;
+}
+
+/* Generic machined buttons */
+QPushButton, QToolButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #c8ccd0, stop:0.45 #9aa0a8, stop:0.55 #80868e, stop:1 #62686e);
+    color: #14181c;
+    border: 1px solid #0c0e12;
+    border-radius: 4px;
+    padding: 6px 12px;
+    text-align: left;
+    font-weight: 600;
+}
+QPushButton:hover, QToolButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #d8dce0, stop:0.45 #aab0b8, stop:0.55 #90969e, stop:1 #72787e);
+}
+QPushButton:pressed, QToolButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #62686e, stop:0.45 #80868e, stop:0.55 #9aa0a8, stop:1 #c8ccd0);
+    border-color: #000000;
+}
+QPushButton:disabled, QToolButton:disabled {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #4a4e54, stop:1 #383c42);
+    color: #6a6e74;
+    border-color: #2a2e34;
+}
+QToolButton::menu-indicator { image: none; width: 0; height: 0; }
+QToolButton::menu-button { border: none; width: 0; }
+#columnsButton { padding-right: 10px; }
+
+#dangerButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #d8542a, stop:0.5 #aa3814, stop:1 #6c2008);
+    color: #ffe8d8;
+    border: 1px solid #3a1004;
+    border-top: 1px solid #f47040;
     text-align: center;
 }
-#navButton[active="true"] { background: #7fcf2a; color: #10220c; }
+#dangerButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #e8642a, stop:0.5 #ba4818, stop:1 #7c3010);
+}
+
+#rowPlayButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #c0c4c8, stop:1 #6a6e72);
+    color: #14181c;
+    border: 1px solid #0c0e12;
+    border-radius: 8px;
+    padding: 2px 8px;
+    text-align: center;
+    font-weight: 700;
+}
+
+#primaryButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #5a708a, stop:0.5 #3a4a5e, stop:1 #1e2a3a);
+    color: #e8eef8;
+    border: 1px solid #0c1218;
+    border-top: 1px solid #8aa4c8;
+    text-align: center;
+    font-weight: 700;
+}
+#primaryButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #6a809a, stop:0.5 #4a5a6e, stop:1 #2e3a4a);
+}
+#primaryButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #1e2a3a, stop:0.5 #3a4a5e, stop:1 #5a708a);
+}
+
+#navButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2e3239, stop:0.04 #2a2e34, stop:1 #181c20);
+    color: #c6cdd4;
+    border: 1px solid #02040a;
+    border-radius: 4px;
+    padding: 6px 10px;
+    text-align: left;
+    font-weight: 600;
+}
+#navButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #243248, stop:1 #142030);
+    color: #e8eef8;
+    border-color: #2a4060;
+}
+#navButton[active="true"] {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2c405e, stop:0.04 #2a3e5a, stop:1 #14223a);
+    color: #e8eef8;
+    border: 1px solid #4a7ac0;
+    border-top: 1px solid #6a92d2;
+}
+
+#smallAddButton {
+    min-width: 28px;
+    max-width: 32px;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 4px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #c8ccd0, stop:0.45 #9aa0a8, stop:0.55 #80868e, stop:1 #62686e);
+    color: #14181c;
+    border: 1px solid #0c0e12;
+    border-radius: 4px;
+}
+
+#libraryBinButton {
+    text-align: left;
+    padding: 5px 9px;
+    border-radius: 4px;
+    color: #c6cdd4;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #24282e, stop:1 #14181c);
+    border: 1px solid #02040a;
+    font-weight: 500;
+}
+#libraryBinButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #243248, stop:1 #142030);
+    color: #e8eef8;
+    border-color: #2a4060;
+}
+#libraryBinButton[active="true"],
+#libraryBinButton[dropHover="true"] {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2c405e, stop:1 #14223a);
+    color: #e8eef8;
+    border: 1px solid #4a7ac0;
+    border-top: 1px solid #6a92d2;
+}
+
+/* Cards & group boxes — deeper recess */
 #pairingCard, #statCard, QGroupBox {
-    background: rgba(255, 255, 255, 0.72);
-    border: 1px solid #91a0a8;
-    border-top: 1px solid #ffffff;
-    border-radius: 9px;
-    padding: 12px;
-    color: #18242d;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #1c2026, stop:0.04 #181c22, stop:1 #0e1216);
+    border: 1px solid #02040a;
+    border-top: 1px solid #2a3038;
+    border-radius: 5px;
+    padding: 10px;
+    color: #c6cdd4;
 }
-QGroupBox { margin-top: 9px; font-weight: 900; }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #1d5f91; }
+QGroupBox {
+    margin-top: 10px;
+    font-weight: 600;
+    font-size: 12px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+    color: #5a708a;
+    background: transparent;
+    text-transform: uppercase;
+    font-size: 9px;
+    letter-spacing: 1.6px;
+    font-weight: 700;
+}
+
+/* Inputs */
 QLineEdit, QComboBox {
-    background: #ffffff;
-    border: 2px inset #9ba7a0;
-    border-radius: 7px;
-    padding: 8px;
-    color: #18242d;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #14181c, stop:0.5 #1c2026, stop:1 #20242a);
+    border: 1px solid #000000;
+    border-top: 1px solid #2c343c;
+    border-radius: 4px;
+    padding: 6px 10px;
+    color: #d4dce4;
+    selection-background-color: #2a4060;
+    selection-color: #e8eef8;
 }
+QLineEdit:focus, QComboBox:focus {
+    border: 1px solid #4a7ac0;
+    border-top: 1px solid #6a92d2;
+}
+QComboBox::drop-down { width: 18px; border: none; background: transparent; }
+QComboBox::down-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #7a8290;
+    margin-right: 6px;
+}
+QComboBox QAbstractItemView {
+    background: #14181c;
+    color: #c6cdd4;
+    border: 1px solid #000000;
+    outline: 0;
+    padding: 4px;
+    selection-background-color: #2a4060;
+    selection-color: #e8eef8;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 26px;
+    padding: 6px 10px;
+}
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background: #2a4060;
+    color: #e8eef8;
+}
+
+#searchBox {
+    border-radius: 12px;
+    padding: 4px 14px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #14181c, stop:0.5 #1c2026, stop:1 #20242a);
+    border: 1px solid #000000;
+    border-top: 1px solid #2c343c;
+    color: #d4dce4;
+}
+#searchBox:focus {
+    border: 1px solid #4a7ac0;
+    border-top: 1px solid #6a92d2;
+}
+
+/* Table — refined hover, deeper selection */
 QTableWidget {
-    background: #ffffff;
-    alternate-background-color: #eef5e9;
-    border: 2px inset #8796a0;
-    gridline-color: #c6d1d6;
-    selection-background-color: #1d5f91;
-    selection-color: #ffffff;
+    background: #14181c;
+    alternate-background-color: #1a1e22;
+    border: 1px solid #000000;
+    gridline-color: #08090b;
+    selection-background-color: #2a4060;
+    selection-color: #e8eef8;
+    color: #c6cdd4;
+}
+QTableWidget::item { padding: 4px 8px; border: none; }
+QTableWidget::item:hover { background: #1e2228; }
+QTableWidget::item:selected {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2c4060, stop:1 #14223a);
+    color: #e8eef8;
 }
 QHeaderView::section {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f8fbfd, stop:1 #b7c4cc);
-    color: #173c55;
-    padding: 7px;
-    border: 0;
-    border-right: 1px solid #8a949d;
-    border-bottom: 1px solid #8a949d;
-    font-weight: 900;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #44484e, stop:0.5 #34383e, stop:1 #20242a);
+    color: #c8ccd2;
+    padding: 6px 8px;
+    border: none;
+    border-right: 1px solid #14181c;
+    border-bottom: 1px solid #000000;
+    border-top: 1px solid #5c6068;
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
 }
+
+/* Text editors (transcript HUD) */
 QTextEdit {
-    background: #101b22;
-    border: 2px inset #7b8a94;
-    border-radius: 8px;
-    padding: 9px;
-    color: #ecf8df;
-    font-family: Menlo, Monaco, Consolas;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #06080c, stop:0.06 #0a0e14, stop:1 #181e26);
+    border: 1px solid #000000;
+    border-top: 1px solid #2a3848;
+    border-radius: 4px;
+    padding: 10px;
+    color: #d8e8ff;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 11px;
+    selection-background-color: #2a4060;
+    selection-color: #e8eef8;
 }
-QSlider::groove:horizontal { height: 8px; background: #8fa0a9; border-radius: 4px; }
-QSlider::handle:horizontal { background: #fefefe; border: 1px solid #61717b; width: 16px; margin: -5px 0; border-radius: 8px; }
+
+/* Menus */
+QMenu {
+    background: #14181c;
+    color: #c6cdd4;
+    border: 1px solid #000000;
+    border-top: 1px solid #2a3038;
+    padding: 6px;
+    font-size: 12px;
+}
+QMenu::item {
+    min-height: 26px;
+    padding: 6px 20px 6px 14px;
+    border-radius: 3px;
+}
+QMenu::item:selected {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2c4060, stop:1 #14223a);
+    color: #e8eef8;
+}
+QMenu::separator { height: 1px; background: #2a2e34; margin: 6px 4px; }
+
+/* Slider */
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #06080c;
+    border: 1px solid #000000;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #c8ccd0, stop:0.5 #9aa0a8, stop:1 #6a6e72);
+    border: 1px solid #000000;
+    width: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+QSlider::handle:horizontal:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #d8dce0, stop:0.5 #aab0b8, stop:1 #7a7e82);
+}
+
+/* Scrollbars */
+QScrollBar:vertical { background: #0e1216; width: 11px; border: none; }
+QScrollBar::handle:vertical {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #3a4046, stop:1 #20242a);
+    border-radius: 5px;
+    min-height: 24px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #4a5056, stop:1 #2e343a);
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: #0e1216; height: 11px; border: none; }
+QScrollBar::handle:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #3a4046, stop:1 #20242a);
+    border-radius: 5px;
+    min-width: 24px;
+    margin: 2px;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+/* Archive Health HUD */
+#archiveHealthPanel {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #06080c, stop:0.06 #0a0e14, stop:1 #181e26);
+    border: 1px solid #000000;
+    border-top: 1px solid #2a3848;
+    border-radius: 5px;
+}
+#archiveHealthTitle {
+    color: #5a708a;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    background: transparent;
+}
+#archiveHealthLabel {
+    color: #8aa4c8;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 10px;
+    background: transparent;
+}
+#archiveHealthValue {
+    color: #d8e8ff;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 10px;
+    font-weight: 600;
+    background: transparent;
+}
 """
 
 

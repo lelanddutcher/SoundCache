@@ -180,6 +180,42 @@ def test_build_index_includes_spoken_word_transcripts_in_search_metadata(tmp_pat
     assert db.search("money printer goes brrr")[0].music_id == "333"
 
 
+def test_build_index_includes_cloud_recovery_transcript_v2_text(tmp_path):
+    vault = tmp_path / "vault"
+    sound_dir = vault / "sounds" / "334 - Cloud Recovery - Creator"
+    sound_dir.mkdir(parents=True)
+    audio = sound_dir / "sound.m4a"
+    audio.write_bytes(b"audio")
+    (vault / "catalog").mkdir()
+    (vault / "catalog" / "sounds.jsonl").write_text(
+        json.dumps(
+            {
+                "tiktok_music_id": "334",
+                "tiktok_visible_title": "Original sound - @creator",
+                "paths": {"folder": str(sound_dir), "audio": str(audio)},
+                "speech_transcript": {"text": "", "language": ""},
+                "speech_transcript_v2": {
+                    "best_text": "cloud recovered lyric hook",
+                    "alternates": ["alternate cloud phrase"],
+                    "language": "en",
+                    "source_variant": "clean",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    [record] = build_index(vault)
+    db = IndexDatabase(tmp_path / "index.sqlite3")
+    db.rebuild([record])
+
+    assert "cloud recovered lyric hook" in record.transcript_text
+    assert "alternate cloud phrase" in record.transcript_text
+    assert record.transcript_language == "en"
+    assert db.search("recovered lyric hook")[0].music_id == "334"
+
+
 def test_build_index_prefers_true_sound_artwork_over_evidence_screenshots(tmp_path):
     vault = tmp_path / "vault"
     sound_dir = vault / "sounds" / "444 - Artwork Sound - Artist"

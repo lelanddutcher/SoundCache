@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sound Vault — Skeuomorphic UI Studies — 2026-05-25</title>
+<style>
+/* ============================================================
+   SOUND VAULT — SKEUOMORPHIC UI STUDIES
+   Four visual-language stances for the same core layout.
+   No real data. No JS. Pure CSS surface studies.
+   ============================================================ */
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#1a1a1c;color:#cfcfd2;font-family:-apple-system,system-ui,Segoe UI,sans-serif;font-size:13px;line-height:1.4}
+body{padding:64px 0 120px}
+
+/* page-level legend */
+.legend{max-width:1180px;margin:0 auto 56px;padding:0 40px}
+.legend h1{font-size:26px;font-weight:600;letter-spacing:-0.01em;color:#f4f4f6;margin-bottom:10px}
+.legend p{color:#8e8e94;max-width:680px;line-height:1.55}
+.legend .meta{margin-top:14px;font-size:11px;text-transform:uppercase;letter-spacing:0.12em;color:#5d5d63}
+
+/* variant frame */
+.variant{max-width:1280px;margin:0 auto 96px;padding:0 40px}
+.variant-header{display:flex;align-items:baseline;gap:18px;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid #2c2c30}
+.variant-header h2{font-size:18px;font-weight:600;color:#f0f0f4;letter-spacing:-0.005em}
+.variant-header .tag{font-size:10px;text-transform:uppercase;letter-spacing:0.16em;color:#7a7a80;padding:3px 8px;border:1px solid #3a3a3f;border-radius:3px}
+.variant-header .desc{color:#8a8a90;font-size:12px;margin-left:auto;max-width:540px;text-align:right}
+
+.window{
+  width:100%;
+  border-radius:8px;
+  overflow:hidden;
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,0.6),
+    0 30px 70px -20px rgba(0,0,0,0.7),
+    0 12px 24px -10px rgba(0,0,0,0.5);
+}
+
+/* shared layout grid inside each window — same in all variants */
+.app-grid{display:grid;grid-template-columns:212px 1fr 304px;grid-template-rows:auto auto 1fr;min-height:620px}
+.app-titlebar{grid-column:1/-1}
+.app-transport{grid-column:1/-1}
+.app-sidebar{grid-row:3/4}
+.app-main{grid-row:3/4}
+.app-inspector{grid-row:3/4}
+
+/* generic helpers used across variants */
+.row{display:flex;align-items:center;gap:8px}
+.spacer{flex:1}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.mono{font-family:"SF Mono","Menlo","Consolas","Courier New",monospace}
+
+/* ============================================================
+   VARIANT A — EARLY iTUNES (2001–2004 BRUSHED ALUMINUM)
+   ============================================================ */
+
+.va{font-family:"Lucida Grande","Lucida Sans Unicode",-apple-system,system-ui,sans-serif;color:#1a1a1a}
+
+/* aluminum pinstripe titlebar */
+.va .app-titlebar{
+  height:42px;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.55) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #e8e6dd 0%, #cfccc2 50%, #b4b0a4 100%);
+  border-bottom:1px solid #6f6c64;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.8), inset 0 -1px 0 rgba(0,0,0,0.18);
+  display:flex;align-items:center;padding:0 14px;gap:10px;
+}
+.va .traffic{display:flex;gap:8px;align-items:center}
+.va .tl{width:13px;height:13px;border-radius:50%;border:0.5px solid rgba(0,0,0,0.45);box-shadow:inset 0 1px 1px rgba(255,255,255,0.55), inset 0 -1px 1px rgba(0,0,0,0.2)}
+.va .tl.r{background:radial-gradient(circle at 30% 30%, #ff8a82 0%, #e54138 70%, #b3261d 100%)}
+.va .tl.y{background:radial-gradient(circle at 30% 30%, #ffe27d 0%, #f2b71f 70%, #b08316 100%)}
+.va .tl.g{background:radial-gradient(circle at 30% 30%, #b9f59a 0%, #4ec926 70%, #2e8c14 100%)}
+.va .app-title{
+  flex:1;text-align:center;font-size:13px;font-weight:600;color:#3a3a3a;
+  text-shadow:0 1px 0 rgba(255,255,255,0.9);
+  letter-spacing:0.02em;
+}
+
+/* transport — brushed aluminum bar with Aqua controls */
+.va .app-transport{
+  height:64px;
+  background:
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.06) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #dad8cf 0%, #c4c1b6 50%, #aeaaa0 100%);
+  border-bottom:1px solid #757269;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.7), inset 0 -1px 1px rgba(0,0,0,0.2);
+  display:flex;align-items:center;padding:0 18px;gap:14px;
+}
+.va .aqua-btn{
+  width:30px;height:30px;border-radius:50%;
+  background:
+    radial-gradient(ellipse at 50% 25%, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0) 55%),
+    linear-gradient(180deg, #f5f8fb 0%, #c0d2e4 49%, #6f9bc7 51%, #4b78a8 100%);
+  border:0.5px solid #345c84;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.95),
+    inset 0 -1px 1px rgba(0,0,0,0.25),
+    0 1px 2px rgba(0,0,0,0.3);
+  display:flex;align-items:center;justify-content:center;
+  color:#1d3556;font-size:12px;
+  cursor:default;
+}
+.va .aqua-btn.play{width:38px;height:38px;font-size:14px}
+.va .lcd{
+  flex:1;height:42px;margin:0 8px;
+  background:linear-gradient(180deg, #c8d5e2 0%, #98b2cd 100%);
+  border:1px solid #5d779a;border-radius:6px;
+  box-shadow:inset 0 2px 4px rgba(0,0,0,0.35), inset 0 -1px 0 rgba(255,255,255,0.4);
+  padding:6px 14px;
+  display:flex;flex-direction:column;justify-content:center;
+  font-size:11px;color:#1a2a40;
+  text-shadow:0 1px 0 rgba(255,255,255,0.4);
+}
+.va .lcd .now{font-weight:600;font-size:12px}
+.va .lcd .sub{color:#3e567a;font-size:10px;margin-top:1px}
+.va .lcd-bar{margin-top:4px;height:3px;background:rgba(0,0,0,0.25);border-radius:2px;overflow:hidden;box-shadow:inset 0 1px 1px rgba(0,0,0,0.3)}
+.va .lcd-bar i{display:block;height:100%;width:38%;background:linear-gradient(180deg,#7fb6ff,#3672c7);border-radius:2px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.5)}
+.va .search-pill{
+  width:220px;height:24px;border-radius:12px;
+  background:linear-gradient(180deg, #f8f8f4 0%, #e0ddd2 100%);
+  border:1px solid #7e7a6f;
+  box-shadow:inset 0 2px 3px rgba(0,0,0,0.22), 0 1px 0 rgba(255,255,255,0.6);
+  display:flex;align-items:center;padding:0 12px;gap:8px;
+  font-size:11px;color:#7a7a7a;
+}
+
+/* sidebar — white source list with disclosure triangles */
+.va .app-sidebar{
+  background:linear-gradient(180deg, #f3f3ee 0%, #e6e3d8 100%);
+  border-right:1px solid #888475;
+  box-shadow:inset -1px 0 0 rgba(255,255,255,0.4);
+  padding:10px 0;
+  font-size:12px;
+}
+.va .sl-group{font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:#7a7567;padding:8px 14px 4px;font-weight:700}
+.va .sl-item{display:flex;align-items:center;gap:6px;padding:3px 14px;color:#2a2a2a;cursor:default}
+.va .sl-item .tri{font-size:8px;color:#666;width:8px}
+.va .sl-item .ico{font-size:13px;width:14px;text-align:center}
+.va .sl-item.sel{
+  background:linear-gradient(180deg, #aaccef 0%, #5285c3 50%, #3a6db1 51%, #4877b8 100%);
+  color:#fff;text-shadow:0 1px 0 rgba(0,0,0,0.25);
+  border-top:1px solid #6a98cf;border-bottom:1px solid #2c4f87;
+}
+
+/* main library table */
+.va .app-main{background:#fff;display:flex;flex-direction:column;overflow:hidden}
+.va .tbl-head{
+  display:grid;grid-template-columns:24px 28px 1fr 1fr 70px 70px 60px;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.4) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #ede9dc 0%, #c8c3b3 100%);
+  border-bottom:1px solid #8a8675;
+  font-size:11px;font-weight:600;color:#3a3a3a;
+  text-shadow:0 1px 0 rgba(255,255,255,0.7);
+}
+.va .tbl-head > div{padding:5px 8px;border-right:1px solid #b7b1a0}
+.va .tbl-head > div:last-child{border-right:none}
+.va .tbl-row{
+  display:grid;grid-template-columns:24px 28px 1fr 1fr 70px 70px 60px;
+  font-size:12px;color:#1a1a1a;
+  border-bottom:1px solid #eeece4;
+}
+.va .tbl-row > div{padding:4px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .tbl-row:nth-child(even){background:#eef4fc}
+.va .tbl-row.sel{
+  background:linear-gradient(180deg, #5e95d4 0%, #3b73b6 100%);
+  color:#fff;text-shadow:0 1px 0 rgba(0,0,0,0.25);
+}
+.va .tbl-row .star{color:#f2b71f;text-shadow:0 1px 0 rgba(0,0,0,0.25)}
+.va .tbl-row.sel .star{color:#fff8c2}
+.va .tbl-row .play-btn{
+  width:18px;height:18px;border-radius:50%;
+  background:radial-gradient(ellipse at 50% 25%, #fff 0%, #d2dde8 60%, #8caac9 100%);
+  border:0.5px solid #6b89a6;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:8px;color:#234a78;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.9), 0 1px 1px rgba(0,0,0,0.2);
+}
+
+/* inspector — brushed metal evidence panel */
+.va .app-inspector{
+  background:
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.05) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #d8d5c9 0%, #bcb8aa 100%);
+  border-left:1px solid #807c70;
+  box-shadow:inset 1px 0 0 rgba(255,255,255,0.5);
+  padding:14px;display:flex;flex-direction:column;gap:12px;
+}
+.va .artwork-well{
+  width:100%;aspect-ratio:1;
+  background:linear-gradient(135deg, #4a5d75 0%, #2a3a52 100%);
+  border:1px solid #4a4a4a;
+  border-radius:4px;
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,0.55),
+    inset 0 -1px 0 rgba(255,255,255,0.1),
+    0 1px 0 rgba(255,255,255,0.6);
+  display:flex;align-items:center;justify-content:center;
+  position:relative;overflow:hidden;
+}
+.va .artwork-well::before{
+  content:"";position:absolute;inset:0;
+  background:radial-gradient(ellipse at 30% 20%, rgba(255,255,255,0.18) 0%, transparent 60%);
+}
+.va .artwork-well .glyph{font-size:54px;color:rgba(255,255,255,0.7);text-shadow:0 2px 4px rgba(0,0,0,0.5)}
+.va .insp-title{font-size:14px;font-weight:700;color:#1a1a1a;text-shadow:0 1px 0 rgba(255,255,255,0.5)}
+.va .insp-sub{font-size:11px;color:#4a4a4a;text-shadow:0 1px 0 rgba(255,255,255,0.5)}
+.va .insp-meta{
+  background:#f6f4ec;border:1px solid #8e8a7e;border-radius:4px;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,0.12);
+  padding:8px 10px;font-size:11px;color:#2a2a2a;display:grid;gap:3px;
+}
+.va .insp-meta .k{color:#7a7567;text-transform:uppercase;font-size:9px;letter-spacing:0.06em}
+.va .insp-meta .v{font-weight:600}
+
+/* ============================================================
+   VARIANT B — WINAMP / LIMEWIRE CLASSIC
+   ============================================================ */
+
+.vb{font-family:"Lucida Console","Courier New",monospace;color:#a8d090;background:#1a1d1a}
+
+.vb .app-titlebar{
+  height:24px;
+  background:linear-gradient(180deg, #5a5a5a 0%, #2a2a2a 100%);
+  border-bottom:1px solid #000;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.18);
+  display:flex;align-items:center;padding:0 8px;gap:8px;color:#e0e0e0;font-size:11px;
+}
+.vb .app-titlebar .lbl{font-weight:700;letter-spacing:0.08em;text-shadow:0 1px 0 #000}
+.vb .vb-winctrl{width:14px;height:12px;background:linear-gradient(180deg,#888,#555);border:1px solid #000;box-shadow:inset 0 1px 0 rgba(255,255,255,0.4);display:inline-flex;align-items:center;justify-content:center;color:#000;font-size:9px;font-weight:700;line-height:1}
+
+/* transport: chunky beveled buttons + LCD + spectrum */
+.vb .app-transport{
+  height:96px;
+  background:linear-gradient(180deg, #3c3c3c 0%, #232323 100%);
+  border-bottom:2px solid #000;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), inset 0 -1px 0 rgba(0,0,0,0.6);
+  padding:10px 12px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;
+}
+.vb .vb-btnrow{display:flex;gap:0}
+.vb .vb-btn{
+  width:34px;height:34px;
+  background:linear-gradient(180deg, #6e6e6e 0%, #4a4a4a 100%);
+  border:1px solid #000;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.45),
+    inset 0 -1px 0 rgba(0,0,0,0.55),
+    inset -1px 0 0 rgba(0,0,0,0.4),
+    inset 1px 0 0 rgba(255,255,255,0.18);
+  color:#1a1a1a;font-size:12px;
+  display:flex;align-items:center;justify-content:center;
+  text-shadow:0 1px 0 rgba(255,255,255,0.4);
+}
+.vb .vb-btn + .vb-btn{border-left:none}
+.vb .vb-btn.play{background:linear-gradient(180deg, #88a; #475)}
+.vb .vb-lcd{
+  height:74px;
+  background:
+    repeating-linear-gradient(0deg, rgba(0,0,0,0.35) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #0e1f0c 0%, #1a3015 100%);
+  border:2px solid #000;
+  box-shadow:
+    inset 0 2px 8px rgba(0,0,0,0.9),
+    inset 0 1px 0 rgba(80,255,80,0.06),
+    0 0 0 1px #555;
+  padding:8px 14px;
+  display:grid;grid-template-rows:auto auto 1fr;gap:4px;
+  color:#9eff6e;
+  text-shadow:0 0 6px rgba(120,255,90,0.55), 0 0 2px rgba(120,255,90,0.9);
+  font-family:"VT323","Courier New",monospace;
+}
+.vb .vb-lcd .seg{font-size:22px;letter-spacing:0.04em;line-height:1}
+.vb .vb-lcd .meta{font-size:11px;color:#7fcc5f;display:flex;justify-content:space-between}
+.vb .vb-lcd .spec{display:flex;align-items:flex-end;gap:2px;height:18px}
+.vb .vb-lcd .spec i{display:block;width:5px;background:linear-gradient(180deg, #d4ff9e 0%, #7fcc5f 60%, #2e8c14 100%);box-shadow:0 0 4px rgba(120,255,90,0.5)}
+.vb .vb-lcd .spec i:nth-child(1){height:35%}
+.vb .vb-lcd .spec i:nth-child(2){height:62%}
+.vb .vb-lcd .spec i:nth-child(3){height:48%}
+.vb .vb-lcd .spec i:nth-child(4){height:78%}
+.vb .vb-lcd .spec i:nth-child(5){height:55%}
+.vb .vb-lcd .spec i:nth-child(6){height:40%}
+.vb .vb-lcd .spec i:nth-child(7){height:88%}
+.vb .vb-lcd .spec i:nth-child(8){height:68%}
+.vb .vb-lcd .spec i:nth-child(9){height:50%}
+.vb .vb-lcd .spec i:nth-child(10){height:32%}
+.vb .vb-lcd .spec i:nth-child(11){height:60%}
+.vb .vb-lcd .spec i:nth-child(12){height:42%}
+.vb .vb-lcd .spec i:nth-child(13){height:74%}
+.vb .vb-lcd .spec i:nth-child(14){height:58%}
+.vb .vb-lcd .spec i:nth-child(15){height:30%}
+.vb .vb-lcd .spec i:nth-child(16){height:65%}
+.vb .vb-lcd .spec i:nth-child(17){height:46%}
+.vb .vb-lcd .spec i:nth-child(18){height:82%}
+.vb .vb-lcd .spec i:nth-child(19){height:55%}
+.vb .vb-lcd .spec i:nth-child(20){height:38%}
+
+.vb .vb-knob-col{display:flex;flex-direction:column;align-items:center;gap:4px;color:#e0e0e0;font-size:9px;letter-spacing:0.12em}
+.vb .vb-knob{
+  width:48px;height:48px;border-radius:50%;
+  background:
+    radial-gradient(circle at 35% 25%, #c0c0c0 0%, #707070 50%, #2a2a2a 100%);
+  border:1px solid #000;
+  box-shadow:
+    inset 0 2px 3px rgba(255,255,255,0.45),
+    inset 0 -3px 4px rgba(0,0,0,0.65),
+    0 2px 4px rgba(0,0,0,0.7);
+  position:relative;
+}
+.vb .vb-knob::after{
+  content:"";position:absolute;top:6px;left:50%;width:2px;height:14px;
+  background:#f8f8f8;transform:translateX(-50%) rotate(35deg);transform-origin:50% 16px;
+  box-shadow:0 0 2px rgba(0,0,0,0.6);
+  border-radius:1px;
+}
+
+/* sidebar — dark green with bright text */
+.vb .app-sidebar{
+  background:linear-gradient(180deg, #1a2a18 0%, #0f1a0e 100%);
+  border-right:2px solid #000;
+  box-shadow:inset -1px 0 0 rgba(255,255,255,0.05);
+  padding:8px 0;color:#88ff66;font-size:11px;
+}
+.vb .vb-group{
+  padding:6px 12px 4px;font-size:9px;color:#557a44;
+  text-transform:uppercase;letter-spacing:0.18em;font-weight:700;
+  border-bottom:1px solid #0a140a;
+}
+.vb .vb-item{display:flex;align-items:center;gap:8px;padding:4px 12px;color:#9eff6e;text-shadow:0 0 3px rgba(120,255,90,0.4)}
+.vb .vb-item .led{width:7px;height:7px;border-radius:50%;background:#2e4a22;box-shadow:inset 0 1px 1px rgba(0,0,0,0.6)}
+.vb .vb-item.sel{
+  background:linear-gradient(180deg, #2d4a2d 0%, #1d321d 100%);
+  border-top:1px solid #4a7a44;border-bottom:1px solid #000;
+  color:#d4ff9e;
+}
+.vb .vb-item.sel .led{background:radial-gradient(circle at 30% 30%, #d4ff9e, #2eaa14);box-shadow:0 0 6px rgba(120,255,90,0.9)}
+
+/* table */
+.vb .app-main{background:#0e1a0c;color:#9eff6e;display:flex;flex-direction:column;overflow:hidden}
+.vb .vb-thead{
+  display:grid;grid-template-columns:22px 24px 1fr 1fr 60px 60px 50px;
+  background:linear-gradient(180deg, #4a4a4a 0%, #2a2a2a 100%);
+  border-bottom:1px solid #000;
+  font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#d0d0d0;
+  text-shadow:0 1px 0 #000;
+}
+.vb .vb-thead > div{padding:4px 6px;border-right:1px solid #000;box-shadow:inset 0 1px 0 rgba(255,255,255,0.18)}
+.vb .vb-trow{
+  display:grid;grid-template-columns:22px 24px 1fr 1fr 60px 60px 50px;
+  font-size:11px;border-bottom:1px solid #14241a;color:#a8d090;
+  text-shadow:0 0 2px rgba(100,200,80,0.25);
+}
+.vb .vb-trow > div{padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb .vb-trow:nth-child(even){background:#142014}
+.vb .vb-trow.sel{background:linear-gradient(180deg, #3a5a32 0%, #284220 100%);color:#e8ffd4;border-bottom:1px solid #000}
+.vb .vb-trow .star{color:#f0c040;text-shadow:0 0 4px rgba(240,200,40,0.6)}
+.vb .vb-trow .pb{width:14px;height:14px;background:linear-gradient(180deg,#888,#555);border:1px solid #000;display:inline-flex;align-items:center;justify-content:center;font-size:7px;color:#000;box-shadow:inset 0 1px 0 rgba(255,255,255,0.4)}
+
+/* inspector */
+.vb .app-inspector{
+  background:linear-gradient(180deg, #2a2a2a 0%, #181818 100%);
+  border-left:2px solid #000;padding:12px;display:flex;flex-direction:column;gap:10px;
+}
+.vb .vb-art{
+  width:100%;aspect-ratio:1;
+  background:linear-gradient(135deg, #1a3015 0%, #0a1a08 100%);
+  border:2px solid #000;
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(120,255,90,0.06);
+  display:flex;align-items:center;justify-content:center;color:#5ea84a;font-size:48px;
+  text-shadow:0 0 12px rgba(120,255,90,0.5);
+  position:relative;overflow:hidden;
+}
+.vb .vb-art::before{content:"";position:absolute;inset:6px;border:1px dashed rgba(120,255,90,0.15)}
+.vb .vb-insp-title{font-size:14px;font-weight:700;color:#d4ff9e;letter-spacing:0.04em;text-shadow:0 0 6px rgba(120,255,90,0.45)}
+.vb .vb-insp-sub{font-size:11px;color:#7fcc5f}
+.vb .vb-meta{
+  background:#0e1a0c;border:1px solid #000;
+  box-shadow:inset 0 1px 4px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(120,255,90,0.06);
+  padding:8px 10px;color:#9eff6e;font-size:10px;display:grid;gap:3px;
+}
+.vb .vb-meta .k{color:#557a44;text-transform:uppercase;letter-spacing:0.1em;font-size:9px}
+.vb .vb-meta .v{font-size:11px;text-shadow:0 0 3px rgba(120,255,90,0.35)}
+
+/* ============================================================
+   VARIANT C — MAC OS X TIGER / LOGIC PRO BRUSHED METAL
+   ============================================================ */
+
+.vc{font-family:"Helvetica Neue","Helvetica",-apple-system,system-ui,sans-serif;color:#1a1a1a}
+
+.vc .app-titlebar{
+  height:46px;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.07) 0 1px, transparent 1px 2px),
+    repeating-linear-gradient(90deg, rgba(0,0,0,0.025) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #b8b6ae 0%, #888578 60%, #6f6c60 100%);
+  border-bottom:1px solid #2a2820;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.55), inset 0 -1px 0 rgba(0,0,0,0.45);
+  display:flex;align-items:center;padding:0 14px;gap:10px;
+}
+.vc .traffic{display:flex;gap:8px}
+.vc .vc-tl{width:13px;height:13px;border-radius:50%;border:0.5px solid rgba(0,0,0,0.55);box-shadow:inset 0 1px 1px rgba(255,255,255,0.55), inset 0 -1px 1px rgba(0,0,0,0.25)}
+.vc .vc-tl.r{background:radial-gradient(circle at 30% 30%, #ff8a82, #c4382f 75%, #8a1f17)}
+.vc .vc-tl.y{background:radial-gradient(circle at 30% 30%, #ffd870, #c69415 75%, #7a5908)}
+.vc .vc-tl.g{background:radial-gradient(circle at 30% 30%, #b6e89a, #3aa820 75%, #1f6a10)}
+.vc .vc-tabs{display:flex;gap:1px;margin-left:18px}
+.vc .vc-tab{
+  height:26px;padding:0 14px;display:flex;align-items:center;font-size:11px;font-weight:600;color:#1a1a1a;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.07) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #d0cdc2 0%, #a8a496 100%);
+  border:1px solid #4a4738;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.7), 0 1px 0 rgba(0,0,0,0.3);
+  text-shadow:0 1px 0 rgba(255,255,255,0.5);
+}
+.vc .vc-tab.sel{
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.1) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #5a6878 0%, #364452 100%);
+  color:#fff;text-shadow:0 -1px 0 rgba(0,0,0,0.4);
+  border-color:#1a242e;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.25), inset 0 -1px 0 rgba(0,0,0,0.4), 0 1px 0 rgba(0,0,0,0.3);
+}
+.vc .vc-title{margin-left:auto;font-size:12px;font-weight:700;color:#1a1a1a;text-shadow:0 1px 0 rgba(255,255,255,0.5);letter-spacing:0.01em}
+
+/* transport — graphite HUD strip */
+.vc .app-transport{
+  height:74px;
+  background:
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #4a4a48 0%, #2c2c2a 100%);
+  border-bottom:1px solid #1a1a18;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -1px 0 rgba(0,0,0,0.7);
+  padding:0 16px;
+  display:grid;grid-template-columns:auto 1fr auto auto;gap:14px;align-items:center;
+}
+.vc .vc-tprow{display:flex;gap:6px}
+.vc .vc-tpbtn{
+  width:32px;height:30px;border-radius:6px;
+  background:
+    linear-gradient(180deg, #d8d6cc 0%, #a8a496 50%, #7c7868 100%);
+  border:1px solid #1a1a14;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.8),
+    inset 0 -1px 1px rgba(0,0,0,0.25),
+    0 1px 0 rgba(0,0,0,0.6);
+  color:#1a1a1a;font-size:11px;display:flex;align-items:center;justify-content:center;
+  text-shadow:0 1px 0 rgba(255,255,255,0.4);
+}
+.vc .vc-hud{
+  height:50px;
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(120,180,255,0.08) 0%, transparent 60%),
+    linear-gradient(180deg, #0a0c10 0%, #1a1e26 100%);
+  border:1px solid #000;border-radius:6px;
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.9),
+    inset 0 1px 0 rgba(120,180,255,0.12),
+    0 1px 0 rgba(255,255,255,0.15);
+  padding:6px 14px;
+  display:grid;grid-template-columns:1fr auto;align-items:center;gap:14px;
+  font-family:"SF Mono","Menlo","Consolas",monospace;
+}
+.vc .vc-hud .nowblock{color:#a8c8e8;text-shadow:0 0 6px rgba(120,180,255,0.4)}
+.vc .vc-hud .now{font-size:13px;font-weight:600;letter-spacing:0.02em}
+.vc .vc-hud .sub{font-size:10px;color:#6e8aae;margin-top:2px}
+.vc .vc-hud .ts{font-size:22px;color:#d8e8ff;text-shadow:0 0 8px rgba(160,200,255,0.55);letter-spacing:0.04em;font-weight:300}
+.vc .vc-pill{
+  height:30px;display:flex;align-items:center;padding:0 12px;
+  background:linear-gradient(180deg, #d0cec3 0%, #908d80 100%);
+  border:1px solid #1a1a14;border-radius:15px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.7), 0 1px 0 rgba(0,0,0,0.5);
+  font-size:11px;color:#1a1a1a;gap:8px;
+  text-shadow:0 1px 0 rgba(255,255,255,0.45);
+}
+.vc .vc-search{
+  height:24px;width:200px;border-radius:12px;
+  background:linear-gradient(180deg, #1a1a1a 0%, #2c2c2c 100%);
+  border:1px solid #000;
+  box-shadow:inset 0 2px 4px rgba(0,0,0,0.7), 0 1px 0 rgba(255,255,255,0.2);
+  padding:0 12px;display:flex;align-items:center;color:#9aa4b0;font-size:11px;gap:8px;
+}
+
+/* sidebar — machined aluminum source list */
+.vc .app-sidebar{
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #383634 0%, #1f1e1c 100%);
+  border-right:1px solid #000;
+  box-shadow:inset -1px 0 0 rgba(255,255,255,0.06);
+  padding:10px 0;color:#cfcfd2;font-size:11px;
+}
+.vc .vc-sg{padding:8px 14px 4px;font-size:9px;text-transform:uppercase;letter-spacing:0.16em;color:#6e6e74;font-weight:700;text-shadow:0 1px 0 rgba(0,0,0,0.6)}
+.vc .vc-si{display:flex;align-items:center;gap:8px;padding:4px 14px;color:#cfcfd2;text-shadow:0 1px 0 rgba(0,0,0,0.5)}
+.vc .vc-si .ico{width:14px;text-align:center;color:#8a8a90;font-size:11px}
+.vc .vc-si.sel{
+  background:
+    radial-gradient(ellipse at 50% 50%, rgba(120,180,255,0.18) 0%, transparent 70%),
+    linear-gradient(180deg, #2a3848 0%, #1a2434 100%);
+  color:#e8eef8;
+  box-shadow:inset 0 1px 0 rgba(120,180,255,0.18), inset 0 -1px 0 rgba(0,0,0,0.6);
+  border-top:1px solid rgba(120,180,255,0.2);
+  border-bottom:1px solid rgba(0,0,0,0.6);
+}
+.vc .vc-si.sel .ico{color:#a8c8e8}
+
+/* hud panel at bottom of sidebar */
+.vc .vc-healthpanel{
+  margin:14px 10px 0;
+  background:linear-gradient(180deg, #0e1018 0%, #1a1e26 100%);
+  border:1px solid #000;border-radius:5px;
+  box-shadow:inset 0 1px 0 rgba(120,180,255,0.1), inset 0 2px 6px rgba(0,0,0,0.8);
+  padding:10px;
+  font-family:"SF Mono","Menlo",monospace;color:#a8c8e8;
+}
+.vc .vc-healthpanel .ttl{font-size:9px;text-transform:uppercase;letter-spacing:0.16em;color:#6e8aae;margin-bottom:6px}
+.vc .vc-bar{height:6px;background:rgba(0,0,0,0.6);border-radius:3px;box-shadow:inset 0 1px 2px rgba(0,0,0,0.8);overflow:hidden;margin-bottom:4px}
+.vc .vc-bar i{display:block;height:100%;background:linear-gradient(180deg, #a0d0ff, #4a7ac0);box-shadow:inset 0 1px 0 rgba(255,255,255,0.4), 0 0 6px rgba(120,180,255,0.45)}
+.vc .vc-bar.amber i{background:linear-gradient(180deg, #ffd87a, #d09810);box-shadow:inset 0 1px 0 rgba(255,255,255,0.4), 0 0 6px rgba(255,180,40,0.45)}
+.vc .vc-bar.red i{background:linear-gradient(180deg, #ff8a7a, #c43820);box-shadow:inset 0 1px 0 rgba(255,255,255,0.4), 0 0 6px rgba(255,100,60,0.45)}
+.vc .vc-stat{display:flex;justify-content:space-between;font-size:10px;color:#a8c8e8;text-shadow:0 0 3px rgba(120,180,255,0.3)}
+
+/* table — dense Logic-style */
+.vc .app-main{background:#1a1a1c;display:flex;flex-direction:column;overflow:hidden}
+.vc .vc-thead{
+  display:grid;grid-template-columns:22px 24px 1fr 1fr 64px 70px 56px;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #4c4a44 0%, #2c2a26 100%);
+  border-bottom:1px solid #000;
+  font-size:10px;font-weight:600;color:#d8d6cc;text-transform:uppercase;letter-spacing:0.08em;
+  text-shadow:0 1px 0 rgba(0,0,0,0.5);
+}
+.vc .vc-thead > div{padding:6px 8px;border-right:1px solid #1a1a18;box-shadow:inset 0 1px 0 rgba(255,255,255,0.18)}
+.vc .vc-trow{
+  display:grid;grid-template-columns:22px 24px 1fr 1fr 64px 70px 56px;
+  font-size:11px;border-bottom:1px solid #0e0e10;color:#d0d0d4;
+}
+.vc .vc-trow > div{padding:4px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vc .vc-trow:nth-child(even){background:#222226}
+.vc .vc-trow.sel{
+  background:linear-gradient(180deg, #2a4060 0%, #18283e 100%);
+  color:#e8eef8;
+  box-shadow:inset 0 1px 0 rgba(120,180,255,0.2), inset 0 -1px 0 rgba(0,0,0,0.6);
+}
+.vc .vc-trow .star{color:#f0c040;text-shadow:0 0 4px rgba(240,200,40,0.35)}
+.vc .vc-trow .pb{
+  width:16px;height:16px;border-radius:50%;
+  background:linear-gradient(180deg, #b8b6ae, #6c6a60);
+  border:1px solid #000;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.65), 0 1px 1px rgba(0,0,0,0.4);
+  display:inline-flex;align-items:center;justify-content:center;font-size:7px;color:#1a1a1a;
+}
+
+/* inspector */
+.vc .app-inspector{
+  background:
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 2px),
+    linear-gradient(180deg, #3a3a38 0%, #1f1e1c 100%);
+  border-left:1px solid #000;
+  box-shadow:inset 1px 0 0 rgba(255,255,255,0.06);
+  padding:14px;display:flex;flex-direction:column;gap:12px;
+}
+.vc .vc-artwell{
+  width:100%;aspect-ratio:1;
+  background:linear-gradient(135deg, #2a3848 0%, #0e1622 100%);
+  border:1px solid #000;border-radius:4px;
+  box-shadow:
+    inset 0 2px 8px rgba(0,0,0,0.8),
+    inset 0 1px 0 rgba(120,180,255,0.1),
+    0 1px 0 rgba(255,255,255,0.1);
+  display:flex;align-items:center;justify-content:center;color:rgba(168,200,232,0.55);font-size:56px;
+  position:relative;overflow:hidden;
+}
+.vc .vc-artwell::before{
+  content:"";position:absolute;inset:0;
+  background:radial-gradient(ellipse at 30% 15%, rgba(255,255,255,0.18) 0%, transparent 60%);
+}
+.vc .vc-insp-title{font-size:14px;font-weight:600;color:#f0f0f4;letter-spacing:-0.005em}
+.vc .vc-insp-sub{font-size:11px;color:#9aa4b0}
+.vc .vc-insp-hud{
+  background:linear-gradient(180deg, #0e1018 0%, #1a1e26 100%);
+  border:1px solid #000;border-radius:5px;
+  box-shadow:inset 0 1px 0 rgba(120,180,255,0.12), inset 0 2px 6px rgba(0,0,0,0.8);
+  padding:10px 12px;color:#a8c8e8;font-family:"SF Mono","Menlo",monospace;font-size:10px;
+  display:grid;gap:5px;
+}
+.vc .vc-insp-hud .k{color:#6e8aae;text-transform:uppercase;letter-spacing:0.12em;font-size:9px}
+.vc .vc-insp-hud .v{color:#d8e8ff;font-size:11px;text-shadow:0 0 4px rgba(160,200,255,0.35)}
+
+/* ============================================================
+   VARIANT D — MYSPACE / EARLY SKEUO-WEB
+   ============================================================ */
+
+.vd{font-family:"Tahoma","Geneva","Verdana",sans-serif;color:#222;background:#f0f4fa}
+
+.vd .app-titlebar{
+  height:48px;
+  background:
+    repeating-linear-gradient(45deg, rgba(255,255,255,0.05) 0 6px, transparent 6px 12px),
+    linear-gradient(180deg, #4a78c8 0%, #2c5aa0 50%, #1c4480 100%);
+  border-bottom:2px solid #0c2860;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.45), inset 0 -2px 0 rgba(0,0,0,0.25);
+  display:flex;align-items:center;padding:0 16px;gap:14px;
+}
+.vd .vd-logo{
+  font-size:18px;font-weight:900;color:#fff;font-style:italic;
+  text-shadow:0 1px 0 rgba(0,0,0,0.45), 0 0 8px rgba(120,200,255,0.4);
+  letter-spacing:-0.01em;
+}
+.vd .vd-logo span{color:#ffe040;text-shadow:0 1px 0 rgba(0,0,0,0.55), 0 0 6px rgba(255,220,80,0.55)}
+.vd .vd-nav{display:flex;gap:6px;margin-left:auto}
+.vd .vd-navbtn{
+  height:28px;padding:0 14px;display:flex;align-items:center;font-size:11px;font-weight:700;color:#fff;
+  background:linear-gradient(180deg, #6294dc 0%, #2c5aa0 50%, #1a3a78 100%);
+  border:1px solid #0c2860;border-radius:14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.55),
+    inset 0 -1px 1px rgba(0,0,0,0.3),
+    0 1px 2px rgba(0,0,0,0.35);
+  text-shadow:0 -1px 0 rgba(0,0,0,0.4);
+  letter-spacing:0.02em;
+}
+
+/* transport — glossy bar with bright glass buttons */
+.vd .app-transport{
+  height:78px;
+  background:
+    linear-gradient(180deg, #ffffff 0%, #e0e8f4 50%, #c0cce0 100%);
+  border-bottom:2px solid #4a78c8;
+  box-shadow:inset 0 1px 0 #fff, inset 0 -2px 0 rgba(0,0,0,0.12);
+  padding:0 16px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;
+}
+.vd .vd-tprow{display:flex;gap:6px}
+.vd .vd-tpbtn{
+  width:42px;height:42px;border-radius:50%;
+  background:
+    radial-gradient(ellipse at 50% 25%, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0) 50%),
+    linear-gradient(180deg, #f0f6ff 0%, #a8c4ec 49%, #4878c0 51%, #1a3a78 100%);
+  border:1px solid #0c2860;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.95),
+    inset 0 -2px 2px rgba(0,0,0,0.25),
+    0 2px 4px rgba(0,0,0,0.35),
+    0 0 0 1px rgba(255,255,255,0.4);
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;
+  text-shadow:0 -1px 0 rgba(0,0,0,0.4);
+}
+.vd .vd-tpbtn.play{width:54px;height:54px;font-size:18px;background:
+  radial-gradient(ellipse at 50% 25%, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0) 50%),
+  linear-gradient(180deg, #ffd470 0%, #ff8e2a 49%, #d4541a 51%, #8a2a10 100%);border-color:#5a1808}
+.vd .vd-display{
+  height:54px;
+  background:
+    linear-gradient(180deg, #ffffff 0%, #e8f0fc 100%);
+  border:2px solid #4a78c8;border-radius:8px;
+  box-shadow:
+    inset 0 2px 3px rgba(0,0,0,0.12),
+    inset 0 1px 0 rgba(255,255,255,0.95),
+    0 1px 0 rgba(255,255,255,0.55);
+  padding:6px 14px;display:flex;flex-direction:column;justify-content:center;
+}
+.vd .vd-display .now{
+  font-size:15px;font-weight:700;color:#1a3a78;font-family:"Comic Sans MS","Marker Felt",cursive;
+  text-shadow:0 1px 0 #fff;letter-spacing:-0.01em;
+}
+.vd .vd-display .sub{font-size:11px;color:#4a78c8;font-weight:700}
+.vd .vd-display .bar{height:8px;background:#d8e0ec;border:1px solid #6a90c4;border-radius:4px;overflow:hidden;margin-top:4px;box-shadow:inset 0 1px 2px rgba(0,0,0,0.2)}
+.vd .vd-display .bar i{display:block;height:100%;width:42%;background:linear-gradient(180deg, #ffeb40, #ff8e2a 50%, #d4541a 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.55)}
+.vd .vd-search{
+  height:32px;width:220px;border-radius:16px;
+  background:linear-gradient(180deg, #fff 0%, #e8f0fc 100%);
+  border:2px solid #4a78c8;
+  box-shadow:inset 0 1px 3px rgba(0,0,0,0.15), 0 1px 0 #fff;
+  padding:0 14px;display:flex;align-items:center;font-size:12px;color:#7a90b8;font-weight:600;gap:8px;
+}
+
+/* sidebar — saturated gradient + glossy items */
+.vd .app-sidebar{
+  background:
+    linear-gradient(180deg, #ffe8a0 0%, #ffc05a 60%, #ff8e2a 100%);
+  border-right:2px solid #c44818;
+  box-shadow:inset -2px 0 0 rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.55);
+  padding:10px 0;font-size:12px;
+}
+.vd .vd-sg{
+  margin:8px 10px 6px;padding:5px 12px;
+  background:linear-gradient(180deg, #fff 0%, #fce8b8 100%);
+  border:1px solid #c47818;border-radius:5px;
+  box-shadow:inset 0 1px 0 #fff, 0 1px 0 rgba(0,0,0,0.15);
+  font-size:10px;text-transform:uppercase;letter-spacing:0.12em;font-weight:900;color:#7a3408;
+  text-shadow:0 1px 0 rgba(255,255,255,0.6);
+}
+.vd .vd-si{
+  margin:2px 8px;padding:5px 12px;
+  display:flex;align-items:center;gap:8px;color:#3a1a08;font-weight:700;
+  border-radius:4px;
+  text-shadow:0 1px 0 rgba(255,255,255,0.55);
+}
+.vd .vd-si .ico{width:14px;text-align:center}
+.vd .vd-si.sel{
+  background:
+    linear-gradient(180deg, #ffffff 0%, #b8d0f0 50%, #4a78c8 51%, #2c5aa0 100%);
+  color:#fff;text-shadow:0 -1px 0 rgba(0,0,0,0.45);
+  border:1px solid #0c2860;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.85),
+    inset 0 -1px 1px rgba(0,0,0,0.25),
+    0 1px 2px rgba(0,0,0,0.3);
+}
+
+/* table — patterned, glossy headers */
+.vd .app-main{background:repeating-linear-gradient(0deg, #fafdff 0 26px, #eef3fb 26px 52px);display:flex;flex-direction:column;overflow:hidden}
+.vd .vd-thead{
+  display:grid;grid-template-columns:24px 28px 1fr 1fr 64px 70px 56px;
+  background:linear-gradient(180deg, #6294dc 0%, #2c5aa0 50%, #1a3a78 100%);
+  border-bottom:2px solid #0c2860;
+  font-size:11px;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:0.06em;
+  text-shadow:0 -1px 0 rgba(0,0,0,0.4);
+}
+.vd .vd-thead > div{padding:7px 8px;border-right:1px solid rgba(255,255,255,0.25);box-shadow:inset 0 1px 0 rgba(255,255,255,0.5)}
+.vd .vd-trow{
+  display:grid;grid-template-columns:24px 28px 1fr 1fr 64px 70px 56px;
+  font-size:12px;color:#1a1a1a;
+  border-bottom:1px solid #d4dde8;
+}
+.vd .vd-trow > div{padding:5px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vd .vd-trow.sel{
+  background:linear-gradient(180deg, #ffeb70 0%, #ffc04a 50%, #ff8e2a 100%);
+  color:#3a1a08;font-weight:700;
+  border-top:1px solid #fff;border-bottom:1px solid #c44818;
+  text-shadow:0 1px 0 rgba(255,255,255,0.55);
+}
+.vd .vd-trow .star{color:#ff8e2a;text-shadow:0 1px 0 rgba(0,0,0,0.25)}
+.vd .vd-trow.sel .star{color:#c43818}
+.vd .vd-trow .pb{
+  width:20px;height:20px;border-radius:50%;
+  background:
+    radial-gradient(ellipse at 50% 25%, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0) 50%),
+    linear-gradient(180deg, #ffeb40 0%, #ff8e2a 49%, #d4541a 51%, #8a2a10 100%);
+  border:1px solid #5a1808;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.9), 0 1px 2px rgba(0,0,0,0.35);
+  display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:9px;
+  text-shadow:0 -1px 0 rgba(0,0,0,0.4);
+}
+
+/* inspector — bright glossy panel */
+.vd .app-inspector{
+  background:
+    linear-gradient(180deg, #d8e8fc 0%, #a8c4ec 100%);
+  border-left:2px solid #4a78c8;
+  box-shadow:inset 2px 0 0 rgba(255,255,255,0.45);
+  padding:14px;display:flex;flex-direction:column;gap:12px;
+}
+.vd .vd-art{
+  width:100%;aspect-ratio:1;
+  background:
+    radial-gradient(ellipse at 35% 20%, rgba(255,255,255,0.6) 0%, transparent 50%),
+    linear-gradient(135deg, #ff8e2a 0%, #d4541a 50%, #8a2a10 100%);
+  border:3px solid #fff;border-radius:6px;
+  box-shadow:
+    0 2px 6px rgba(0,0,0,0.35),
+    inset 0 0 0 1px rgba(0,0,0,0.45);
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:56px;
+  text-shadow:0 2px 4px rgba(0,0,0,0.5);
+}
+.vd .vd-insp-title{
+  font-size:18px;font-weight:900;color:#1a3a78;
+  font-family:"Comic Sans MS","Marker Felt",cursive;
+  text-shadow:0 1px 0 #fff, 0 0 8px rgba(120,180,255,0.4);
+  letter-spacing:-0.01em;
+}
+.vd .vd-insp-sub{font-size:12px;color:#4a78c8;font-weight:700;text-shadow:0 1px 0 #fff}
+.vd .vd-meta{
+  background:linear-gradient(180deg, #fff 0%, #f0f6ff 100%);
+  border:2px solid #4a78c8;border-radius:6px;
+  box-shadow:inset 0 1px 0 #fff, 0 1px 2px rgba(0,0,0,0.15);
+  padding:10px 12px;display:grid;gap:5px;font-size:11px;color:#1a3a78;
+}
+.vd .vd-meta .k{font-weight:900;color:#c44818;text-transform:uppercase;letter-spacing:0.08em;font-size:9px}
+.vd .vd-meta .v{font-weight:700}
+
+/* ============================================================
+   END
+   ============================================================ */
+</style>
+</head>
+<body>
+
+<header class="legend">
+  <h1>Sound Vault — Skeuomorphic UI Studies</h1>
+  <p>Four visual-language stances applied to the same core layout: title chrome, transport, sidebar, library table, evidence inspector. Static surface studies only — no real catalog data, no interaction, just light direction, gradient mapping, and texture. Pick a stance (or steal pieces) and we port back to QSS / QPainter.</p>
+  <div class="meta">2026-05-25 · v0 · abstract content</div>
+</header>
+
+<!-- ============================================================
+     VARIANT A — EARLY iTUNES (2001–2004 BRUSHED ALUMINUM)
+     ============================================================ -->
+<section class="variant va">
+  <header class="variant-header">
+    <h2>A — Early iTunes</h2>
+    <span class="tag">2001–2004 brushed aluminum</span>
+    <p class="desc">Pinstripe top bar. Aqua candy buttons. White source list with disclosure triangles. Candy-stripe blue selection. Soft Lucida Grande type.</p>
+  </header>
+
+  <div class="window">
+    <div class="app-grid">
+
+      <div class="app-titlebar">
+        <span class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></span>
+        <span class="app-title">Sound Vault</span>
+      </div>
+
+      <div class="app-transport">
+        <span class="aqua-btn">◀◀</span>
+        <span class="aqua-btn play">▶</span>
+        <span class="aqua-btn">▶▶</span>
+        <div class="lcd">
+          <div class="now">— Now Playing —</div>
+          <div class="sub">Selected sound · 0:42 / 1:54</div>
+          <div class="lcd-bar"><i></i></div>
+        </div>
+        <div class="search-pill">⌕ &nbsp;Search Library</div>
+      </div>
+
+      <aside class="app-sidebar">
+        <div class="sl-group">SOURCE</div>
+        <div class="sl-item"><span class="tri">▾</span><span class="ico">♫</span>Library</div>
+        <div class="sl-item sel"><span class="tri"></span><span class="ico">★</span>Favorites</div>
+        <div class="sl-item"><span class="tri"></span><span class="ico">⌂</span>Inbox</div>
+        <div class="sl-item"><span class="tri"></span><span class="ico">⎘</span>Review</div>
+        <div class="sl-item"><span class="tri"></span><span class="ico">⊟</span>Duplicate review</div>
+        <div class="sl-item"><span class="tri"></span><span class="ico">⚙</span>Worker</div>
+        <div class="sl-group">BINS</div>
+        <div class="sl-item"><span class="tri"></span><span class="ico">▤</span>Smart sort A</div>
+        <div class="sl-item"><span class="tri"></span><span class="ico">▤</span>Smart sort B</div>
+        <div class="sl-item"><span class="tri"></span><span class="ico">＋</span>New bin</div>
+      </aside>
+
+      <main class="app-main">
+        <div class="tbl-head">
+          <div></div>
+          <div></div>
+          <div>Sound</div>
+          <div>Source</div>
+          <div>Status</div>
+          <div>Pop.</div>
+          <div>Dur.</div>
+        </div>
+        <div class="tbl-row"><div class="star">★</div><div><span class="play-btn">▶</span></div><div>Sound 001</div><div>Source A</div><div>Packaged</div><div>1.2M</div><div>0:54</div></div>
+        <div class="tbl-row sel"><div class="star">★</div><div><span class="play-btn">▶</span></div><div>Sound 002 — selected</div><div>Source B</div><div>Packaged</div><div>820K</div><div>1:12</div></div>
+        <div class="tbl-row"><div class="star">☆</div><div><span class="play-btn">▶</span></div><div>Sound 003</div><div>Source A</div><div>Missing audio</div><div>3.4M</div><div>0:28</div></div>
+        <div class="tbl-row"><div class="star">★</div><div><span class="play-btn">▶</span></div><div>Sound 004</div><div>Source C</div><div>Packaged</div><div>540K</div><div>2:04</div></div>
+        <div class="tbl-row"><div class="star">☆</div><div><span class="play-btn">▶</span></div><div>Sound 005</div><div>Source B</div><div>Imported</div><div>—</div><div>0:46</div></div>
+        <div class="tbl-row"><div class="star">★</div><div><span class="play-btn">▶</span></div><div>Sound 006</div><div>Source D</div><div>Packaged</div><div>2.1M</div><div>1:36</div></div>
+        <div class="tbl-row"><div class="star">☆</div><div><span class="play-btn">▶</span></div><div>Sound 007</div><div>Source A</div><div>Review</div><div>78K</div><div>0:34</div></div>
+        <div class="tbl-row"><div class="star">★</div><div><span class="play-btn">▶</span></div><div>Sound 008</div><div>Source C</div><div>Packaged</div><div>910K</div><div>1:08</div></div>
+        <div class="tbl-row"><div class="star">☆</div><div><span class="play-btn">▶</span></div><div>Sound 009</div><div>Source B</div><div>Packaged</div><div>1.6M</div><div>0:52</div></div>
+        <div class="tbl-row"><div class="star">☆</div><div><span class="play-btn">▶</span></div><div>Sound 010</div><div>Source D</div><div>Missing transcript</div><div>240K</div><div>0:40</div></div>
+      </main>
+
+      <aside class="app-inspector">
+        <div class="artwork-well"><span class="glyph">♫</span></div>
+        <div>
+          <div class="insp-title">Sound 002</div>
+          <div class="insp-sub">Source B · 1:12</div>
+        </div>
+        <div class="insp-meta">
+          <div><span class="k">Status</span> &nbsp; <span class="v">Packaged</span></div>
+          <div><span class="k">Popularity</span> &nbsp; <span class="v">820K uses</span></div>
+          <div><span class="k">Transcript</span> &nbsp; <span class="v">Available</span></div>
+          <div><span class="k">Evidence</span> &nbsp; <span class="v">3 videos</span></div>
+          <div><span class="k">Folder</span> &nbsp; <span class="v">/sounds/sound-002</span></div>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     VARIANT B — WINAMP / LIMEWIRE CLASSIC
+     ============================================================ -->
+<section class="variant vb">
+  <header class="variant-header">
+    <h2>B — Winamp / LimeWire classic</h2>
+    <span class="tag">dark green LCD · chunky bevels</span>
+    <p class="desc">Inset CRT-style green LCD with glow. Chunky raised-bezel buttons. Real spectrum bars. Machined metal knobs. Rectangular, dense, monospaced.</p>
+  </header>
+
+  <div class="window">
+    <div class="app-grid">
+
+      <div class="app-titlebar">
+        <span class="lbl">SOUND VAULT 2.0</span>
+        <span class="spacer"></span>
+        <span class="vb-winctrl">_</span>
+        <span class="vb-winctrl">□</span>
+        <span class="vb-winctrl">×</span>
+      </div>
+
+      <div class="app-transport">
+        <div class="vb-btnrow">
+          <span class="vb-btn">⏮</span>
+          <span class="vb-btn">▶</span>
+          <span class="vb-btn">⏸</span>
+          <span class="vb-btn">⏭</span>
+          <span class="vb-btn">⏹</span>
+        </div>
+        <div class="vb-lcd">
+          <div class="seg">0:42 / 1:54</div>
+          <div class="meta"><span>SOUND 002 // SOURCE B</span><span>128 KBPS · STEREO</span></div>
+          <div class="spec">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+        </div>
+        <div class="vb-knob-col">
+          <div class="vb-knob"></div>
+          <div>VOL</div>
+        </div>
+      </div>
+
+      <aside class="app-sidebar">
+        <div class="vb-group">SOURCES</div>
+        <div class="vb-item"><span class="led"></span>LIBRARY</div>
+        <div class="vb-item sel"><span class="led"></span>FAVORITES</div>
+        <div class="vb-item"><span class="led"></span>INBOX</div>
+        <div class="vb-item"><span class="led"></span>REVIEW</div>
+        <div class="vb-item"><span class="led"></span>DEDUPE</div>
+        <div class="vb-item"><span class="led"></span>WORKER</div>
+        <div class="vb-group">BINS</div>
+        <div class="vb-item"><span class="led"></span>SMART A</div>
+        <div class="vb-item"><span class="led"></span>SMART B</div>
+        <div class="vb-item"><span class="led"></span>+ NEW</div>
+      </aside>
+
+      <main class="app-main">
+        <div class="vb-thead">
+          <div></div>
+          <div></div>
+          <div>SOUND</div>
+          <div>SOURCE</div>
+          <div>STATUS</div>
+          <div>POP</div>
+          <div>DUR</div>
+        </div>
+        <div class="vb-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>SOUND.001</div><div>SRC_A</div><div>OK</div><div>1.2M</div><div>0:54</div></div>
+        <div class="vb-trow sel"><div class="star">★</div><div><span class="pb">▶</span></div><div>SOUND.002 [SEL]</div><div>SRC_B</div><div>OK</div><div>820K</div><div>1:12</div></div>
+        <div class="vb-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>SOUND.003</div><div>SRC_A</div><div>NO AUD</div><div>3.4M</div><div>0:28</div></div>
+        <div class="vb-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>SOUND.004</div><div>SRC_C</div><div>OK</div><div>540K</div><div>2:04</div></div>
+        <div class="vb-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>SOUND.005</div><div>SRC_B</div><div>IMP</div><div>—</div><div>0:46</div></div>
+        <div class="vb-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>SOUND.006</div><div>SRC_D</div><div>OK</div><div>2.1M</div><div>1:36</div></div>
+        <div class="vb-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>SOUND.007</div><div>SRC_A</div><div>RVW</div><div>78K</div><div>0:34</div></div>
+        <div class="vb-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>SOUND.008</div><div>SRC_C</div><div>OK</div><div>910K</div><div>1:08</div></div>
+        <div class="vb-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>SOUND.009</div><div>SRC_B</div><div>OK</div><div>1.6M</div><div>0:52</div></div>
+        <div class="vb-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>SOUND.010</div><div>SRC_D</div><div>NO TXT</div><div>240K</div><div>0:40</div></div>
+      </main>
+
+      <aside class="app-inspector">
+        <div class="vb-art">♫</div>
+        <div>
+          <div class="vb-insp-title">SOUND.002</div>
+          <div class="vb-insp-sub">// SRC_B · 1:12</div>
+        </div>
+        <div class="vb-meta">
+          <div><span class="k">STATUS</span><div class="v">OK</div></div>
+          <div><span class="k">POPULARITY</span><div class="v">820,134 uses</div></div>
+          <div><span class="k">TRANSCRIPT</span><div class="v">PRESENT</div></div>
+          <div><span class="k">EVIDENCE</span><div class="v">3 VIDEOS</div></div>
+          <div><span class="k">PATH</span><div class="v">/SOUNDS/SOUND.002/</div></div>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     VARIANT C — MAC OS X TIGER / LOGIC PRO BRUSHED METAL
+     ============================================================ -->
+<section class="variant vc">
+  <header class="variant-header">
+    <h2>C — Logic Pro / Tiger brushed metal</h2>
+    <span class="tag">graphite · machined aluminum tabs · HUDs</span>
+    <p class="desc">Heavier brushed metal everywhere. Machined-aluminum tab bar. Dark glowing HUDs for readouts and archive health. Pro-audio density and restraint.</p>
+  </header>
+
+  <div class="window">
+    <div class="app-grid">
+
+      <div class="app-titlebar">
+        <span class="traffic"><span class="vc-tl r"></span><span class="vc-tl y"></span><span class="vc-tl g"></span></span>
+        <div class="vc-tabs">
+          <div class="vc-tab sel">LIBRARY</div>
+          <div class="vc-tab">EVIDENCE</div>
+          <div class="vc-tab">TRANSCRIPTS</div>
+          <div class="vc-tab">POPULARITY</div>
+        </div>
+        <div class="vc-title">Sound Vault — /vault/root</div>
+      </div>
+
+      <div class="app-transport">
+        <div class="vc-tprow">
+          <span class="vc-tpbtn">⏮</span>
+          <span class="vc-tpbtn">▶</span>
+          <span class="vc-tpbtn">⏭</span>
+        </div>
+        <div class="vc-hud">
+          <div class="nowblock">
+            <div class="now">SOUND 002 — SELECTED</div>
+            <div class="sub">SOURCE B · STEREO · 44.1 kHz</div>
+          </div>
+          <div class="ts">00:42 / 01:54</div>
+        </div>
+        <div class="vc-pill"><span class="dot" style="background:radial-gradient(circle at 30% 30%,#b6e89a,#3aa820);box-shadow:0 0 5px rgba(80,220,80,0.55)"></span> IDLE</div>
+        <div class="vc-search">⌕ &nbsp;search · filter · transcript</div>
+      </div>
+
+      <aside class="app-sidebar">
+        <div class="vc-sg">SOURCE</div>
+        <div class="vc-si"><span class="ico">♫</span>Library</div>
+        <div class="vc-si sel"><span class="ico">★</span>Favorites</div>
+        <div class="vc-si"><span class="ico">⌂</span>Inbox</div>
+        <div class="vc-si"><span class="ico">⎘</span>Review</div>
+        <div class="vc-si"><span class="ico">⊟</span>Duplicate review</div>
+        <div class="vc-si"><span class="ico">⚙</span>Worker</div>
+        <div class="vc-sg">BINS</div>
+        <div class="vc-si"><span class="ico">▤</span>Smart sort A</div>
+        <div class="vc-si"><span class="ico">▤</span>Smart sort B</div>
+        <div class="vc-si"><span class="ico">＋</span>New bin</div>
+
+        <div class="vc-healthpanel">
+          <div class="ttl">ARCHIVE HEALTH</div>
+          <div class="vc-bar"><i style="width:92%"></i></div>
+          <div class="vc-stat"><span>AUDIO</span><span>92%</span></div>
+          <div class="vc-bar amber"><i style="width:64%"></i></div>
+          <div class="vc-stat"><span>ARTWORK</span><span>64%</span></div>
+          <div class="vc-bar"><i style="width:78%"></i></div>
+          <div class="vc-stat"><span>TRANSCRIPT</span><span>78%</span></div>
+          <div class="vc-bar red"><i style="width:34%"></i></div>
+          <div class="vc-stat"><span>VIDEOS</span><span>34%</span></div>
+        </div>
+      </aside>
+
+      <main class="app-main">
+        <div class="vc-thead">
+          <div></div>
+          <div></div>
+          <div>SOUND</div>
+          <div>SOURCE</div>
+          <div>STATUS</div>
+          <div>POP.</div>
+          <div>DUR.</div>
+        </div>
+        <div class="vc-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 001</div><div>Source A</div><div>Packaged</div><div>1.2M</div><div>0:54</div></div>
+        <div class="vc-trow sel"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 002</div><div>Source B</div><div>Packaged</div><div>820K</div><div>1:12</div></div>
+        <div class="vc-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 003</div><div>Source A</div><div>Missing audio</div><div>3.4M</div><div>0:28</div></div>
+        <div class="vc-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 004</div><div>Source C</div><div>Packaged</div><div>540K</div><div>2:04</div></div>
+        <div class="vc-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 005</div><div>Source B</div><div>Imported</div><div>—</div><div>0:46</div></div>
+        <div class="vc-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 006</div><div>Source D</div><div>Packaged</div><div>2.1M</div><div>1:36</div></div>
+        <div class="vc-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 007</div><div>Source A</div><div>Review</div><div>78K</div><div>0:34</div></div>
+        <div class="vc-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 008</div><div>Source C</div><div>Packaged</div><div>910K</div><div>1:08</div></div>
+        <div class="vc-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 009</div><div>Source B</div><div>Packaged</div><div>1.6M</div><div>0:52</div></div>
+        <div class="vc-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 010</div><div>Source D</div><div>Missing transcript</div><div>240K</div><div>0:40</div></div>
+      </main>
+
+      <aside class="app-inspector">
+        <div class="vc-artwell">♫</div>
+        <div>
+          <div class="vc-insp-title">Sound 002</div>
+          <div class="vc-insp-sub">Source B · 1:12 · packaged</div>
+        </div>
+        <div class="vc-insp-hud">
+          <div><span class="k">STATUS</span></div>
+          <div class="v">PACKAGED</div>
+          <div><span class="k">POPULARITY</span></div>
+          <div class="v">820,134</div>
+          <div><span class="k">TRANSCRIPT</span></div>
+          <div class="v">PRESENT</div>
+          <div><span class="k">EVIDENCE</span></div>
+          <div class="v">3 videos</div>
+          <div><span class="k">FOLDER</span></div>
+          <div class="v">/sounds/sound-002</div>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     VARIANT D — MYSPACE / EARLY SKEUOMORPHIC WEB
+     ============================================================ -->
+<section class="variant vd">
+  <header class="variant-header">
+    <h2>D — MySpace / early skeuo-web</h2>
+    <span class="tag">glossy · saturated · drop shadows · custom-page energy</span>
+    <p class="desc">Saturated gradients. Glassy candy buttons. Tahoma + occasional script font. Patterned table rows. Decorative borders. Lovable maximalism.</p>
+  </header>
+
+  <div class="window">
+    <div class="app-grid">
+
+      <div class="app-titlebar">
+        <span class="vd-logo">SOUND <span>VAULT</span></span>
+        <div class="vd-nav">
+          <span class="vd-navbtn">HOME</span>
+          <span class="vd-navbtn">VAULT</span>
+          <span class="vd-navbtn">SETTINGS</span>
+        </div>
+      </div>
+
+      <div class="app-transport">
+        <div class="vd-tprow">
+          <span class="vd-tpbtn">⏮</span>
+          <span class="vd-tpbtn play">▶</span>
+          <span class="vd-tpbtn">⏭</span>
+        </div>
+        <div class="vd-display">
+          <div class="now">♪ Now Playing — Sound 002 ♪</div>
+          <div class="sub">From: Source B &nbsp;·&nbsp; 0:42 / 1:54</div>
+          <div class="bar"><i></i></div>
+        </div>
+        <div class="vd-search">🔍 &nbsp;Search the vault…</div>
+      </div>
+
+      <aside class="app-sidebar">
+        <div class="vd-sg">★ MY SOURCES</div>
+        <div class="vd-si"><span class="ico">♫</span>Library</div>
+        <div class="vd-si sel"><span class="ico">★</span>Favorites</div>
+        <div class="vd-si"><span class="ico">⌂</span>Inbox</div>
+        <div class="vd-si"><span class="ico">⎘</span>Review</div>
+        <div class="vd-si"><span class="ico">⊟</span>Duplicates</div>
+        <div class="vd-si"><span class="ico">⚙</span>Worker</div>
+        <div class="vd-sg">★ MY BINS</div>
+        <div class="vd-si"><span class="ico">▤</span>Smart sort A</div>
+        <div class="vd-si"><span class="ico">▤</span>Smart sort B</div>
+        <div class="vd-si"><span class="ico">＋</span>New bin</div>
+      </aside>
+
+      <main class="app-main">
+        <div class="vd-thead">
+          <div></div>
+          <div></div>
+          <div>Sound</div>
+          <div>Source</div>
+          <div>Status</div>
+          <div>Pop.</div>
+          <div>Dur.</div>
+        </div>
+        <div class="vd-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 001</div><div>Source A</div><div>Packaged</div><div>1.2M</div><div>0:54</div></div>
+        <div class="vd-trow sel"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 002 ♥</div><div>Source B</div><div>Packaged</div><div>820K</div><div>1:12</div></div>
+        <div class="vd-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 003</div><div>Source A</div><div>No audio</div><div>3.4M</div><div>0:28</div></div>
+        <div class="vd-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 004</div><div>Source C</div><div>Packaged</div><div>540K</div><div>2:04</div></div>
+        <div class="vd-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 005</div><div>Source B</div><div>Imported</div><div>—</div><div>0:46</div></div>
+        <div class="vd-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 006</div><div>Source D</div><div>Packaged</div><div>2.1M</div><div>1:36</div></div>
+        <div class="vd-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 007</div><div>Source A</div><div>Review</div><div>78K</div><div>0:34</div></div>
+        <div class="vd-trow"><div class="star">★</div><div><span class="pb">▶</span></div><div>Sound 008</div><div>Source C</div><div>Packaged</div><div>910K</div><div>1:08</div></div>
+        <div class="vd-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 009</div><div>Source B</div><div>Packaged</div><div>1.6M</div><div>0:52</div></div>
+        <div class="vd-trow"><div class="star">☆</div><div><span class="pb">▶</span></div><div>Sound 010</div><div>Source D</div><div>No transcript</div><div>240K</div><div>0:40</div></div>
+      </main>
+
+      <aside class="app-inspector">
+        <div class="vd-art">♫</div>
+        <div>
+          <div class="vd-insp-title">Sound 002</div>
+          <div class="vd-insp-sub">From: Source B &nbsp;·&nbsp; 1:12</div>
+        </div>
+        <div class="vd-meta">
+          <div><span class="k">Status</span> &nbsp; <span class="v">Packaged</span></div>
+          <div><span class="k">Popularity</span> &nbsp; <span class="v">820,134 uses</span></div>
+          <div><span class="k">Transcript</span> &nbsp; <span class="v">Present</span></div>
+          <div><span class="k">Evidence</span> &nbsp; <span class="v">3 videos</span></div>
+          <div><span class="k">Folder</span> &nbsp; <span class="v">/sounds/sound-002</span></div>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

@@ -26,6 +26,40 @@ def test_index_database_rebuilds_and_searches_records(tmp_path):
     assert db.stats().approved_sounds == 1
 
 
+def test_index_database_builds_rebuildable_fts_search_cache(tmp_path):
+    db = IndexDatabase(tmp_path / "index.sqlite3")
+    db.rebuild(
+        [
+            SoundRecord(
+                music_id="m1",
+                title="Needle Drop",
+                artist="Editor Memory",
+                tags=("dialogue", "catchphrase"),
+                status="approved",
+                raw={},
+                transcript_text="needle drop catchphrase from the chorus",
+            ),
+            SoundRecord(
+                music_id="m2",
+                title="Quiet Bed",
+                artist="Editor Memory",
+                tags=("soft",),
+                status="approved",
+                raw={},
+                transcript_text="ambient underscore",
+            ),
+        ]
+    )
+
+    with sqlite3.connect(tmp_path / "index.sqlite3") as sqlite:
+        assert sqlite.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'sounds_search'"
+        ).fetchone()
+
+    assert [record.music_id for record in db.search("need drop")] == ["m1"]
+    assert [record.music_id for record in db.search("needle!!! drop???")] == ["m1"]
+
+
 def test_index_database_empty_query_returns_all_records(tmp_path):
     db = IndexDatabase(tmp_path / "index.sqlite3")
     db.rebuild([])
@@ -50,6 +84,44 @@ def test_index_database_recreates_corrupt_cache_file(tmp_path):
     ])
 
     assert [record.music_id for record in db.search("recovered")] == ["m1"]
+
+
+def test_index_database_keeps_last_good_index_when_rebuild_fails(tmp_path):
+    db = IndexDatabase(tmp_path / "index.sqlite3")
+    db.rebuild(
+        [
+            SoundRecord(
+                music_id="stable",
+                title="Stable Cache",
+                artist="Creator",
+                tags=("safe",),
+                status="approved",
+                raw={},
+            )
+        ]
+    )
+
+    try:
+        db.rebuild(
+            [
+                SoundRecord(
+                    music_id="bad",
+                    title="Bad Cache",
+                    artist="Creator",
+                    tags=(),
+                    status="approved",
+                    raw={},
+                    usage_count=object(),
+                )
+            ]
+        )
+    except sqlite3.ProgrammingError:
+        pass
+    else:
+        raise AssertionError("unsupported SQLite value should fail rebuild")
+
+    assert [record.music_id for record in db.search("stable")] == ["stable"]
+    assert db.search("bad") == []
 
 
 def test_index_database_filters_status_and_evidence(tmp_path):
@@ -183,5 +255,6 @@ def test_index_database_migrates_legacy_schema_missing_search_text(tmp_path):
 
     with sqlite3.connect(db_path) as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(sounds)")}
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name = 'sounds_search'").fetchone()
     assert "search_text" in columns
     assert [record.music_id for record in index.search("legacy")] == ["m1"]

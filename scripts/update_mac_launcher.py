@@ -44,22 +44,26 @@ def _zip_directory(bundle: Path, *, dist: Path, zip_path: Path) -> None:
     if zip_path.exists():
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in sorted(bundle.rglob("*")):
+        for path in [bundle, *sorted(bundle.rglob("*"))]:
             arc = path.relative_to(dist)
-            info = zipfile.ZipInfo(str(arc))
-            info.create_system = 3
             mode = path.stat().st_mode
             if path.is_dir():
+                # Directory entries in zip archives must end in / for macOS Archive Utility,
+                # Finder, and ZipInfo.is_dir() to treat .app bundle paths as directories.
+                info = zipfile.ZipInfo(f"{arc}/")
+                info.create_system = 3
                 info.external_attr = ((mode | stat.S_IFDIR) & 0xFFFF) << 16
                 zf.writestr(info, b"")
             else:
+                info = zipfile.ZipInfo(str(arc))
+                info.create_system = 3
                 info.external_attr = (mode & 0xFFFF) << 16
                 zf.writestr(info, path.read_bytes())
 
 
 def _launcher_template(*, wheel_name: str, cache_version: str) -> str:
     return f'''#!/bin/zsh
-set -u
+set -eu
 
 LAUNCHER="${{0:A}}"
 CONTENTS="${{LAUNCHER:h:h}}"
@@ -73,72 +77,206 @@ LOG="$LOG_DIR/launcher.log"
 mkdir -p "$APP_SUPPORT" "$LOG_DIR"
 exec >> "$LOG" 2>&1
 
-echo "---- Sound Vault launch $(date -u '+%Y-%m-%dT%H:%M:%SZ') ----"
+phase() {{
+  echo ""
+  echo "---- phase: $1 ----"
+}}
+
+run_logged() {{
+  echo "+ $*"
+  "$@"
+}}
+
+alert_failure() {{
+  local code="$?"
+  if [[ "$code" -ne 0 ]]; then
+    echo "ERROR: Sound Vault launcher failed with exit code $code"
+    echo "Log: $LOG"
+    osascript -e 'display alert "Sound Vault failed to launch" message "Exit code: '"$code"'. Details are in ~/Library/Logs/Sound Vault/launcher.log"' >/dev/null 2>&1 || true
+  fi
+}}
+trap alert_failure EXIT
+
+echo "==== Sound Vault launcher $(date -u '+%Y-%m-%dT%H:%M:%SZ') ===="
+phase "preflight artifact paths"
 echo "launcher: $LAUNCHER"
 echo "app dir: $APP_DIR"
 echo "contents: $CONTENTS"
 echo "resources: $RESOURCES"
 echo "wheel: $WHEEL"
 echo "cache version: $VERSION"
+echo "shell: $SHELL"
+uname -a || true
+sw_vers 2>/dev/null || true
 
 if [[ ! -f "$WHEEL" ]]; then
   osascript -e 'display alert "Sound Vault package is missing its wheel" message "The launcher could not find the bundled app wheel. Details are in ~/Library/Logs/Sound Vault/launcher.log"'
   echo "ERROR: bundled wheel is missing: $WHEEL"
   exit 66
 fi
+ls -la "$APP_DIR" "$CONTENTS" "$CONTENTS/MacOS" "$RESOURCES" "$RESOURCES/wheelhouse" || true
 
-find_python() {{
+APPLE_SILICON="$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || echo 0)"
+REQUIRE_NATIVE_PYTHON="${{SOUND_VAULT_REQUIRE_NATIVE_PYTHON:-0}}"
+ALLOW_TRANSLATED_PYTHON="${{SOUND_VAULT_ALLOW_TRANSLATED_PYTHON:-0}}"
+
+python_candidates() {{
   for py in \
     "/opt/homebrew/bin/python3" \
     "/usr/local/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/Current/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" \
-    "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3"; do
-    if [[ -x "$py" ]]; then
-      "$py" - <<'PY'
+    "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3" \
+    "$(command -v python3 2>/dev/null || true)"; do
+    if [[ -n "$py" ]]; then
+      echo "$py"
+    fi
+  done
+}}
+
+python_ok() {{
+  local py="$1"
+  local require_native="${{2:-0}}"
+  SOUND_VAULT_APPLE_SILICON="$APPLE_SILICON" SOUND_VAULT_CHECK_NATIVE="$require_native" "$py" - <<'PY'
+import os
+import platform
 import sys
-raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+
+if sys.version_info < (3, 11):
+    raise SystemExit(1)
+if os.environ.get("SOUND_VAULT_CHECK_NATIVE") == "1":
+    if os.environ.get("SOUND_VAULT_APPLE_SILICON") == "1" and platform.machine() != "arm64":
+        raise SystemExit(2)
+raise SystemExit(0)
 PY
-      if [[ $? -eq 0 ]]; then
+}}
+
+find_python() {{
+  local py
+  if [[ "$APPLE_SILICON" == "1" ]]; then
+    for py in $(python_candidates); do
+      if [[ -x "$py" ]] && python_ok "$py" 1; then
         echo "$py"
         return 0
       fi
-    fi
-  done
-  if command -v python3 >/dev/null 2>&1; then
-    local found="$(command -v python3)"
-    "$found" - <<'PY'
-import sys
-raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
-PY
-    if [[ $? -eq 0 ]]; then
-      echo "$found"
-      return 0
+    done
+    if [[ "$REQUIRE_NATIVE_PYTHON" == "1" && "$ALLOW_TRANSLATED_PYTHON" != "1" ]]; then
+      return 1
     fi
   fi
+  for py in $(python_candidates); do
+    if [[ -x "$py" ]] && python_ok "$py" 0; then
+      echo "$py"
+      return 0
+    fi
+  done
   return 1
 }}
 
+phase "python discovery"
+echo "apple silicon: $APPLE_SILICON"
+echo "require native python: $REQUIRE_NATIVE_PYTHON"
+echo "allow translated python: $ALLOW_TRANSLATED_PYTHON"
+for py in $(python_candidates); do
+  if [[ -x "$py" ]]; then
+    "$py" - <<'PY' || true
+import platform, sys
+print(sys.executable, sys.version.replace(chr(10), " "), platform.machine(), platform.mac_ver())
+PY
+  else
+    echo "not executable/missing: $py"
+  fi
+done
+
 PYTHON="$(find_python || true)"
 if [[ -z "$PYTHON" ]]; then
+  if [[ "$APPLE_SILICON" == "1" && "$REQUIRE_NATIVE_PYTHON" == "1" && "$ALLOW_TRANSLATED_PYTHON" != "1" ]]; then
+    osascript -e 'display alert "Sound Vault needs native arm64 Python" message "Install Apple Silicon Python 3.11+ from python.org or Homebrew, or set SOUND_VAULT_ALLOW_TRANSLATED_PYTHON=1 for a translated fallback. Details are in ~/Library/Logs/Sound Vault/launcher.log"' >/dev/null 2>&1 || true
+    echo "ERROR: no native arm64 Python 3.11+ found"
+    exit 127
+  fi
   osascript -e 'display alert "Sound Vault needs Python 3.11+" message "Install Python 3 from python.org or Homebrew, then open Sound Vault again. Details are in ~/Library/Logs/Sound Vault/launcher.log"'
   echo "ERROR: no Python 3.11+ found"
   exit 127
 fi
 
-echo "python: $PYTHON"
+echo "selected python: $PYTHON"
+SELECTED_PYTHON_MACHINE="$("$PYTHON" - <<'PY'
+import platform
+print(platform.machine())
+PY
+)"
+echo "selected python architecture: $SELECTED_PYTHON_MACHINE"
+if [[ "$APPLE_SILICON" == "1" && "$SELECTED_PYTHON_MACHINE" != "arm64" ]]; then
+  echo "WARNING: selected Python is translated/non-native ($SELECTED_PYTHON_MACHINE). Native arm64 Python is preferred for PySide stability."
+  osascript -e 'display notification "Using translated Python; install arm64 Python for best stability." with title "Sound Vault"' >/dev/null 2>&1 || true
+fi
+
+phase "venv install/update"
+needs_rebuild=0
 if [[ ! -d "$APP_SUPPORT/venv" || ! -f "$APP_SUPPORT/.launcher-version" || "$(cat "$APP_SUPPORT/.launcher-version" 2>/dev/null)" != "$VERSION" ]]; then
+  needs_rebuild=1
+elif [[ ! -x "$APP_SUPPORT/venv/bin/sound-vault" ]]; then
+  echo "cache invalid: console script missing"
+  needs_rebuild=1
+elif ! "$APP_SUPPORT/venv/bin/python" -m pip check >/dev/null 2>&1; then
+  echo "cache invalid: pip check failed"
+  needs_rebuild=1
+fi
+
+if [[ "$needs_rebuild" -eq 1 ]]; then
   echo "creating/updating venv"
   rm -rf "$APP_SUPPORT/venv"
-  "$PYTHON" -m venv "$APP_SUPPORT/venv"
-  "$APP_SUPPORT/venv/bin/python" -m pip install --upgrade pip
-  "$APP_SUPPORT/venv/bin/python" -m pip install "${{WHEEL}}[gui]"
-  echo "$VERSION" > "$APP_SUPPORT/.launcher-version"
+  run_logged "$PYTHON" -m venv "$APP_SUPPORT/venv"
+  run_logged "$APP_SUPPORT/venv/bin/python" -m pip --version
+  run_logged "$APP_SUPPORT/venv/bin/python" -m pip install --upgrade pip
+  run_logged "$APP_SUPPORT/venv/bin/python" -m pip install "${{WHEEL}}[gui]"
+else
+  echo "using cached venv: $APP_SUPPORT/venv"
 fi
+
+phase "dependency smoke"
+run_logged "$APP_SUPPORT/venv/bin/python" -m pip --version
+run_logged "$APP_SUPPORT/venv/bin/python" -m pip show sound-vault-desktop PySide6 PySide6_Essentials PySide6_Addons shiboken6 watchdog
+echo "python -m pip check"
+run_logged "$APP_SUPPORT/venv/bin/python" -m pip check
+"$APP_SUPPORT/venv/bin/python" - <<'PY'
+import importlib.metadata as md
+import platform
+import sys
+print("python:", sys.executable)
+print("version:", sys.version.replace(chr(10), " "))
+print("platform:", platform.platform(), platform.machine(), platform.mac_ver())
+for dist in ("sound-vault-desktop", "PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6", "watchdog"):
+    try:
+        print(dist, md.version(dist))
+    except md.PackageNotFoundError:
+        print(dist, "MISSING")
+from PySide6.QtCore import QLibraryInfo
+from PySide6.QtWidgets import QApplication
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+print("qt:", QLibraryInfo.version().toString())
+print("qt plugins:", QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath))
+print("PySide import smoke OK")
+PY
+if [[ ! -x "$APP_SUPPORT/venv/bin/sound-vault" ]]; then
+  echo "ERROR: console script missing after install: $APP_SUPPORT/venv/bin/sound-vault"
+  rm -f "$APP_SUPPORT/.launcher-version"
+  exit 70
+fi
+echo "$VERSION" > "$APP_SUPPORT/.launcher-version"
+
+phase "app diagnostics"
+run_logged "$APP_SUPPORT/venv/bin/sound-vault" --diagnose
 
 export SOUND_VAULT_DEFAULT_VAULT="${{SOUND_VAULT_DEFAULT_VAULT:-$HOME/Documents/Sound Vault}}"
 export QT_MAC_WANTS_LAYER=1
+export QT_DEBUG_PLUGINS="${{QT_DEBUG_PLUGINS:-1}}"
+phase "app exec"
+echo "SOUND_VAULT_DEFAULT_VAULT=$SOUND_VAULT_DEFAULT_VAULT"
+echo "QT_DEBUG_PLUGINS=$QT_DEBUG_PLUGINS"
+trap - EXIT
 exec "$APP_SUPPORT/venv/bin/sound-vault"
 '''
 
@@ -147,13 +285,107 @@ def _command_template() -> str:
     return '''#!/bin/zsh
 set -u
 SCRIPT_DIR="${0:A:h}"
-APP="$SCRIPT_DIR/Sound Vault.app"
-LOG="$HOME/Library/Logs/Sound Vault/launcher.log"
-echo "Opening Sound Vault.app ..."
-open "$APP"
-echo "If it closes immediately, inspect: $LOG"
-'''
+LAUNCHER="$SCRIPT_DIR/Sound Vault.app/Contents/MacOS/SoundVault"
+LOG_DIR="$HOME/Library/Logs/Sound Vault"
+LOG="$LOG_DIR/launcher.log"
+HARNESS_LOG="$LOG_DIR/launch-harness.log"
+APP_SUPPORT="$HOME/Library/Application Support/Sound Vault"
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$HARNESS_LOG") 2>&1
 
+section() {
+  echo ""
+  echo "==== $1 ===="
+}
+
+dump_tail() {
+  local file="$1"
+  local lines="$2"
+  if [[ -f "$file" ]]; then
+    echo "---- tail -$lines $file ----"
+    tail -"$lines" "$file" 2>/dev/null || true
+  else
+    echo "missing log: $file"
+  fi
+}
+
+echo "==== Sound Vault launch harness $(date -u '+%Y-%m-%dT%H:%M:%SZ') ===="
+echo "script: $0"
+echo "script dir: $SCRIPT_DIR"
+echo "launcher: $LAUNCHER"
+echo "launcher log: $LOG"
+echo "harness log: $HARNESS_LOG"
+
+section "macOS / shell environment"
+uname -a || true
+sw_vers 2>/dev/null || true
+echo "shell: $SHELL"
+echo "path: $PATH"
+echo "home: $HOME"
+
+section "artifact structure"
+ls -la "$SCRIPT_DIR" || true
+ls -la "$SCRIPT_DIR/Sound Vault.app" "$SCRIPT_DIR/Sound Vault.app/Contents" "$SCRIPT_DIR/Sound Vault.app/Contents/MacOS" "$SCRIPT_DIR/Sound Vault.app/Contents/Resources/wheelhouse" 2>&1 || true
+/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$SCRIPT_DIR/Sound Vault.app/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c 'Print CFBundlePackageType' "$SCRIPT_DIR/Sound Vault.app/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$SCRIPT_DIR/Sound Vault.app/Contents/Info.plist" 2>/dev/null || true
+
+echo "launcher executable?"
+test -x "$LAUNCHER" && echo yes || echo no
+
+section "quarantine / gatekeeper hints"
+xattr -lr "$SCRIPT_DIR/Sound Vault.app" 2>&1 | head -120 || true
+spctl --assess --type execute -vv "$SCRIPT_DIR/Sound Vault.app" 2>&1 || true
+codesign -dv --verbose=4 "$SCRIPT_DIR/Sound Vault.app" 2>&1 || true
+
+section "python candidates"
+for py in \
+  /opt/homebrew/bin/python3 \
+  /usr/local/bin/python3 \
+  /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
+  /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
+  /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
+  /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+  "$(command -v python3 2>/dev/null || true)"; do
+  if [[ -n "$py" ]]; then
+    if [[ -x "$py" ]]; then
+      "$py" - <<'PY' || true
+import platform, sys
+print(sys.executable, sys.version.replace(chr(10), " "), platform.machine(), platform.mac_ver())
+PY
+    else
+      echo "missing/not executable: $py"
+    fi
+  fi
+done
+
+section "cached venv state before launch"
+cat "$APP_SUPPORT/.launcher-version" 2>/dev/null || echo "no launcher-version"
+if [[ -x "$APP_SUPPORT/venv/bin/python" ]]; then
+  "$APP_SUPPORT/venv/bin/python" -m pip --version 2>&1 || true
+  "$APP_SUPPORT/venv/bin/python" -m pip show sound-vault-desktop PySide6 PySide6_Essentials PySide6_Addons shiboken6 watchdog 2>&1 || true
+  "$APP_SUPPORT/venv/bin/python" -m pip check 2>&1 || true
+else
+  echo "no cached venv python yet"
+fi
+
+section "previous launcher log"
+dump_tail "$LOG" 160
+
+section "direct launcher execution"
+"$LAUNCHER"
+code="$?"
+echo "launcher exited with code $code"
+if [[ "$code" -ne 0 ]]; then
+  echo "Sound Vault failed with exit code $code. Last launcher log lines:"
+  tail -80 "$LOG" 2>/dev/null || true
+  dump_tail "$LOG" 160
+  echo ""
+  echo "Harness log saved at: $HARNESS_LOG"
+  read "?Press return to close this window..."
+  exit "$code"
+fi
+'''
 
 def _readme_template() -> str:
     return """Sound Vault Mac launcher

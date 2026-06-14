@@ -12,12 +12,12 @@ build/
 *.egg-info/
 
 # never commit scraped/private vault artifacts or auth state
-sounds/
-catalog/
-reports/
-workers/
-inbox/
-auth/
+/sounds/
+/catalog/
+/reports/
+/workers/
+/inbox/
+/auth/
 *.jsonl
 *.mp4
 *.m4a

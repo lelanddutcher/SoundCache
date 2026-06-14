@@ -10,6 +10,8 @@ import sys
 import time
 from typing import Any
 
+from sound_vault.vault.hashtags import aggregate_video_hashtags, enrich_video_record_hashtags, unique_hashtags
+
 
 @dataclass(frozen=True)
 class CaptureResult:
@@ -49,12 +51,33 @@ def valid_video_records(folder: Path) -> list[dict[str, Any]]:
     for record in [*manifest_records, *sidecar_records]:
         if not isinstance(record, dict):
             continue
-        video_path = Path(str(record.get("downloaded_video_path") or ""))
-        if not video_path.exists():
+        record = enrich_video_record_hashtags(record)
+        video_path = _rebased_video_path(folder, record.get("downloaded_video_path") or record.get("path"))
+        if video_path is None:
             continue
+        record["downloaded_video_path"] = str(video_path)
         video_id = str(record.get("video_id") or video_path.stem).strip()
         records_by_video_id[video_id] = record
     return sorted(records_by_video_id.values(), key=lambda record: int(record.get("rank") or 9999))
+
+
+def _rebased_video_path(folder: Path, value: Any) -> Path | None:
+    if not value:
+        return None
+    try:
+        path = Path(str(value))
+    except (OSError, ValueError):
+        return None
+    if path.exists():
+        return path
+    name = path.name
+    if not name:
+        return None
+    candidate = folder / "videos" / name
+    try:
+        return candidate if candidate.exists() else None
+    except OSError:
+        return None
 
 
 def repair_manifest_from_video_sidecars(folder: Path) -> None:
@@ -68,9 +91,18 @@ def repair_manifest_from_video_sidecars(folder: Path) -> None:
         1 for record in existing_records if isinstance(record, dict) and Path(str(record.get("downloaded_video_path") or "")).exists()
     )
     if existing_valid_count >= len(valid_records):
+        hashtags = aggregate_video_hashtags(valid_records)
+        if hashtags:
+            manifest["hashtags"] = list(hashtags)
+            manifest["associated_video_hashtags"] = list(hashtags)
+            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return
     manifest["records"] = valid_records
     manifest["captured_count"] = len(valid_records)
+    hashtags = aggregate_video_hashtags(valid_records)
+    if hashtags:
+        manifest["hashtags"] = list(hashtags)
+        manifest["associated_video_hashtags"] = list(hashtags)
     manifest.setdefault("source_music_id", folder.name.split(" -", 1)[0])
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -98,6 +130,19 @@ def update_metadata_from_manifest(folder: Path) -> None:
     metadata = read_json(metadata_path)
     valid_records = valid_video_records(folder)
     metadata["associated_video_count"] = len(valid_records)
+    associated_video_hashtags = aggregate_video_hashtags(valid_records)
+    if associated_video_hashtags:
+        metadata["associated_video_hashtags"] = list(associated_video_hashtags)
+        metadata["hashtags"] = list(
+            unique_hashtags(
+                [
+                    *metadata.get("hashtags", []),
+                    *associated_video_hashtags,
+                ]
+                if isinstance(metadata.get("hashtags"), list)
+                else [metadata.get("hashtags"), *associated_video_hashtags]
+            )
+        )
     paths = metadata.setdefault("paths", {})
     if isinstance(paths, dict):
         paths["associated_videos_manifest"] = str(folder / "associated_videos_manifest.json")
@@ -110,9 +155,29 @@ def update_metadata_from_manifest(folder: Path) -> None:
             "rank": record.get("rank"),
             "source_url": record.get("video_url"),
             "description": str(record.get("description") or "")[:500],
+            "hashtags": record.get("hashtags") or [],
         })
     metadata["assets"] = assets
     metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def backfill_existing_hashtag_metadata(vault: Path) -> dict[str, int]:
+    folders = 0
+    updated = 0
+    with_hashtags = 0
+    for metadata_path in sorted((vault / "sounds").glob("*/metadata.json")):
+        folder = metadata_path.parent
+        if not (folder / "associated_videos_manifest.json").exists() and not (folder / "videos").exists():
+            continue
+        before = read_json(metadata_path)
+        update_metadata_from_manifest(folder)
+        after = read_json(metadata_path)
+        folders += 1
+        if after.get("associated_video_hashtags"):
+            with_hashtags += 1
+        if before != after:
+            updated += 1
+    return {"folders": folders, "updated": updated, "with_hashtags": with_hashtags}
 
 
 def attempted_music_ids(log_path: Path) -> set[str]:
@@ -152,9 +217,15 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=15.0)
     parser.add_argument("--timeout", type=int, default=300, help="Per sound capture timeout in seconds")
     parser.add_argument("--retry-attempted", action="store_true", help="Retry music IDs that already have rows in the log")
+    parser.add_argument("--metadata-only", action="store_true", help="Only repair manifests/metadata from existing associated-video sidecars; do not launch capture")
     parser.add_argument("--fail-on-errors", action="store_true", help="Exit nonzero when any item remains below the requested video count")
     parser.add_argument("--log", type=Path, default=Path("/nas/TikTok Sound Vault/workers/associated-video-backfill.jsonl"))
     args = parser.parse_args()
+
+    if args.metadata_only:
+        summary = backfill_existing_hashtag_metadata(args.vault)
+        print(json.dumps(summary, indent=2))
+        return 0
 
     args.log.parent.mkdir(parents=True, exist_ok=True)
     queue = audit_queue(args.vault, minimum_videos=args.minimum_videos)

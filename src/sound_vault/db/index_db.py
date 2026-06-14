@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+import re
 import sqlite3
+from pathlib import Path
 
 from sound_vault.vault.indexer import SoundRecord
 
@@ -11,6 +12,9 @@ from sound_vault.vault.indexer import SoundRecord
 class IndexStats:
     total_sounds: int
     approved_sounds: int
+
+
+_FTS_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
 class IndexDatabase:
@@ -26,10 +30,38 @@ class IndexDatabase:
     def rebuild(self, records: list[SoundRecord]) -> None:
         deduped = {record.music_id: record for record in records}
         with self._connect() as db:
-            db.execute("DELETE FROM sounds")
-            db.executemany(
-                """
-                INSERT INTO sounds (
+            rebuild_table = "sounds_rebuild"
+            rebuild_search_table = "sounds_search_rebuild"
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("DROP TABLE IF EXISTS sounds_rebuild")
+                db.execute("DROP TABLE IF EXISTS sounds_search_rebuild")
+                self._create_sounds_table(db, rebuild_table)
+                self._create_search_table(db, rebuild_search_table)
+                self._insert_records(db, rebuild_table, list(deduped.values()))
+                self._insert_search_records(db, rebuild_search_table, list(deduped.values()))
+                db.execute("DROP TABLE sounds")
+                db.execute("DROP TABLE IF EXISTS sounds_search")
+                db.execute("ALTER TABLE sounds_rebuild RENAME TO sounds")
+                db.execute("ALTER TABLE sounds_search_rebuild RENAME TO sounds_search")
+                self._ensure_query_indexes(db)
+                db.commit()
+            except Exception:
+                db.rollback()
+                db.execute("DROP TABLE IF EXISTS sounds_rebuild")
+                db.execute("DROP TABLE IF EXISTS sounds_search_rebuild")
+                db.commit()
+                raise
+
+    def _insert_records(
+        self,
+        db: sqlite3.Connection,
+        table_name: str,
+        records: list[SoundRecord],
+    ) -> None:
+        db.executemany(
+            f"""
+                INSERT INTO {table_name} (
                     music_id, title, artist, tags, status, associated_video_count,
                     added_at, packaged_at, folder_path, local_audio_path, artwork_path,
                     evidence_image_count, usage_count, source_provider, source_confidence,
@@ -39,38 +71,51 @@ class IndexDatabase:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    (
-                        record.music_id,
-                        record.title,
-                        record.artist,
-                        ",".join(record.tags),
-                        record.status,
-                        record.associated_video_count,
-                        record.added_at,
-                        record.packaged_at,
-                        str(record.folder_path) if record.folder_path else "",
-                        str(record.local_audio_path) if record.local_audio_path else "",
-                        str(record.artwork_path) if record.artwork_path else "",
-                        len(record.evidence_images),
-                        record.usage_count,
-                        record.source_provider,
-                        record.source_confidence,
-                        record.vault_version,
-                        record.canonical_url,
-                        record.source_music_url,
-                        record.music_page_title,
-                        record.video_manifest_captured_at,
-                        record.transcript_text,
-                        record.transcript_language,
-                        str(record.transcript_path) if record.transcript_path else "",
-                        record.duration_seconds,
-                        record.search_text,
-                    )
-                    for record in deduped.values()
-                ],
-            )
-            db.commit()
+            [
+                (
+                    record.music_id,
+                    record.title,
+                    record.artist,
+                    ",".join(record.tags),
+                    record.status,
+                    record.associated_video_count,
+                    record.added_at,
+                    record.packaged_at,
+                    str(record.folder_path) if record.folder_path else "",
+                    str(record.local_audio_path) if record.local_audio_path else "",
+                    str(record.artwork_path) if record.artwork_path else "",
+                    len(record.evidence_images),
+                    record.usage_count,
+                    record.source_provider,
+                    record.source_confidence,
+                    record.vault_version,
+                    record.canonical_url,
+                    record.source_music_url,
+                    record.music_page_title,
+                    record.video_manifest_captured_at,
+                    record.transcript_text,
+                    record.transcript_language,
+                    str(record.transcript_path) if record.transcript_path else "",
+                    record.duration_seconds,
+                    record.search_text,
+                )
+                for record in records
+            ],
+        )
+
+    def _insert_search_records(
+        self,
+        db: sqlite3.Connection,
+        table_name: str,
+        records: list[SoundRecord],
+    ) -> None:
+        db.executemany(
+            f"""
+                INSERT INTO {table_name} (music_id, search_text)
+                VALUES (?, ?)
+                """,
+            [(record.music_id, record.search_text) for record in records],
+        )
 
     def search(
         self,
@@ -85,66 +130,81 @@ class IndexDatabase:
         normalized = query.strip().lower()
         if limit is not None:
             limit = max(1, min(int(limit), 10000))
+        else:
+            limit = 50000
+        fts_query = self._fts_query(normalized)
         sql = """
-            SELECT music_id, title, artist, tags, status, associated_video_count,
-                   added_at, packaged_at, folder_path, local_audio_path, artwork_path,
-                   usage_count, source_provider, source_confidence, vault_version, canonical_url,
-                   source_music_url, music_page_title, video_manifest_captured_at,
-                   transcript_text, transcript_language, transcript_path, duration_seconds
+            SELECT sounds.music_id, sounds.title, sounds.artist, sounds.tags, sounds.status,
+                   sounds.associated_video_count, sounds.added_at, sounds.packaged_at,
+                   sounds.folder_path, sounds.local_audio_path, sounds.artwork_path,
+                   sounds.usage_count, sounds.source_provider, sounds.source_confidence,
+                   sounds.vault_version, sounds.canonical_url, sounds.source_music_url,
+                   sounds.music_page_title, sounds.video_manifest_captured_at,
+                   sounds.transcript_text, sounds.transcript_language, sounds.transcript_path,
+                   sounds.duration_seconds
             FROM sounds
         """
         clauses: list[str] = []
         params_list: list[object] = []
-        if normalized:
-            clauses.append("search_text LIKE ?")
-            params_list.append(f"%{normalized}%")
+        if fts_query:
+            sql += " JOIN sounds_search ON sounds_search.music_id = sounds.music_id"
+            clauses.append("sounds_search MATCH ?")
+            params_list.append(fts_query)
         if duration_filter == "under_30":
-            clauses.append("duration_seconds IS NOT NULL AND duration_seconds < 30")
+            clauses.append("sounds.duration_seconds IS NOT NULL AND sounds.duration_seconds < 30")
         elif duration_filter == "30_plus":
-            clauses.append("duration_seconds IS NOT NULL AND duration_seconds >= 30")
+            clauses.append("sounds.duration_seconds IS NOT NULL AND sounds.duration_seconds >= 30")
         if media_filter == "has_audio":
-            clauses.append("COALESCE(local_audio_path, '') != ''")
+            clauses.append("COALESCE(sounds.local_audio_path, '') != ''")
         elif media_filter == "missing_audio":
-            clauses.append("COALESCE(local_audio_path, '') = ''")
+            clauses.append("COALESCE(sounds.local_audio_path, '') = ''")
         elif media_filter == "has_artwork":
-            clauses.append("COALESCE(artwork_path, '') != ''")
+            clauses.append("COALESCE(sounds.artwork_path, '') != ''")
         elif media_filter == "missing_artwork":
-            clauses.append("COALESCE(artwork_path, '') = ''")
+            clauses.append("COALESCE(sounds.artwork_path, '') = ''")
         elif media_filter == "has_transcript":
-            clauses.append("COALESCE(transcript_text, '') != ''")
+            clauses.append("COALESCE(sounds.transcript_text, '') != ''")
         elif media_filter == "missing_transcript":
-            clauses.append("COALESCE(transcript_text, '') = ''")
+            clauses.append("COALESCE(sounds.transcript_text, '') = ''")
         elif media_filter == "has_videos":
-            clauses.append("associated_video_count > 0")
+            clauses.append("sounds.associated_video_count > 0")
         elif media_filter == "missing_videos":
-            clauses.append("associated_video_count = 0")
+            clauses.append("sounds.associated_video_count = 0")
         elif media_filter == "has_evidence":
-            clauses.append("COALESCE(evidence_image_count, 0) > 0")
+            clauses.append("COALESCE(sounds.evidence_image_count, 0) > 0")
         elif media_filter == "missing_evidence":
-            clauses.append("COALESCE(evidence_image_count, 0) = 0")
+            clauses.append("COALESCE(sounds.evidence_image_count, 0) = 0")
         if status_filter and status_filter != "all":
-            clauses.append("COALESCE(NULLIF(status, ''), 'unreviewed') = ?")
+            clauses.append("COALESCE(NULLIF(sounds.status, ''), 'unreviewed') = ?")
             params_list.append(status_filter)
         if usage_filter == "unknown_usage":
-            clauses.append("usage_count IS NULL")
+            clauses.append("sounds.usage_count IS NULL")
         elif usage_filter == "under_1k":
-            clauses.append("usage_count IS NOT NULL AND usage_count < 1000")
+            clauses.append("sounds.usage_count IS NOT NULL AND sounds.usage_count < 1000")
         elif usage_filter == "over_1k":
-            clauses.append("usage_count IS NOT NULL AND usage_count >= 1000")
+            clauses.append("sounds.usage_count IS NOT NULL AND sounds.usage_count >= 1000")
         elif usage_filter == "over_100k":
-            clauses.append("usage_count IS NOT NULL AND usage_count >= 100000")
+            clauses.append("sounds.usage_count IS NOT NULL AND sounds.usage_count >= 100000")
         elif usage_filter == "over_1m":
-            clauses.append("usage_count IS NOT NULL AND usage_count >= 1000000")
+            clauses.append("sounds.usage_count IS NOT NULL AND sounds.usage_count >= 1000000")
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY COALESCE(NULLIF(packaged_at, ''), NULLIF(added_at, ''), title) DESC, title COLLATE NOCASE LIMIT ?"
-        if limit is None:
-            with self._connect() as db:
-                limit = int(db.execute("SELECT COUNT(*) FROM sounds").fetchone()[0] or 1)
+        sql += """
+            ORDER BY COALESCE(NULLIF(sounds.packaged_at, ''), NULLIF(sounds.added_at, ''), sounds.title) DESC,
+                     sounds.title COLLATE NOCASE
+            LIMIT ?
+        """
         params = (*params_list, limit)
         with self._connect() as db:
             rows = db.execute(sql, params).fetchall()
         return [self._row_to_record(row) for row in rows]
+
+    @staticmethod
+    def _fts_query(query: str) -> str:
+        tokens = [token for token in _FTS_TOKEN_RE.findall(query.lower()) if token]
+        if not tokens:
+            return ""
+        return " ".join(f"{token}*" for token in tokens)
 
     def get(self, music_id: str) -> SoundRecord | None:
         sql = """
@@ -243,37 +303,7 @@ class IndexDatabase:
 
     def _ensure_schema(self) -> None:
         with self._connect() as db:
-            db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sounds (
-                    music_id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    artist TEXT NOT NULL,
-                    tags TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    associated_video_count INTEGER NOT NULL DEFAULT 0,
-                    added_at TEXT NOT NULL DEFAULT '',
-                    packaged_at TEXT NOT NULL DEFAULT '',
-                    folder_path TEXT NOT NULL DEFAULT '',
-                    local_audio_path TEXT NOT NULL DEFAULT '',
-                    artwork_path TEXT NOT NULL DEFAULT '',
-                    evidence_image_count INTEGER NOT NULL DEFAULT 0,
-                    usage_count INTEGER,
-                    source_provider TEXT NOT NULL DEFAULT '',
-                    source_confidence TEXT NOT NULL DEFAULT '',
-                    vault_version TEXT NOT NULL DEFAULT '',
-                    canonical_url TEXT NOT NULL DEFAULT '',
-                    source_music_url TEXT NOT NULL DEFAULT '',
-                    music_page_title TEXT NOT NULL DEFAULT '',
-                    video_manifest_captured_at TEXT NOT NULL DEFAULT '',
-                    transcript_text TEXT NOT NULL DEFAULT '',
-                    transcript_language TEXT NOT NULL DEFAULT '',
-                    transcript_path TEXT NOT NULL DEFAULT '',
-                    duration_seconds REAL,
-                    search_text TEXT NOT NULL
-                )
-                """
-            )
+            self._create_sounds_table(db, "sounds", if_not_exists=True)
             columns = {row[1] for row in db.execute("PRAGMA table_info(sounds)").fetchall()}
             migrations = {
                 "added_at": "ALTER TABLE sounds ADD COLUMN added_at TEXT NOT NULL DEFAULT ''",
@@ -325,7 +355,91 @@ class IndexDatabase:
                 WHERE search_text = ''
                 """
             )
+            self._ensure_search_table(db)
+            self._ensure_query_indexes(db)
             db.commit()
+
+    def _create_sounds_table(
+        self,
+        db: sqlite3.Connection,
+        table_name: str,
+        *,
+        if_not_exists: bool = False,
+    ) -> None:
+        if table_name not in {"sounds", "sounds_rebuild"}:
+            raise ValueError(f"unexpected table name: {table_name}")
+        existence_clause = "IF NOT EXISTS " if if_not_exists else ""
+        db.execute(
+            f"""
+                CREATE TABLE {existence_clause}{table_name} (
+                    music_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    artist TEXT NOT NULL,
+                    tags TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    associated_video_count INTEGER NOT NULL DEFAULT 0,
+                    added_at TEXT NOT NULL DEFAULT '',
+                    packaged_at TEXT NOT NULL DEFAULT '',
+                    folder_path TEXT NOT NULL DEFAULT '',
+                    local_audio_path TEXT NOT NULL DEFAULT '',
+                    artwork_path TEXT NOT NULL DEFAULT '',
+                    evidence_image_count INTEGER NOT NULL DEFAULT 0,
+                    usage_count INTEGER,
+                    source_provider TEXT NOT NULL DEFAULT '',
+                    source_confidence TEXT NOT NULL DEFAULT '',
+                    vault_version TEXT NOT NULL DEFAULT '',
+                    canonical_url TEXT NOT NULL DEFAULT '',
+                    source_music_url TEXT NOT NULL DEFAULT '',
+                    music_page_title TEXT NOT NULL DEFAULT '',
+                    video_manifest_captured_at TEXT NOT NULL DEFAULT '',
+                    transcript_text TEXT NOT NULL DEFAULT '',
+                    transcript_language TEXT NOT NULL DEFAULT '',
+                    transcript_path TEXT NOT NULL DEFAULT '',
+                    duration_seconds REAL,
+                    search_text TEXT NOT NULL
+                )
+                """
+        )
+
+    def _create_search_table(self, db: sqlite3.Connection, table_name: str) -> None:
+        if table_name not in {"sounds_search", "sounds_search_rebuild"}:
+            raise ValueError(f"unexpected search table name: {table_name}")
+        db.execute(
+            f"""
+                CREATE VIRTUAL TABLE {table_name}
+                USING fts5(music_id UNINDEXED, search_text, tokenize='unicode61')
+                """
+        )
+
+    def _ensure_search_table(self, db: sqlite3.Connection) -> None:
+        exists = db.execute(
+            """
+                SELECT 1
+                FROM sqlite_master
+                WHERE name = 'sounds_search'
+                LIMIT 1
+                """
+        ).fetchone()
+        if exists:
+            return
+        self._create_search_table(db, "sounds_search")
+        db.execute(
+            """
+                INSERT INTO sounds_search (music_id, search_text)
+                SELECT music_id, search_text
+                FROM sounds
+                """
+        )
+
+    @staticmethod
+    def _ensure_query_indexes(db: sqlite3.Connection) -> None:
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sounds_status ON sounds(status)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sounds_usage_count ON sounds(usage_count)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sounds_duration ON sounds(duration_seconds)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sounds_audio ON sounds(local_audio_path)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sounds_artwork ON sounds(artwork_path)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sounds_videos ON sounds(associated_video_count)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sounds_packaged_added ON sounds(packaged_at, added_at)")
 
     def _reset_cache_file(self) -> None:
         for candidate in (self.path, self.path.with_name(f"{self.path.name}-wal"), self.path.with_name(f"{self.path.name}-shm")):

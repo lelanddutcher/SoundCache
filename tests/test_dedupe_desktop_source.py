@@ -15,6 +15,20 @@ def test_desktop_has_dedupe_review_tab_with_play_and_human_decision_controls():
     assert "self.dedupe_candidates_table" in source
     assert "Mark duplicates" in source
     assert "Mark not duplicates" in source
+    assert "Quarantine duplicates" in source
+    assert "quarantine_selected_duplicates" in source
+    assert "update_preview_from_dedupe_selection" in source
+    assert "duplicate_candidate_preview" in vm_source
+    assert "removed group from queue" in source
     assert "play_dedupe_candidate" in source
+    assert "duplicate_candidate_play_target" in vm_source
+    assert "_reviewed_duplicate_group_ids" in vm_source
+    assert "quarantine_duplicate_candidates" in vm_source
     assert "record_duplicate_decision" in vm_source
     assert "load_duplicate_review_groups" in vm_source
+    assert "Mark as Duplicate" in source
+    assert "mark_selected_library_as_duplicate" in source
+    assert "create_manual_duplicate_group" in vm_source
+    assert "append_manual_duplicate_group" in vm_source
+    assert "selected row is the keeper" in source.lower()
+    assert "reports/duplicate-quarantine" in source

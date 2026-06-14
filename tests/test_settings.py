@@ -2,7 +2,14 @@ import os
 
 import pytest
 
-from sound_vault.settings import AppSettings, default_index_path, default_vault_root, user_config_dir, user_data_dir
+from sound_vault.settings import (
+    AppSettings,
+    default_index_path,
+    default_vault_root,
+    index_path_for_vault,
+    user_config_dir,
+    user_data_dir,
+)
 
 
 def test_default_vault_can_be_overridden_by_env(monkeypatch, tmp_path):
@@ -32,6 +39,20 @@ def test_config_and_data_dirs_can_be_overridden(monkeypatch, tmp_path):
     assert default_index_path() == data_dir / "index.sqlite3"
 
 
+def test_index_path_is_scoped_to_selected_vault(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(data_dir))
+    first = tmp_path / "Copied TikTok Sound Vault"
+    second = tmp_path / "Other TikTok Sound Vault"
+
+    first_path = index_path_for_vault(first)
+    second_path = index_path_for_vault(second)
+
+    assert first_path.parent == data_dir / "indexes"
+    assert first_path.suffix == ".sqlite3"
+    assert first_path != second_path
+
+
 def test_settings_round_trips_table_header_layout_bytes(tmp_path):
     settings = AppSettings(tmp_path / "settings.json")
     header_state = b"qt-header-state"
@@ -49,6 +70,7 @@ def test_settings_round_trips_library_search_state(tmp_path):
         "duration_filter": "under_30",
         "media_filter": "has_audio",
         "status_filter": "needs_review",
+        "library_filter": "favorites",
         "selected_music_id": "123",
     }
 

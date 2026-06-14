@@ -4,7 +4,7 @@
 The first desktop pass works as a proof of plumbing, but the UI/design feels sloppy, generic, and underpowered. Go back to the drawing board.
 
 ## target feel
-Retro iTunes / LimeWire / brushed-metal era Mac app. Skeuomorphic, tactile, archive-grade, a culture time capsule. Top-tier Chugi millennial design is allowed if it serves the product. Avoid generic dashboard SaaS.
+Retro iTunes / LimeWire / brushed-metal era Mac app, now sharpened by `docs/ui-art-direction-current.md`: tactile retro-futurist control-room dashboard, brushed silver chrome, dark graphite inset panels, hardware knobs/sliders/toggles, Aqua bevels, dense evidence modules, and occasional leather/paper editorial accents. Skeuomorphic, tactile, archive-grade, a culture time capsule. Top-tier Chugi millennial design is allowed if it serves the product. Avoid generic dashboard SaaS.
 
 ## product principle
 This is not just a table of TikTok sounds. It is a local-first cultural archive of sounds, their evidence, their visuals, and their trend context. The local vault must remain useful after TikTok links rot.
