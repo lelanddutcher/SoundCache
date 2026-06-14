@@ -10,7 +10,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QByteArray, QEvent, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -27,6 +27,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -60,6 +61,7 @@ from PySide6.QtWidgets import (
 
 from sound_vault.diagnostics import exception_fields, write_event
 from sound_vault.settings import AppSettings, index_path_for_vault
+from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.view_model import LibraryViewModel
 from sound_vault.vault.indexer import resolve_vault_root
 
@@ -434,6 +436,12 @@ class SettingsDialog(QDialog):
         form.addRow("Device secret", self.device_secret)
         layout.addLayout(form)
 
+        self.telemetry_checkbox = QCheckBox(
+            "Share anonymized save events to the public leaderboard (sound id, platform, title — no account)"
+        )
+        self.telemetry_checkbox.setChecked(settings.telemetry_enabled())
+        layout.addWidget(self.telemetry_checkbox)
+
         self.result_label = QLabel("Create pairing code on the relay, then add it to the iOS Shortcut.")
         self.result_label.setWordWrap(True)
         layout.addWidget(self.result_label)
@@ -459,6 +467,7 @@ class SettingsDialog(QDialog):
             device_id=self.device_id.text(),
             device_secret=self.device_secret.text(),
         )
+        self.settings.set_telemetry_enabled(self.telemetry_checkbox.isChecked())
         self.result_label.setText("Relay settings saved. Device secret is stored locally and hidden here.")
 
     def create_pairing_code(self) -> None:
@@ -486,6 +495,33 @@ class SettingsDialog(QDialog):
             "Create pairing code succeeded. Put this pair code in the iOS Shortcut: "
             f"{self.pair_code.text()}"
         )
+
+
+class _ImportWorker(QThread):
+    """Runs relay-poll + inbox download/ingest off the UI thread (downloads are slow)."""
+
+    importFinished = Signal(object, object)  # (outcomes, error|None)
+
+    def __init__(self, vm, *, base_url, pair_code, device_id, device_secret, reporter=None, parent=None) -> None:
+        super().__init__(parent)
+        self._vm = vm
+        self._creds = (base_url, pair_code, device_id, device_secret)
+        self._reporter = reporter
+
+    def run(self) -> None:
+        try:
+            base_url, pair_code, device_id, device_secret = self._creds
+            if all((base_url, pair_code, device_id, device_secret)):
+                self._vm.poll_relay_inbox(
+                    base_url=base_url,
+                    pair_code=pair_code,
+                    device_id=device_id,
+                    device_secret=device_secret,
+                )
+            outcomes = self._vm.import_pending(reporter=self._reporter)
+            self.importFinished.emit(outcomes, None)
+        except Exception as exc:  # noqa: BLE001 - surface failure to the UI thread
+            self.importFinished.emit([], f"{type(exc).__name__}: {exc}")
 
 
 class SoundVaultWindow(QMainWindow):
@@ -963,6 +999,9 @@ class SoundVaultWindow(QMainWindow):
         inbox_title.setObjectName("sectionTitle")
         refresh_inbox = QPushButton("Refresh inbox")
         refresh_inbox.clicked.connect(self.refresh_inbox)
+        download_import = QPushButton("Download && import")
+        download_import.setObjectName("primaryButton")
+        download_import.clicked.connect(self.download_and_import)
         poll_relay = QPushButton("Poll relay")
         poll_relay.clicked.connect(self.poll_relay_inbox)
         import_export = QPushButton("Import TikTok export")
@@ -971,6 +1010,7 @@ class SoundVaultWindow(QMainWindow):
         mark_imported.clicked.connect(self.mark_selected_inbox_imported)
         header.addWidget(inbox_title)
         header.addStretch(1)
+        header.addWidget(download_import)
         header.addWidget(import_export)
         header.addWidget(poll_relay)
         header.addWidget(refresh_inbox)
@@ -2361,6 +2401,39 @@ class SoundVaultWindow(QMainWindow):
             return
         self.refresh_inbox()
         QMessageBox.information(self, "Relay poll complete", f"Imported {len(items)} relay link(s).")
+
+    def download_and_import(self) -> None:
+        """Poll the relay, then download + ingest every pending link off the UI thread."""
+        if getattr(self, "_import_worker", None) is not None and self._import_worker.isRunning():
+            return
+        reporter = None
+        if self.settings.telemetry_enabled() and self.settings.relay_base_url():
+            reporter = SaveEventReporter(
+                base_url=self.settings.relay_base_url(),
+                enabled=self.settings.telemetry_enabled(),
+            )
+        self._import_worker = _ImportWorker(
+            self.vm,
+            base_url=self.settings.relay_base_url(),
+            pair_code=self.settings.relay_pair_code(),
+            device_id=self.settings.relay_device_id(),
+            device_secret=self.settings.relay_device_secret(),
+            reporter=reporter,
+            parent=self,
+        )
+        self._import_worker.importFinished.connect(self._on_import_finished)
+        self._import_worker.start()
+        self.statusBar().showMessage("Downloading + importing shared sounds…")
+
+    def _on_import_finished(self, outcomes, error) -> None:
+        self._import_worker = None
+        if error:
+            QMessageBox.warning(self, "Import failed", str(error))
+            return
+        self.refresh_inbox()
+        self.rebuild_index()
+        imported = sum(1 for outcome in outcomes if getattr(outcome, "status", "") == "ingested")
+        self.statusBar().showMessage(f"Imported {imported} sound(s).", 5000)
 
     def refresh_review_queues(self) -> None:
         rows = self.vm.review_queue_rows()

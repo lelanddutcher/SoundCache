@@ -491,7 +491,7 @@ def test_duplicate_review_page_updates_inspector_and_closes_marked_groups(tmp_pa
     assert "duration: 0:07" in window.preview_meta.text()
     assert "Kickoff lyric phrase" in window.transcript_text.toPlainText()
     assert "transcript: available" in window.preview_meta.text()
-    assert window.play_button.isEnabled()
+    assert window.transport_play_button.isEnabled()
 
     class FakePlayer:
         def __init__(self):
