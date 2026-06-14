@@ -6,13 +6,13 @@ driven from the GUI, a CLI worker, or tests.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 import shutil
-from typing import Callable
+from typing import Any, Callable
 
 from sound_vault.ingest.download import AudioDownloader
 from sound_vault.ingest.package import PackagedSound, Tagger, ffmpeg_embed_tags, package_sound
@@ -54,6 +54,7 @@ class IngestService:
         work_dir: Path | None = None,
         now: Callable[[], str] | None = None,
         oembed_lookup: Callable[[str], dict] | None = None,
+        transcriber: "Callable[[Path], dict[str, Any]] | None" = None,
     ) -> None:
         self.vault_root = Path(vault_root)
         self.downloader = downloader
@@ -63,6 +64,19 @@ class IngestService:
         self._work_dir = Path(work_dir) if work_dir else self.vault_root / "inbox" / "working"
         self._now = now or _now_iso
         self._oembed_lookup = oembed_lookup
+        self._transcriber = transcriber
+
+    def _transcribe_into(self, folder: Path, audio_path: Path | None) -> bool:
+        """Best-effort transcription of a packaged sound; returns True if metadata changed."""
+        if self._transcriber is None or audio_path is None:
+            return False
+        try:
+            from sound_vault.workers.transcription import transcribe_sound_folder
+
+            result = transcribe_sound_folder(folder, audio_path=audio_path, transcriber=self._transcriber)
+            return result.get("status") == "ok"
+        except Exception:  # noqa: BLE001 - transcription is best-effort, never fatal to ingest
+            return False
 
     def _enrich_via_oembed(self, canonical_url: str) -> dict:
         """Best-effort oEmbed lookup to fill a missing title/author."""
@@ -154,6 +168,14 @@ class IngestService:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+        # Transcribe the freshly-packaged audio (best-effort) so the index row
+        # carries the transcript too.
+        if self._transcribe_into(packaged.folder, packaged.audio_path):
+            try:
+                packaged = replace(packaged, metadata=json.loads(packaged.metadata_path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                pass
+
         if self._index_updater is not None:
             try:
                 self._index_updater(packaged)
@@ -238,19 +260,40 @@ class IngestService:
                 except OSError:
                     pass
 
+        # Persist the metadata-gap fills first (transcription re-reads this file).
+        if filled:
+            metadata["packaged_at"] = self._now()
+            meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        # Transcript is its own gap: transcribe existing audio in place if missing.
+        audio = self._existing_audio(folder)
+        if self._transcribe_into(folder, audio):
+            filled.append("transcript")
+
         if not filled:
             return {"status": "unchanged", "music_id": music_id, "filled": []}
 
-        metadata["packaged_at"] = self._now()
-        meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Re-read so the index row reflects both the gap fills and any transcript.
+        try:
+            final_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            final_meta = metadata
         if self._index_updater is not None:
             try:
                 self._index_updater(
-                    PackagedSound(music_id=music_id, folder=folder, metadata_path=meta_path, audio_path=None, metadata=metadata)
+                    PackagedSound(music_id=music_id, folder=folder, metadata_path=meta_path, audio_path=audio, metadata=final_meta)
                 )
             except Exception:  # noqa: BLE001 - re-index failure shouldn't lose the metadata write
                 pass
         return {"status": "enriched", "music_id": music_id, "filled": filled}
+
+    @staticmethod
+    def _existing_audio(folder: Path) -> Path | None:
+        for pattern in ("*.m4a", "*.mp3", "*.aac", "*.wav", "*.ogg"):
+            matches = sorted(p for p in folder.glob(pattern) if p.is_file())
+            if matches:
+                return matches[0]
+        return None
 
     def drain_inbox(
         self, store: ShortcutInboxStore, *, max_attempts: int = 3

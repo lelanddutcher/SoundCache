@@ -246,10 +246,12 @@ class LibraryViewModel:
                 continue
             if r.folder_path is None:
                 continue
+            has_audio = getattr(r, "local_audio_path", None) is not None
             thin = (
                 (r.artist or "").strip() in ("", "Unknown")
                 or r.artwork_path is None
                 or r.usage_count is None
+                or ((getattr(r, "transcript_text", "") or "").strip() == "" and has_audio)
             )
             if thin:
                 out.append(r)

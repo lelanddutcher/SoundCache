@@ -128,3 +128,130 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Local (faster-whisper) per-sound transcription, wired into ingest/re-enrich.
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class LocalASRConfig:
+    model: str = "base"
+    compute_type: str = "int8"
+    model_cache_dir: str | None = None
+
+
+def faster_whisper_available() -> bool:
+    try:
+        import faster_whisper  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def faster_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Path], dict[str, Any]] | None":
+    """A lazy callable(audio_path) -> {text, language, model, engine} using faster-whisper.
+
+    The model is loaded on the FIRST call and cached, so building a service stays
+    cheap and the (slow, possibly downloading) model load only happens when a
+    transcription actually runs. Returns None if faster-whisper isn't installed.
+    """
+    if not faster_whisper_available():
+        return None
+    cfg = config or LocalASRConfig()
+    state: dict[str, Any] = {}
+
+    def _transcribe(audio_path: Path) -> dict[str, Any]:
+        model = state.get("model")
+        if model is None:
+            from faster_whisper import WhisperModel
+
+            model = WhisperModel(
+                cfg.model,
+                device="cpu",
+                compute_type=cfg.compute_type,
+                download_root=cfg.model_cache_dir or None,
+            )
+            state["model"] = model
+        segments, info = model.transcribe(str(audio_path), vad_filter=True)
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        return {
+            "text": text,
+            "language": getattr(info, "language", "") or "",
+            "model": cfg.model,
+            "engine": "faster-whisper",
+        }
+
+    return _transcribe
+
+
+def _has_transcript_text(metadata: dict[str, Any]) -> bool:
+    v2 = metadata.get("speech_transcript_v2")
+    if isinstance(v2, dict) and str(v2.get("text") or v2.get("best_text") or "").strip():
+        return True
+    inline = metadata.get("transcript") or metadata.get("speech_transcript")
+    if isinstance(inline, dict) and str(inline.get("text") or "").strip():
+        return True
+    if isinstance(inline, str) and inline.strip():
+        return True
+    return False
+
+
+def transcribe_sound_folder(
+    folder: Path,
+    *,
+    audio_path: Path | None,
+    transcriber: "Callable[[Path], dict[str, Any]]",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Transcribe one packaged sound's audio and write the result into its
+    metadata.json (speech_transcript_v2 + paths.transcript) and a sidecar.
+
+    Best-effort + idempotent: skips if a transcript already exists (unless
+    overwrite) or there's no audio. Returns {status, has_text}.
+    """
+    folder = Path(folder)
+    meta_path = folder / "metadata.json"
+    if not meta_path.exists():
+        return {"status": "skipped", "reason": "no metadata.json"}
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "failed", "reason": f"unreadable metadata: {exc}"}
+    if not overwrite and _has_transcript_text(metadata):
+        return {"status": "skipped", "reason": "already has transcript"}
+    if audio_path is None or not Path(audio_path).exists():
+        return {"status": "skipped", "reason": "no audio"}
+
+    result = transcriber(Path(audio_path))
+    text = str(result.get("text") or "").strip()
+    language = str(result.get("language") or "")
+    model = str(result.get("model") or "")
+    engine = str(result.get("engine") or "faster-whisper")
+
+    transcript_dir = folder / "transcripts" / f"local_{_safe(engine)}"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = transcript_dir / "transcript.json"
+    _write_json(
+        transcript_path,
+        {"engine": engine, "model": model, "language": language, "text": text, "created_at": _now()},
+    )
+
+    metadata["speech_transcript_v2"] = {"text": text, "language": language, "model": model, "engine": engine}
+    paths = metadata.setdefault("paths", {})
+    if isinstance(paths, dict):
+        paths["transcript"] = str(transcript_path)
+    transcription = metadata.setdefault("transcription", {})
+    if isinstance(transcription, dict):
+        transcription["local"] = {
+            "status": "ok" if text else "empty",
+            "engine": engine,
+            "model": model,
+            "has_text": bool(text),
+            "updated_at": _now(),
+        }
+    audit = metadata.setdefault("audit", {})
+    if isinstance(audit, dict):
+        audit["missing_transcript"] = not text
+    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"status": "ok" if text else "empty", "has_text": bool(text)}

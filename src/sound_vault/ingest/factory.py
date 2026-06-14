@@ -60,6 +60,40 @@ def make_index_updater(vault_root: Path, db: IndexDatabase) -> IndexUpdater:
     return update
 
 
+_AUTO = object()
+
+
+def build_transcriber(settings=None):
+    """Build a per-sound transcriber from settings, or None if unavailable.
+
+    Local faster-whisper is the only locally-runnable engine (cloud needs the
+    openai package + an API key), so use it when installed. Disabled by the
+    SOUND_VAULT_DISABLE_TRANSCRIBE env var (set in tests/CI)."""
+    if os.getenv("SOUND_VAULT_DISABLE_TRANSCRIBE"):
+        return None
+    from sound_vault.workers.transcription import LocalASRConfig, faster_whisper_transcriber
+
+    cfg = {}
+    if settings is None:
+        try:
+            from sound_vault.settings import AppSettings
+
+            settings = AppSettings()
+        except Exception:  # noqa: BLE001
+            settings = None
+    if settings is not None:
+        try:
+            cfg = settings.transcription_config()
+        except Exception:  # noqa: BLE001
+            cfg = {}
+    return faster_whisper_transcriber(
+        LocalASRConfig(
+            model=str(cfg.get("local_model") or "base"),
+            model_cache_dir=(str(cfg.get("model_cache_dir") or "") or None),
+        )
+    )
+
+
 def build_ingest_service(
     *,
     vault_root: Path,
@@ -68,6 +102,7 @@ def build_ingest_service(
     playwright_script: Path | str | None = None,
     playwright_state: Path | str | None = None,
     playwright_cwd: Path | str | None = None,
+    transcriber=_AUTO,
 ) -> IngestService:
     vault_root = Path(vault_root)
     if db is None and index_path is not None:
@@ -78,4 +113,8 @@ def build_ingest_service(
         playwright_state=playwright_state,
         playwright_cwd=playwright_cwd,
     )
-    return IngestService(vault_root=vault_root, downloader=downloader, index_updater=index_updater)
+    if transcriber is _AUTO:
+        transcriber = build_transcriber()
+    return IngestService(
+        vault_root=vault_root, downloader=downloader, index_updater=index_updater, transcriber=transcriber
+    )

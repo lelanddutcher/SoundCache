@@ -186,6 +186,63 @@ def test_reenrich_existing_does_not_overwrite_present_values(tmp_path):
     assert md["usage_count"] == 999
 
 
+def _fake_transcriber(audio_path):
+    return {"text": "road work ahead? uh yeah i sure hope it does", "language": "en", "model": "base", "engine": "faster-whisper"}
+
+
+def test_transcribe_sound_folder_writes_transcript(tmp_path):
+    from sound_vault.workers.transcription import transcribe_sound_folder
+    folder = _seed_thin_sound(tmp_path / "vault", "70")
+    audio = folder / "audio [TT-70].m4a"
+    res = transcribe_sound_folder(folder, audio_path=audio, transcriber=_fake_transcriber)
+    assert res == {"status": "ok", "has_text": True}
+    md = json.loads((folder / "metadata.json").read_text())
+    assert "road work ahead" in md["speech_transcript_v2"]["text"]
+    assert md["paths"]["transcript"].endswith("transcript.json")
+    assert (folder / "transcripts" / "local_faster-whisper" / "transcript.json").exists()
+    # idempotent: second run skips
+    assert transcribe_sound_folder(folder, audio_path=audio, transcriber=_fake_transcriber)["status"] == "skipped"
+
+
+def test_ingest_runs_transcription_on_import(tmp_path):
+    cover = tmp_path / "c.jpg"; cover.write_bytes(b"\xff\xd8jpg")
+
+    class _Dl:
+        def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
+            Path(dest_dir).mkdir(parents=True, exist_ok=True)
+            audio = Path(dest_dir) / f"{basename}.m4a"; audio.write_bytes(b"\x00audio")
+            from sound_vault.ingest.download import DownloadResult
+            return DownloadResult(ok=True, audio_path=audio, method="playwright",
+                                  info={"id": source_id, "title": "t", "uploader": "creator"})
+
+    svc = IngestService(vault_root=tmp_path / "vault", downloader=_Dl(),
+                        resolve_source=lambda u: _tiktok_music(u, "71"), tagger=_tagger,
+                        now=lambda: "2026-06-14T00:00:00Z", transcriber=_fake_transcriber)
+    out = svc.ingest_url("https://www.tiktok.com/t/x/")
+    md = json.loads((out.folder / "metadata.json").read_text())
+    assert "road work ahead" in md["speech_transcript_v2"]["text"]
+
+
+def test_reenrich_adds_transcript_when_missing(tmp_path):
+    vault = tmp_path / "vault"
+    folder = _seed_thin_sound(vault, "72", artist="Real", usage=5)  # only transcript missing
+    # add artwork so artist/artwork/usage are all present -> only transcript gap
+    (folder / "artwork.jpg").write_bytes(b"\xff\xd8j")
+    md = json.loads((folder / "metadata.json").read_text())
+    md["paths"]["artwork"] = "sounds/x/artwork.jpg"
+    (folder / "metadata.json").write_text(json.dumps(md))
+    indexed = []
+    svc = IngestService(vault_root=vault, downloader=object(), tagger=_tagger,
+                        index_updater=indexed.append, now=lambda: "2026-06-14T00:00:00Z",
+                        transcriber=_fake_transcriber)
+    res = svc.reenrich_existing(folder=folder, music_id="72", canonical_url="https://x",
+                               fetch_meta=lambda url: {})
+    assert res["status"] == "enriched"
+    assert "transcript" in res["filled"]
+    md = json.loads((folder / "metadata.json").read_text())
+    assert "road work ahead" in md["speech_transcript_v2"]["text"]
+
+
 def test_composite_downloader_metadata_only_delegates(tmp_path):
     from sound_vault.ingest.download import CompositeDownloader, PlaywrightCaptureDownloader, YtDlpDownloader
     node_script = tmp_path / "c.cjs"; node_script.write_text("//")
