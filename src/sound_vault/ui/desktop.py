@@ -115,6 +115,10 @@ DEFAULT_HIDDEN_LIBRARY_COLUMNS: tuple[int, ...] = (ADDED_COL, LOCAL_AUDIO_COL, C
 
 
 class SoundTableWidget(QTableWidget):
+    # Set by the window: music_id -> local audio Path | None. Lets a drag OUT of
+    # the app carry the real audio file (for Finder / Premiere / etc.).
+    audio_path_resolver: "Callable[[str], Path | None] | None" = None
+
     def mimeData(self, items):  # noqa: N802 - Qt override
         mime = super().mimeData(items)
         music_ids = []
@@ -124,7 +128,23 @@ class SoundTableWidget(QTableWidget):
                 music_ids.append(str(music_id))
         if music_ids:
             mime.setData("application/x-sound-vault-music-id", json.dumps(music_ids).encode("utf-8"))
-            mime.setText("\n".join(music_ids))
+            # Export the actual audio files as URLs so dropping into Finder /
+            # Premiere / a project folder copies the sound, not a text clipping.
+            urls = []
+            if self.audio_path_resolver is not None:
+                seen = set()
+                for music_id in music_ids:
+                    path = self.audio_path_resolver(music_id)
+                    if path is not None and str(path) not in seen and Path(path).exists():
+                        seen.add(str(path))
+                        urls.append(QUrl.fromLocalFile(str(path)))
+            if urls:
+                mime.setUrls(urls)
+                # Text fallback = the file paths (useful in plain-text targets),
+                # not the bare music ids.
+                mime.setText("\n".join(u.toLocalFile() for u in urls))
+            else:
+                mime.setText("\n".join(music_ids))
         return mime
 
 
@@ -734,7 +754,9 @@ class SoundVaultWindow(QMainWindow):
         write_event("gui.window_init_start")
         self.setWindowTitle("Sound Cache — local sound archive")
         self.resize(1420, 860)
-        self.setMinimumSize(900, 600)
+        # Big enough that the 3-column layout (library + filters + inspector) and the
+        # transport/search row stay legible instead of crunching at small sizes.
+        self.setMinimumSize(1280, 760)
         self.vault_root = resolve_vault_root(vault_root or self.settings.vault_root())
         write_event("gui.vault_resolved", vault_root=str(self.vault_root))
         self.vm = LibraryViewModel(
@@ -1195,6 +1217,12 @@ class SoundVaultWindow(QMainWindow):
         columns_button.setMenu(self.column_menu)
         self.result_count_label = QLabel("0 displayed / 0 indexed")
         self.result_count_label.setObjectName("muted")
+        # Keep the controls readable instead of crunching them at small widths.
+        self.search_box.setMinimumWidth(210)
+        self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for _combo in (self.duration_filter, self.media_filter, self.status_filter, self.usage_filter):
+            _combo.setMinimumWidth(104)
+        self.result_count_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         search_bar.addWidget(self.search_box, 1)
         search_bar.addWidget(self.duration_filter)
         search_bar.addWidget(self.media_filter)
@@ -1240,6 +1268,8 @@ class SoundVaultWindow(QMainWindow):
         self.table.setItemDelegateForColumn(PLAY_COL, PlayButtonDelegate(self.play_record_by_id, self.table))
         self.table.setDragEnabled(True)
         self.table.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.table.setDragDropOverwriteMode(False)
+        self.table.audio_path_resolver = self._drag_audio_path
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.horizontalHeader().setSortIndicator(self.library_sort_column, self.library_sort_order)
         self.configure_column_menu()
@@ -1386,7 +1416,7 @@ class SoundVaultWindow(QMainWindow):
     def _build_preview_panel(self) -> QFrame:
         preview = QFrame()
         preview.setObjectName("preview")
-        preview.setMinimumWidth(330)
+        preview.setMinimumWidth(320)
         preview.setMaximumWidth(560)
         preview_layout = QVBoxLayout(preview)
         preview_layout.setContentsMargins(20, 22, 20, 22)
@@ -1462,14 +1492,18 @@ class SoundVaultWindow(QMainWindow):
         self.open_video_url = QPushButton("Open URL")
         self.open_video_url.setEnabled(False)
         self.open_video_url.clicked.connect(lambda: self.open_selected_associated_video(prefer_url=True))
-        video_actions.addWidget(self.open_video)
-        video_actions.addWidget(self.open_video_url)
+        video_actions.addWidget(self.open_video, 1)
+        video_actions.addWidget(self.open_video_url, 1)
         video_layout.addLayout(video_actions)
         action_row = QHBoxLayout()
         action_row.setSpacing(6)
-        action_row.addWidget(self.copy_metadata)
-        action_row.addWidget(self.open_tiktok_sound)
-        action_row.addWidget(self.open_folder)
+        action_row.addWidget(self.copy_metadata, 1)
+        action_row.addWidget(self.open_tiktok_sound, 1)
+        action_row.addWidget(self.open_folder, 1)
+        # Inspector buttons fill + share the panel width so they track resizing.
+        for _btn in (self.copy_metadata, self.open_tiktok_sound, self.open_folder, self.open_video, self.open_video_url):
+            _btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            _btn.setMinimumHeight(32)
         scroll_layout.addWidget(self.artwork_label)
         scroll_layout.addWidget(self.preview_title)
         scroll_layout.addWidget(self.progress_slider)
@@ -1725,6 +1759,16 @@ class SoundVaultWindow(QMainWindow):
             self.pause_playback()
         else:
             self.play_selected_sound()
+
+    def _drag_audio_path(self, music_id: str) -> Path | None:
+        """Local audio file for a dragged row, so dragging out copies the real sound."""
+        record = self.records_by_id.get(str(music_id))
+        if record is None:
+            return None
+        audio = getattr(record, "local_audio_path", None)
+        if audio is not None and Path(audio).exists():
+            return Path(audio)
+        return None
 
     def _prepare_table(self, table: QTableWidget, *, stretch_column: int) -> None:
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
