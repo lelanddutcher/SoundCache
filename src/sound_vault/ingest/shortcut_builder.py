@@ -41,8 +41,23 @@ def _dict_item(key: str, value: dict, item_type: int = 0) -> dict:
     return {"WFItemType": item_type, "WFKey": _text(key), "WFValue": value}
 
 
+# Fixed UUID so the JSON-body note field can reference the Ask action's output.
+_NOTE_UUID = "5C0DACAE-0001-4000-A000-50554E444E4F"
+
+
+def _ask_output() -> dict:
+    # References the "Ask for Input" action's captured text (the user's note).
+    return {
+        "WFSerializationType": "WFTextTokenAttachment",
+        "Value": {"Type": "ActionOutput", "OutputUUID": _NOTE_UUID, "OutputName": "Sound note", "Aggrandizements": []},
+    }
+
+
 def build_workflow(relay_url: str, pair_code: str) -> dict:
-    """The WorkflowKit dict for the Share-Sheet shortcut, pre-filled."""
+    """The WorkflowKit dict for the Share-Sheet shortcut, pre-filled.
+
+    Prompts for an optional note/label when shared, and POSTs it alongside the URL
+    so it shows up in the app's User Notes (and is searchable)."""
     submit_url = submit_endpoint(relay_url)
 
     headers = {
@@ -56,11 +71,22 @@ def build_workflow(relay_url: str, pair_code: str) -> dict:
                 _dict_item("pair_code", _text(pair_code.strip().upper())),
                 _dict_item("url", _shortcut_input()),
                 _dict_item("source", _text("ios_shortcut")),
+                _dict_item("note", _ask_output()),
             ]
         },
     }
 
     actions = [
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.ask",
+            "WFWorkflowActionParameters": {
+                "WFInputType": "Text",
+                "WFAskActionPrompt": "Label or notes for this sound? (optional)",
+                "WFAskActionAllowsMultiline": True,
+                "UUID": _NOTE_UUID,
+                "CustomOutputName": "Sound note",
+            },
+        },
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
             "WFWorkflowActionParameters": {

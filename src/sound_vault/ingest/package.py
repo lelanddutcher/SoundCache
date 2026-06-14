@@ -137,6 +137,7 @@ def package_sound(
     tags: list[str] | None = None,
     ingest_source: str = "ios_shortcut_relay",
     source_confidence: str = "",
+    user_notes: str = "",
     tagger: Tagger = ffmpeg_embed_tags,
     now_iso: str | None = None,
     append_catalog: bool = True,
@@ -207,6 +208,7 @@ def package_sound(
         "source_artist": info.get("artist") or info.get("uploader") or None,
         "source_provider": info.get("source_provider") or None,
         "source_confidence": source_confidence,
+        "user_notes": user_notes,
         "tags": tags,
         "status": status,
         "paths": {

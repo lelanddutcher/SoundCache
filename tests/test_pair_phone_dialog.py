@@ -44,7 +44,11 @@ def test_pair_phone_dialog_exports_prefilled_plist(tmp_path, monkeypatch):
         dialog.export_shortcut()
         assert out.exists()
         parsed = plistlib.loads(out.read_bytes())
-        body = parsed["WFWorkflowActions"][0]["WFWorkflowActionParameters"]
+        post = next(
+            a for a in parsed["WFWorkflowActions"]
+            if a["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+        )
+        body = post["WFWorkflowActionParameters"]
         assert body["WFURL"] == "https://api.soundcache.io/v1/inbox/submit"
         items = {
             it["WFKey"]["Value"]["string"]: it for it in body["WFJSONValues"]["Value"]["WFDictionaryFieldValueItems"]

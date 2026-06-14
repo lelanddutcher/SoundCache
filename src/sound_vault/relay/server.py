@@ -123,6 +123,7 @@ class SubmitLinkRequest(BaseModel):
     pair_code: str
     url: HttpUrl
     source: str = "ios_shortcut"
+    note: str = ""
 
 
 class SaveEventRequest(BaseModel):
@@ -158,7 +159,9 @@ def submit_link(request: SubmitLinkRequest, http_request: Request) -> dict[str, 
     if not inbox.can_accept_pair_code(request.pair_code):
         log_relay_event("submit_rejected", pair_code=request.pair_code, url=str(request.url))
         raise HTTPException(status_code=404, detail="unknown or expired pairing code")
-    item = inbox.submit_link(pair_code=request.pair_code, url=str(request.url), source=request.source)
+    item = inbox.submit_link(
+        pair_code=request.pair_code, url=str(request.url), source=request.source, note=request.note
+    )
     log_relay_event("submit_queued", pair_code=request.pair_code, url=str(request.url), source=request.source)
     return {"id": item.id, "status": "queued"}
 
@@ -170,7 +173,7 @@ def poll(pair_code: str, request: Request, x_device_id: str = Header(default="")
         raise HTTPException(status_code=401, detail="missing device credentials")
     items = inbox.poll(device_id=x_device_id, device_secret=x_device_secret, pair_code=pair_code)
     log_relay_event("poll", pair_code=pair_code, device_id=x_device_id, device_secret=x_device_secret)
-    return {"items": [{"id": item.id, "url": item.url, "source": item.source} for item in items]}
+    return {"items": [{"id": item.id, "url": item.url, "source": item.source, "note": item.note} for item in items]}
 
 
 @app.post("/v1/events/save")

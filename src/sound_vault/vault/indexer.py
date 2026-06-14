@@ -77,6 +77,7 @@ class SoundRecord:
     transcript_language: str = ""
     transcript_path: Path | None = None
     duration_seconds: float | None = None
+    user_notes: str = ""
 
     @property
     def search_text(self) -> str:
@@ -97,6 +98,7 @@ class SoundRecord:
                 self.music_page_title,
                 self.transcript_text,
                 self.transcript_language,
+                self.user_notes,
                 f"{self.duration_seconds:.2f}" if self.duration_seconds is not None else "",
                 *self.tags,
                 *self.hashtags,
@@ -749,6 +751,7 @@ def _record_from_data(
         transcript_language=transcript_context.get("language", ""),
         transcript_path=transcript_context.get("path"),
         duration_seconds=_duration_from_data_or_audio(data, audio),
+        user_notes=str(data.get("user_notes") or ""),
     )
 
 
@@ -768,6 +771,7 @@ def _data_from_record(record: SoundRecord) -> dict[str, Any]:
     data.setdefault("source_confidence", record.source_confidence)
     data.setdefault("vault_version", record.vault_version)
     data.setdefault("canonical_url", record.canonical_url)
+    data.setdefault("user_notes", record.user_notes)
     paths = dict(data.get("paths") if isinstance(data.get("paths"), dict) else {})
     if record.folder_path is not None:
         paths.setdefault("folder", str(record.folder_path))

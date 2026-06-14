@@ -16,6 +16,7 @@ class RelayInboxItem:
     id: str
     url: str
     source: str
+    note: str = ""
 
 
 def _default_get_json(url: str, *, params: dict[str, str], headers: dict[str, str], timeout: float) -> dict[str, Any]:
@@ -63,6 +64,7 @@ class RelayClient:
                     id=item_id,
                     url=url,
                     source=str(item.get("source") or "unknown"),
+                    note=str(item.get("note") or ""),
                 )
             )
         return items
@@ -73,5 +75,5 @@ class RelayClient:
             return []
         store = ShortcutInboxStore(inbox_path)
         for item in items:
-            store.add_url(item.url, source=item.source, relay_id=item.id)
+            store.add_url(item.url, source=item.source, relay_id=item.id, note=item.note)
         return items

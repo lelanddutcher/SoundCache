@@ -814,6 +814,13 @@ class SoundVaultWindow(QMainWindow):
         self._external_audio_timer = QTimer(self)
         self._external_audio_timer.setInterval(300)
         self._external_audio_timer.timeout.connect(self._poll_external_audio)
+        # User-notes editor state (debounced autosave; flush on switch/close).
+        self._notes_music_id: str | None = None
+        self._loading_notes = False
+        self._notes_save_timer = QTimer(self)
+        self._notes_save_timer.setInterval(700)
+        self._notes_save_timer.setSingleShot(True)
+        self._notes_save_timer.timeout.connect(self._flush_user_notes)
         from concurrent.futures import ThreadPoolExecutor
         self._preview_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sound-vault-preview")
         self._preview_token = 0
@@ -1483,6 +1490,15 @@ class SoundVaultWindow(QMainWindow):
         self.transcript_text.setMaximumHeight(260)
         self.transcript_text.setPlaceholderText("No transcript text found in metadata or transcript sidecars.")
         transcript_layout.addWidget(self.transcript_text)
+        notes_group = QGroupBox("User notes")
+        notes_layout = QVBoxLayout(notes_group)
+        self.user_notes_edit = QTextEdit()
+        self.user_notes_edit.setMaximumHeight(150)
+        self.user_notes_edit.setPlaceholderText(
+            "Add your own notes — a label, why you saved it, where to use it… (saved + searchable)"
+        )
+        self.user_notes_edit.textChanged.connect(self._on_user_notes_changed)
+        notes_layout.addWidget(self.user_notes_edit)
         evidence_group = QGroupBox("Evidence assets", scroll_body)
         evidence_layout = QVBoxLayout(evidence_group)
         self.evidence_list = QLabel("No local screenshots yet.", evidence_group)
@@ -1522,6 +1538,7 @@ class SoundVaultWindow(QMainWindow):
         scroll_layout.addWidget(self.time_label)
         scroll_layout.addLayout(action_row)
         scroll_layout.addWidget(transcript_group)
+        scroll_layout.addWidget(notes_group)
         scroll_layout.addStretch(1)
         for hidden in (self.preview_meta, self.preview_tags, self.playback_status, evidence_group, video_group):
             hidden.setVisible(False)
@@ -1897,6 +1914,7 @@ class SoundVaultWindow(QMainWindow):
                 self.table.horizontalHeader().setSectionHidden(column, True)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._flush_user_notes()
         self._stop_external_audio()
         for timer_name in ("_relay_poll_timer", "_index_timer", "_worker_timer"):
             timer = getattr(self, timer_name, None)
@@ -2275,6 +2293,12 @@ class SoundVaultWindow(QMainWindow):
         self.update_preview_from_selection()
 
     def clear_preview(self, title: str = "Select a sound") -> None:
+        self._flush_user_notes()
+        self._notes_music_id = None
+        if hasattr(self, "user_notes_edit"):
+            self._loading_notes = True
+            self.user_notes_edit.clear()
+            self._loading_notes = False
         self.current_preview_record = None
         self.preview_title.setText(title)
         if hasattr(self, "now_playing_title"):
@@ -2349,6 +2373,7 @@ class SoundVaultWindow(QMainWindow):
         self.preview_meta.setText(self._formatted_metadata(record))
         self.preview_tags.setText(" ".join(f"#{tag}" for tag in record.tags) or "no tags yet")
         self.transcript_text.setPlainText(self._full_transcript_text(record))
+        self._load_user_notes(record)
         self._populate_artwork(record)
         self._populate_evidence(record)
         self._populate_videos(record)
@@ -2361,6 +2386,48 @@ class SoundVaultWindow(QMainWindow):
         self.progress_slider.setValue(0)
         self.time_label.setText(f"0:00 / {self._format_ms(duration_ms)}")
         self.playback_status.setText("Ready to play" if target is not None else "No playable audio source")
+
+    # ---- user notes (editable, autosaved, searchable) ----
+    def _on_user_notes_changed(self) -> None:
+        if self._loading_notes:
+            return
+        self._notes_save_timer.start()
+
+    def _load_user_notes(self, record) -> None:
+        """Load a sound's notes into the editor; only resets text when the sound
+        actually changes (so an in-flight edit isn't clobbered by hydration)."""
+        mid = str(record.music_id)
+        if mid == self._notes_music_id:
+            return
+        self._flush_user_notes()  # persist the previous sound's edits first
+        self._notes_music_id = mid
+        self._loading_notes = True
+        self.user_notes_edit.setPlainText(getattr(record, "user_notes", "") or "")
+        self._loading_notes = False
+
+    def _flush_user_notes(self) -> None:
+        self._notes_save_timer.stop()
+        mid = self._notes_music_id
+        if not mid:
+            return
+        text = self.user_notes_edit.toPlainText()
+        record = self.records_by_id.get(str(mid))
+        if record is not None and (getattr(record, "user_notes", "") or "") == text:
+            return  # unchanged, nothing to write
+        if self.vm.set_user_notes(mid, text):
+            from dataclasses import replace
+
+            if record is not None:
+                try:
+                    self.records_by_id[str(mid)] = replace(record, user_notes=text)
+                except Exception:  # noqa: BLE001
+                    pass
+            if self.current_preview_record is not None and str(self.current_preview_record.music_id) == str(mid):
+                try:
+                    self.current_preview_record = replace(self.current_preview_record, user_notes=text)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.statusBar().showMessage("Notes saved", 1500)
 
     def _formatted_metadata(self, record) -> str:
         parts = [

@@ -110,7 +110,7 @@ _COLUMNS = (
     "evidence_image_count", "usage_count", "source_provider", "source_confidence",
     "vault_version", "canonical_url", "source_music_url", "music_page_title",
     "video_manifest_captured_at", "transcript_text", "transcript_language",
-    "transcript_path", "duration_seconds", "search_text",
+    "transcript_path", "duration_seconds", "user_notes", "search_text",
     "raw_json", "evidence_paths", "associated_videos",
 )
 
@@ -121,7 +121,7 @@ _READ_COLUMNS = (
     "usage_count", "source_provider", "source_confidence", "vault_version",
     "canonical_url", "source_music_url", "music_page_title", "video_manifest_captured_at",
     "transcript_text", "transcript_language", "transcript_path", "duration_seconds",
-    "raw_json", "evidence_paths", "associated_videos",
+    "user_notes", "raw_json", "evidence_paths", "associated_videos",
 )
 
 
@@ -151,6 +151,7 @@ def _record_values(record: SoundRecord) -> tuple:
         record.transcript_language,
         str(record.transcript_path) if record.transcript_path else "",
         record.duration_seconds,
+        record.user_notes,
         record.search_text,
         _dump_raw(record.raw),
         _dump_paths(record.evidence_images),
@@ -331,6 +332,16 @@ class IndexDatabase:
             return ""
         return " ".join(f"{token}*" for token in tokens)
 
+    def update_user_notes(self, music_id: str, notes: str) -> bool:
+        """Set a sound's user notes + refresh its search row so notes are searchable."""
+        record = self.get(music_id)
+        if record is None:
+            return False
+        from dataclasses import replace
+
+        self.upsert(replace(record, user_notes=notes))
+        return True
+
     def count_usage_at_least(self, threshold: int) -> int:
         """Cheap COUNT for the popularity stat — avoids building full records just to len()."""
         with self._connect() as db:
@@ -373,9 +384,10 @@ class IndexDatabase:
             transcript_language=str(row[20] or ""),
             transcript_path=Path(str(row[21])) if row[21] else None,
             duration_seconds=float(row[22]) if row[22] is not None else None,
-            raw=_load_raw(row[23] if len(row) > 23 else None),
-            evidence_images=_load_paths(row[24] if len(row) > 24 else None),
-            associated_videos=_load_videos(row[25] if len(row) > 25 else None),
+            user_notes=str(row[23] or "") if len(row) > 23 else "",
+            raw=_load_raw(row[24] if len(row) > 24 else None),
+            evidence_images=_load_paths(row[25] if len(row) > 25 else None),
+            associated_videos=_load_videos(row[26] if len(row) > 26 else None),
         )
 
     def stats(self) -> IndexStats:
@@ -451,6 +463,7 @@ class IndexDatabase:
                 "transcript_language": "ALTER TABLE sounds ADD COLUMN transcript_language TEXT NOT NULL DEFAULT ''",
                 "transcript_path": "ALTER TABLE sounds ADD COLUMN transcript_path TEXT NOT NULL DEFAULT ''",
                 "duration_seconds": "ALTER TABLE sounds ADD COLUMN duration_seconds REAL",
+                "user_notes": "ALTER TABLE sounds ADD COLUMN user_notes TEXT NOT NULL DEFAULT ''",
                 "search_text": "ALTER TABLE sounds ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
                 "raw_json": "ALTER TABLE sounds ADD COLUMN raw_json TEXT NOT NULL DEFAULT ''",
                 "evidence_paths": "ALTER TABLE sounds ADD COLUMN evidence_paths TEXT NOT NULL DEFAULT ''",
@@ -526,6 +539,7 @@ class IndexDatabase:
                     transcript_language TEXT NOT NULL DEFAULT '',
                     transcript_path TEXT NOT NULL DEFAULT '',
                     duration_seconds REAL,
+                    user_notes TEXT NOT NULL DEFAULT '',
                     search_text TEXT NOT NULL,
                     raw_json TEXT NOT NULL DEFAULT '',
                     evidence_paths TEXT NOT NULL DEFAULT '',

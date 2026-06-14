@@ -89,6 +89,44 @@ def test_valid_pair_code_submit_and_poll_round_trip():
     assert poll.json()["items"][0]["url"] == "https://www.tiktok.com/t/abc/"
 
 
+def test_submit_and_poll_carry_user_note():
+    client = _fresh_client()
+    pair = client.post("/v1/pairing/create", json={"device_name": "Studio Mac"}).json()
+    submit = client.post(
+        "/v1/inbox/submit",
+        json={
+            "pair_code": pair["pair_code"],
+            "url": "https://www.tiktok.com/t/abc/",
+            "source": "ios_shortcut",
+            "note": "use for gym intros",
+        },
+    )
+    poll = client.get(
+        "/v1/inbox/poll",
+        params={"pair_code": pair["pair_code"]},
+        headers={"x-device-id": pair["device_id"], "x-device-secret": pair["device_secret"]},
+    )
+
+    assert submit.status_code == 200
+    assert poll.status_code == 200
+    assert poll.json()["items"][0]["note"] == "use for gym intros"
+
+
+def test_submit_without_note_defaults_to_empty_string():
+    client = _fresh_client()
+    pair = client.post("/v1/pairing/create", json={"device_name": "Studio Mac"}).json()
+    client.post(
+        "/v1/inbox/submit",
+        json={"pair_code": pair["pair_code"], "url": "https://www.tiktok.com/t/abc/", "source": "ios_shortcut"},
+    )
+    poll = client.get(
+        "/v1/inbox/poll",
+        params={"pair_code": pair["pair_code"]},
+        headers={"x-device-id": pair["device_id"], "x-device-secret": pair["device_secret"]},
+    )
+    assert poll.json()["items"][0]["note"] == ""
+
+
 def test_device_b_cannot_poll_pair_code_created_for_device_a():
     client = _fresh_client()
     pair_a = client.post("/v1/pairing/create", json={"device_name": "Studio Mac"}).json()

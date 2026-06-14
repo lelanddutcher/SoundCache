@@ -129,6 +129,69 @@ def test_desktop_gui_qa_harness_exercises_core_editor_workflows(tmp_path, monkey
     window.close()
 
 
+def test_desktop_user_notes_editor_saves_and_searches(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    vault = tmp_path / "vault"
+    catalog = vault / "catalog"
+    sound_dir = vault / "sounds" / "n1 - Notable"
+    catalog.mkdir(parents=True)
+    sound_dir.mkdir(parents=True)
+    (sound_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "tiktok_music_id": "n1",
+                "tiktok_visible_title": "Notable",
+                "source_artist": "Creator",
+                "paths": {"folder": str(sound_dir)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (catalog / "sounds.jsonl").write_text(
+        json.dumps({"tiktok_music_id": "n1", "tiktok_visible_title": "Notable", "paths": {"folder": str(sound_dir)}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    window.show()
+    app.processEvents()
+    window.vm.rebuild_index()
+    window.refresh_table()
+
+    # The User notes editor lives under the Transcript section of the inspector.
+    assert hasattr(window, "user_notes_edit")
+    window.table.selectRow(0)
+    window.update_preview_from_selection()
+    app.processEvents()
+    assert window._notes_music_id == "n1"
+    assert window.user_notes_edit.toPlainText() == ""  # nothing saved yet
+
+    # Type a note and flush (the real flow debounces; we flush directly here).
+    window.user_notes_edit.setPlainText("perfect for skate edits")
+    window._flush_user_notes()
+
+    # Persisted to metadata.json (file-native truth)...
+    meta = json.loads((sound_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["user_notes"] == "perfect for skate edits"
+    # ...and searchable through the normal search box.
+    window.search_box.setText("skate")
+    window.refresh_table()
+    assert window.table.rowCount() == 1
+
+    # Re-selecting the row reloads the saved note into the editor.
+    window.clear_preview()
+    assert window.user_notes_edit.toPlainText() == ""
+    window.table.selectRow(0)
+    window.update_preview_from_selection()
+    app.processEvents()
+    assert window.user_notes_edit.toPlainText() == "perfect for skate edits"
+    window.close()
+
+
 def test_library_popularity_sort_is_numeric_not_text(tmp_path, monkeypatch):
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))

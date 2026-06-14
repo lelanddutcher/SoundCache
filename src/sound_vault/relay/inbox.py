@@ -28,6 +28,7 @@ class InboxItem:
     source: str
     created_at: float
     expires_at: float
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ class InboxStore:
             return False
         return True
 
-    def submit_link(self, *, pair_code: str, url: str, source: str) -> InboxItem:
+    def submit_link(self, *, pair_code: str, url: str, source: str, note: str = "") -> InboxItem:
         now = self._now()
         item = InboxItem(
             id=f"in_{secrets.token_urlsafe(12)}",
@@ -105,6 +106,7 @@ class InboxStore:
             source=source,
             created_at=now,
             expires_at=now + self._item_ttl_seconds,
+            note=(note or "").strip(),
         )
         self._items.append(item)
         if self._db_path is not None:
@@ -112,10 +114,10 @@ class InboxStore:
                 db.execute(
                     """
                     INSERT OR REPLACE INTO inbox_items
-                    (id, pair_code_hash, url, source, created_at, expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (id, pair_code_hash, url, source, created_at, expires_at, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (item.id, item.pair_code_hash, item.url, item.source, item.created_at, item.expires_at),
+                    (item.id, item.pair_code_hash, item.url, item.source, item.created_at, item.expires_at, item.note),
                 )
         return item
 
@@ -186,13 +188,17 @@ class InboxStore:
                     url TEXT NOT NULL,
                     source TEXT NOT NULL,
                     created_at REAL NOT NULL,
-                    expires_at REAL NOT NULL
+                    expires_at REAL NOT NULL,
+                    note TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(pair_codes)")}
             if "device_id" not in columns:
                 db.execute("ALTER TABLE pair_codes ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
+            item_columns = {row[1] for row in db.execute("PRAGMA table_info(inbox_items)")}
+            if "note" not in item_columns:
+                db.execute("ALTER TABLE inbox_items ADD COLUMN note TEXT NOT NULL DEFAULT ''")
 
     def _load_from_db(self) -> None:
         now = self._now()
@@ -223,8 +229,9 @@ class InboxStore:
                     source=str(row[3]),
                     created_at=float(row[4]),
                     expires_at=float(row[5]),
+                    note=str(row[6] or ""),
                 )
                 for row in db.execute(
-                    "SELECT id, pair_code_hash, url, source, created_at, expires_at FROM inbox_items ORDER BY created_at"
+                    "SELECT id, pair_code_hash, url, source, created_at, expires_at, note FROM inbox_items ORDER BY created_at"
                 )
             ]

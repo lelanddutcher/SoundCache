@@ -66,9 +66,11 @@ class PostgresInboxStore:
                     url TEXT NOT NULL,
                     source TEXT NOT NULL,
                     created_at DOUBLE PRECISION NOT NULL,
-                    expires_at DOUBLE PRECISION NOT NULL
+                    expires_at DOUBLE PRECISION NOT NULL,
+                    note TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_inbox_pair ON inbox_items (pair_code_hash);
+                ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
                 """
             )
             conn.commit()
@@ -112,7 +114,7 @@ class PostgresInboxStore:
                 return False
         return True
 
-    def submit_link(self, *, pair_code: str, url: str, source: str) -> InboxItem:
+    def submit_link(self, *, pair_code: str, url: str, source: str, note: str = "") -> InboxItem:
         now = self._now()
         item = InboxItem(
             id=f"in_{secrets.token_urlsafe(12)}",
@@ -121,14 +123,15 @@ class PostgresInboxStore:
             source=source,
             created_at=now,
             expires_at=now + self._item_ttl_seconds,
+            note=(note or "").strip(),
         )
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO inbox_items (id, pair_code_hash, url, source, created_at, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO inbox_items (id, pair_code_hash, url, source, created_at, expires_at, note)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (item.id, item.pair_code_hash, item.url, item.source, item.created_at, item.expires_at),
+                (item.id, item.pair_code_hash, item.url, item.source, item.created_at, item.expires_at, item.note),
             )
             conn.commit()
         return item
@@ -156,7 +159,7 @@ class PostgresInboxStore:
                 """
                 DELETE FROM inbox_items
                 WHERE pair_code_hash = %s AND expires_at >= %s
-                RETURNING id, pair_code_hash, url, source, created_at, expires_at
+                RETURNING id, pair_code_hash, url, source, created_at, expires_at, note
                 """,
                 (wanted, now),
             )
@@ -165,7 +168,7 @@ class PostgresInboxStore:
         return [
             InboxItem(
                 id=str(r[0]), pair_code_hash=str(r[1]), url=str(r[2]), source=str(r[3]),
-                created_at=float(r[4]), expires_at=float(r[5]),
+                created_at=float(r[4]), expires_at=float(r[5]), note=str(r[6] or ""),
             )
             for r in rows
         ]

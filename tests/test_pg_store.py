@@ -33,6 +33,18 @@ def test_pg_inbox_delivers_once():
     assert store.poll(device_id="d1", device_secret="secret", pair_code="RIVER-7421") == []
 
 
+def test_pg_inbox_carries_user_note():
+    from sound_vault.relay.pg_store import PostgresInboxStore
+
+    store = PostgresInboxStore(DSN, now=lambda: 1000.0)
+    _clean_inbox(store)
+    store.register_device(device_id="d1", device_secret="secret")
+    store.register_pair_code("RIVER-7421", device_id="d1")
+    store.submit_link(pair_code="RIVER-7421", url="https://x/y", source="ios_shortcut", note="  wedding vibes  ")
+    [delivered] = store.poll(device_id="d1", device_secret="secret", pair_code="RIVER-7421")
+    assert delivered.note == "wedding vibes"
+
+
 def test_pg_secret_is_hashed_at_rest():
     from sound_vault.relay.pg_store import PostgresInboxStore
 

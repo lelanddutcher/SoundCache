@@ -34,6 +34,7 @@ class ShortcutInboxItem:
     relay_id: str | None = None
     attempts: int = 0
     error: str | None = None
+    note: str = ""
 
 
 class ShortcutInboxStore:
@@ -61,7 +62,7 @@ class ShortcutInboxStore:
             finally:
                 fcntl.flock(lock_handle, fcntl.LOCK_UN)
 
-    def add_url(self, url: str, *, source: str, relay_id: str | None = None) -> ShortcutInboxItem:
+    def add_url(self, url: str, *, source: str, relay_id: str | None = None, note: str = "") -> ShortcutInboxItem:
         url = url.strip()
         with self._exclusive_lock():
             existing = self._read_unlocked()
@@ -75,6 +76,7 @@ class ShortcutInboxStore:
                 status="pending",
                 created_at=_now_iso(),
                 relay_id=relay_id,
+                note=(note or "").strip(),
             )
             self._write_all([*existing, item])
             return item
@@ -199,4 +201,5 @@ def _item_from_row(data: Any) -> ShortcutInboxItem | None:
         relay_id=relay_id,
         attempts=attempts,
         error=str(error) if error else None,
+        note=str(data.get("note") or ""),
     )

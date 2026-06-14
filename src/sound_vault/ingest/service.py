@@ -140,7 +140,8 @@ class IngestService:
             title = download_title or (resolved.title_guess or "").strip() or "Unknown"
         return title, artist
 
-    def ingest_url(self, url: str, *, source: str = "ios_shortcut") -> IngestOutcome:
+    def ingest_url(self, url: str, *, source: str = "ios_shortcut", note: str = "") -> IngestOutcome:
+        note = (note or "").strip()
         resolved = self._resolve_source(url)
         if resolved.status != "ok":
             return IngestOutcome(status="failed", url=url, reason=resolved.error or "could not resolve URL")
@@ -203,6 +204,7 @@ class IngestService:
                 info=info,
                 status="ingested",
                 tags=[source],
+                user_notes=note,
                 tagger=self._tagger,
                 now_iso=self._now(),
             )
@@ -341,7 +343,7 @@ class IngestService:
     ) -> list[tuple[ShortcutInboxItem, IngestOutcome]]:
         outcomes: list[tuple[ShortcutInboxItem, IngestOutcome]] = []
         for item in store.pending():
-            outcome = self.ingest_url(item.url, source=item.source)
+            outcome = self.ingest_url(item.url, source=item.source, note=getattr(item, "note", "") or "")
             if outcome.status in ("ingested", "duplicate"):
                 store.mark_imported(item.id)
             else:

@@ -329,6 +329,32 @@ class LibraryViewModel:
     def add_shortcut_url(self, url: str, *, source: str, relay_id: str | None = None) -> ShortcutInboxItem:
         return self.inbox.add_url(url, source=source, relay_id=relay_id)
 
+    def set_user_notes(self, music_id: str, notes: str) -> bool:
+        """Persist a sound's user notes to metadata.json (file-native truth) + the
+        index (so notes are searchable). Returns False if the sound is unknown."""
+        import json as _json
+
+        record = self.db.get(music_id)
+        if record is None:
+            return False
+        notes = notes or ""
+        folder = record.folder_path
+        if folder is not None:
+            meta_path = Path(folder) / "metadata.json"
+            if meta_path.exists():
+                try:
+                    data = _json.loads(meta_path.read_text(encoding="utf-8"))
+                    data["user_notes"] = notes
+                    meta_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                except (OSError, ValueError):
+                    pass
+        self.db.update_user_notes(music_id, notes)
+        refreshed = self.db.get(music_id)
+        if refreshed is not None:
+            with self._lock:
+                self._records_by_id[music_id] = refreshed
+        return True
+
     def poll_relay_inbox(
         self,
         *,

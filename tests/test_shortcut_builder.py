@@ -22,23 +22,33 @@ def test_build_workflow_targets_relay_and_carries_pair_code():
     assert "WFSafariWebPageContentItem" in wf["WFWorkflowInputContentItemClasses"]
 
     actions = wf["WFWorkflowActions"]
-    post = actions[0]
-    assert post["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    by_id = {a["WFWorkflowActionIdentifier"]: a for a in actions}
+
+    # An Ask-for-Input step runs first so the user can label/annotate the sound.
+    ask = actions[0]
+    assert ask["WFWorkflowActionIdentifier"] == "is.workflow.actions.ask"
+    ask_uuid = ask["WFWorkflowActionParameters"]["UUID"]
+
+    post = by_id["is.workflow.actions.downloadurl"]
     params = post["WFWorkflowActionParameters"]
     assert params["WFURL"] == "https://api.soundcache.io/v1/inbox/submit"
     assert params["WFHTTPMethod"] == "POST"
 
     body_items = params["WFJSONValues"]["Value"]["WFDictionaryFieldValueItems"]
     keys = {item["WFKey"]["Value"]["string"]: item for item in body_items}
-    assert set(keys) == {"pair_code", "url", "source"}
+    assert set(keys) == {"pair_code", "url", "source", "note"}
     # pair code is normalized to upper-case
     assert keys["pair_code"]["WFValue"]["Value"]["string"] == "RIVER-7421"
     assert keys["source"]["WFValue"]["Value"]["string"] == "ios_shortcut"
     # the shared link is bound to the Share-Sheet ExtensionInput
     assert keys["url"]["WFValue"]["Value"]["Type"] == "ExtensionInput"
+    # the note carries the Ask action's captured output into the POST body
+    note_value = keys["note"]["WFValue"]["Value"]
+    assert note_value["Type"] == "ActionOutput"
+    assert note_value["OutputUUID"] == ask_uuid
 
     # branding in the confirmation toast
-    notify = actions[1]["WFWorkflowActionParameters"]
+    notify = by_id["is.workflow.actions.shownotification"]["WFWorkflowActionParameters"]
     assert notify["WFNotificationActionTitle"] == "Sound Cache"
 
 

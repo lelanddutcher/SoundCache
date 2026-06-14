@@ -6,6 +6,23 @@
 	<array>
 		<dict>
 			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.ask</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>CustomOutputName</key>
+				<string>Sound note</string>
+				<key>UUID</key>
+				<string>5C0DACAE-0001-4000-A000-50554E444E4F</string>
+				<key>WFAskActionAllowsMultiline</key>
+				<true/>
+				<key>WFAskActionPrompt</key>
+				<string>Label or notes for this sound? (optional)</string>
+				<key>WFInputType</key>
+				<string>Text</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
 			<string>is.workflow.actions.downloadurl</string>
 			<key>WFWorkflowActionParameters</key>
 			<dict>
@@ -144,6 +161,38 @@
 									<string>WFTextTokenString</string>
 								</dict>
 							</dict>
+							<dict>
+								<key>WFItemType</key>
+								<integer>0</integer>
+								<key>WFKey</key>
+								<dict>
+									<key>Value</key>
+									<dict>
+										<key>attachmentsByRange</key>
+										<dict/>
+										<key>string</key>
+										<string>note</string>
+									</dict>
+									<key>WFSerializationType</key>
+									<string>WFTextTokenString</string>
+								</dict>
+								<key>WFValue</key>
+								<dict>
+									<key>Value</key>
+									<dict>
+										<key>Aggrandizements</key>
+										<array/>
+										<key>OutputName</key>
+										<string>Sound note</string>
+										<key>OutputUUID</key>
+										<string>5C0DACAE-0001-4000-A000-50554E444E4F</string>
+										<key>Type</key>
+										<string>ActionOutput</string>
+									</dict>
+									<key>WFSerializationType</key>
+									<string>WFTextTokenAttachment</string>
+								</dict>
+							</dict>
 						</array>
 					</dict>
 					<key>WFSerializationType</key>
@@ -159,9 +208,9 @@
 			<key>WFWorkflowActionParameters</key>
 			<dict>
 				<key>WFNotificationActionBody</key>
-				<string>Sent to Sound Vault ✨</string>
+				<string>Saved to Sound Cache ✨</string>
 				<key>WFNotificationActionTitle</key>
-				<string>Sound Vault</string>
+				<string>Sound Cache</string>
 			</dict>
 		</dict>
 	</array>

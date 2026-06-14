@@ -148,6 +148,25 @@ def test_drain_inbox_records_failure_and_retries_until_exhausted(tmp_path):
     assert "boom" in (failed.error or "")
 
 
+def test_ingest_url_writes_user_note_to_metadata(tmp_path):
+    svc = make_service(tmp_path, FakeDownloader())
+    out = svc.ingest_url("https://www.tiktok.com/t/abc/", source="ios_shortcut", note="  use for gym intros  ")
+    assert out.status == "ingested"
+    meta = json.loads((out.folder / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["user_notes"] == "use for gym intros"
+
+
+def test_drain_inbox_carries_note_into_metadata(tmp_path):
+    store = ShortcutInboxStore(tmp_path / "inbox.jsonl")
+    store.add_url("https://www.tiktok.com/t/a/", source="ios_shortcut", relay_id="in_1", note="wedding vibes")
+    resolve_map = {"https://www.tiktok.com/t/a/": tiktok_music("https://www.tiktok.com/t/a/", music_id="A")}
+    svc = make_service(tmp_path, FakeDownloader(), resolve_map=resolve_map)
+    [(_, outcome)] = svc.drain_inbox(store)
+    assert outcome.status == "ingested"
+    meta = json.loads((outcome.folder / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["user_notes"] == "wedding vibes"
+
+
 def test_ingest_non_tiktok_uses_download_title(tmp_path):
     yt = ResolvedSource(
         input_url="https://youtu.be/dQw4w9WgXcQ", final_url="https://youtu.be/dQw4w9WgXcQ",

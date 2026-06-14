@@ -15,6 +15,21 @@ def test_submitted_link_is_delivered_once_to_device():
     assert store.poll(device_id="dev_1", device_secret="secret", pair_code="RIVER-7421") == []
 
 
+def test_submitted_note_rides_through_to_delivery():
+    store = InboxStore(now=lambda: 1000.0)
+    store.register_device(device_id="dev_1", device_secret="secret")
+    store.register_pair_code("RIVER-7421", device_id="dev_1")
+
+    store.submit_link(
+        pair_code="RIVER-7421",
+        url="https://www.tiktok.com/t/abc/",
+        source="ios_shortcut",
+        note="  gym montage intro  ",
+    )
+    [delivered] = store.poll(device_id="dev_1", device_secret="secret", pair_code="RIVER-7421")
+    assert delivered.note == "gym montage intro"  # trimmed and preserved
+
+
 def test_wrong_device_secret_cannot_poll_links():
     store = InboxStore(now=lambda: 1000.0)
     store.register_device(device_id="dev_1", device_secret="secret")
