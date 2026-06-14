@@ -28,6 +28,14 @@ def test_settings_round_trips_vault_root(tmp_path):
     assert AppSettings(tmp_path / "settings.json").vault_root() == vault
 
 
+def test_relay_base_url_defaults_to_public_relay(tmp_path):
+    settings = AppSettings(tmp_path / "settings.json")
+    # New users get a working relay so pairing is one click, no URL hunting.
+    assert settings.relay_base_url() == "https://api.soundcache.io"
+    settings.set_relay_config(base_url="https://my.relay", pair_code="ABC-1")
+    assert AppSettings(tmp_path / "settings.json").relay_base_url() == "https://my.relay"
+
+
 def test_config_and_data_dirs_can_be_overridden(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     data_dir = tmp_path / "data"

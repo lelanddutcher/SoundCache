@@ -17,6 +17,11 @@ LEGACY_APP_DIR_NAME = ".sound-vault"
 APP_DISPLAY_NAME = "Sound Cache"
 LEGACY_DISPLAY_NAME = "Sound Vault"
 
+# Public relay used out-of-the-box so a new user can pair without hunting for a
+# URL. Self-hosters can still override it in Settings. (Same backend as the
+# legacy sound-vault-relay.vercel.app host.)
+DEFAULT_RELAY_BASE_URL = "https://api.soundcache.io"
+
 
 def _named_app_dir(parent: Path) -> Path:
     """Return ``parent / "Sound Cache"``, but keep using an existing legacy
@@ -98,7 +103,7 @@ class AppSettings:
         self._write()
 
     def relay_base_url(self) -> str:
-        return str(self._data.get("relay_base_url") or "")
+        return str(self._data.get("relay_base_url") or DEFAULT_RELAY_BASE_URL)
 
     def relay_pair_code(self) -> str:
         return str(self._data.get("relay_pair_code") or "")

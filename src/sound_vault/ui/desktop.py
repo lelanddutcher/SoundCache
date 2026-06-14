@@ -426,7 +426,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.relay_url = QLineEdit(settings.relay_base_url())
-        self.relay_url.setPlaceholderText("https://your-relay.example")
+        self.relay_url.setPlaceholderText("https://api.soundcache.io")
         self.pair_code = QLineEdit(settings.relay_pair_code())
         self.pair_code.setPlaceholderText("VAULT-1234")
         self.device_id = QLineEdit(settings.relay_device_id())
@@ -770,6 +770,7 @@ class SoundVaultWindow(QMainWindow):
         self._search_timer.timeout.connect(self.refresh_table)
         # Background relay poll so shared links land in the inbox without a click.
         self._poll_worker = None
+        self._poll_in_flight = False
         self._relay_poll_timer = QTimer(self)
         self._relay_poll_timer.setInterval(60_000)
         self._relay_poll_timer.timeout.connect(self._auto_poll_relay)
@@ -814,7 +815,9 @@ class SoundVaultWindow(QMainWindow):
 
     def _auto_poll_relay(self) -> None:
         """Silently pull new relay links into the inbox off the UI thread."""
-        if getattr(self, "_poll_worker", None) is not None and self._poll_worker.isRunning():
+        # Single in-flight flag (not worker.isRunning()) so a timer tick that
+        # races the finished-signal can't spawn a second concurrent poll.
+        if self._poll_in_flight:
             return
         if getattr(self, "_import_worker", None) is not None and self._import_worker.isRunning():
             return
@@ -824,6 +827,7 @@ class SoundVaultWindow(QMainWindow):
         device_secret = self.settings.relay_device_secret()
         if not all((base_url, pair_code, device_id, device_secret)):
             return
+        self._poll_in_flight = True
         self._poll_worker = _PollWorker(
             self.vm,
             base_url=base_url,
@@ -836,9 +840,11 @@ class SoundVaultWindow(QMainWindow):
         self._poll_worker.start()
 
     def _on_auto_poll_finished(self, items, error) -> None:
+        self._poll_in_flight = False
         self._poll_worker = None
         if error is not None:
             write_event("gui.auto_poll_failed", **exception_fields(error))
+            self.statusBar().showMessage("Relay poll failed — check Settings (see logs).", 5000)
             return
         if items:
             self.refresh_inbox()
@@ -1778,11 +1784,14 @@ class SoundVaultWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         self._stop_external_audio()
-        if getattr(self, "_relay_poll_timer", None) is not None:
-            self._relay_poll_timer.stop()
-        poll_worker = getattr(self, "_poll_worker", None)
-        if poll_worker is not None and poll_worker.isRunning():
-            poll_worker.wait(3000)
+        for timer_name in ("_relay_poll_timer", "_index_timer", "_worker_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
+        for worker_name in ("_poll_worker", "_import_worker"):
+            worker = getattr(self, worker_name, None)
+            if worker is not None and worker.isRunning():
+                worker.wait(5000)
         self.save_table_layout("library", self.table)
         self.save_table_layout("inbox", self.inbox_table)
         self.settings.set_hidden_table_columns("library", self.hidden_library_columns())

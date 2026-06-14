@@ -63,3 +63,37 @@ def test_uninstall_removes_plist_and_boots_out(tmp_path, monkeypatch):
     launchd.uninstall(run=fake)
     assert not launchd.plist_path().exists()
     assert any(c[1] == "bootout" for c in fake.cmds)
+
+
+def test_capture_tiktok_env_picks_up_set_vars():
+    environ = {
+        "SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT": "/x/capture.cjs",
+        "SOUND_VAULT_TIKTOK_STATE": "/x/state.json",
+        "SOUND_VAULT_TIKTOK_CAPTURE_CWD": "",  # empty -> dropped
+        "UNRELATED": "y",
+    }
+    captured = launchd.capture_tiktok_env(environ)
+    assert captured == {
+        "SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT": "/x/capture.cjs",
+        "SOUND_VAULT_TIKTOK_STATE": "/x/state.json",
+    }
+
+
+def test_build_plist_bakes_in_tiktok_env():
+    """Regression: the agent gets a clean env, so the Playwright fallback vars
+    must be written into the plist or background TikTok downloads silently fail."""
+    env = {"SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT": "/x/c.cjs", "SOUND_VAULT_TIKTOK_STATE": "/x/s.json"}
+    p = launchd.build_plist(python_executable="/p", extra_env=env)
+    ev = p["EnvironmentVariables"]
+    assert ev["SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT"] == "/x/c.cjs"
+    assert ev["SOUND_VAULT_TIKTOK_STATE"] == "/x/s.json"
+    assert "/opt/homebrew/bin" in ev["PATH"]  # PATH preserved
+
+
+def test_install_bakes_captured_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT", "/x/c.cjs")
+    monkeypatch.setenv("SOUND_VAULT_TIKTOK_STATE", "/x/s.json")
+    path = launchd.install(python_executable="/p", run=_FakeRun())
+    parsed = plistlib.loads(path.read_bytes())
+    assert parsed["EnvironmentVariables"]["SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT"] == "/x/c.cjs"
