@@ -558,3 +558,82 @@ class LibraryViewModel:
 
     def mark_inbox_imported(self, item_id: str) -> None:
         self.inbox.mark_imported(item_id)
+
+    def apply_dedupe_decision(
+        self,
+        *,
+        group_id: str,
+        keep_music_id: str,
+        duplicate_music_ids: list[str],
+        notes: str = "",
+        dry_run: bool = False,
+    ) -> Any:
+        """Record a keep/duplicate verdict AND act on it: archive duplicates, drop from cache."""
+        from sound_vault.workers.dedupe_actions import DedupeService
+
+        self.record_duplicate_decision(
+            group_id=group_id,
+            decision="duplicates",
+            keep_music_id=keep_music_id,
+            duplicate_music_ids=duplicate_music_ids,
+            notes=notes,
+        )
+        result = DedupeService(self.vault_root).apply_decision(
+            keep_music_id=keep_music_id, duplicate_music_ids=duplicate_music_ids, dry_run=dry_run
+        )
+        if not dry_run and result.archived:
+            self.db.delete_many(result.archived)
+            with self._lock:
+                for music_id in result.archived:
+                    self._records_by_id.pop(music_id, None)
+                self._catalog_stats = inspect_catalog_stats(self.vault_root)
+        return result
+
+    def import_pending(self, *, reporter: Any = None) -> list[Any]:
+        """Drain pending inbox links: resolve -> download -> package -> cache upsert.
+
+        Returns the per-item ingest outcomes. Newly ingested sounds are refreshed
+        into the in-memory record map so previews work without a full rebuild. If a
+        reporter is given, each successful ingest reports an anonymized save event.
+        """
+        from sound_vault.ingest.factory import build_ingest_service
+
+        service = build_ingest_service(vault_root=self.vault_root, db=self.db)
+        results = service.drain_inbox(self.inbox)
+        with self._lock:
+            for _item, outcome in results:
+                if outcome.status == "ingested" and outcome.music_id:
+                    record = self.db.get(outcome.music_id)
+                    if record is not None:
+                        self._records_by_id[outcome.music_id] = record
+                    if reporter is not None:
+                        platform = ""
+                        if record is not None and isinstance(record.raw, dict):
+                            platform = str(record.raw.get("platform") or "")
+                        reporter.report_save(
+                            sound_id=outcome.music_id,
+                            platform=platform,
+                            title=record.title if record else "",
+                            artist=record.artist if record else "",
+                        )
+            self._catalog_stats = inspect_catalog_stats(self.vault_root)
+        return [outcome for _item, outcome in results]
+
+    def poll_and_import(
+        self,
+        *,
+        base_url: str,
+        pair_code: str,
+        device_id: str,
+        device_secret: str,
+        get_json: Callable[..., dict[str, Any]] = _default_get_json,
+    ) -> list[Any]:
+        """Pull new links from the relay into the inbox, then ingest them."""
+        self.poll_relay_inbox(
+            base_url=base_url,
+            pair_code=pair_code,
+            device_id=device_id,
+            device_secret=device_secret,
+            get_json=get_json,
+        )
+        return self.import_pending()

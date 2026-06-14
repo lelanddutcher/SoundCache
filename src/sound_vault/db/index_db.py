@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 import sqlite3
 from pathlib import Path
 
-from sound_vault.vault.indexer import SoundRecord
+from sound_vault.vault.indexer import AssociatedVideo, SoundRecord
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,146 @@ class IndexStats:
 
 
 _FTS_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+# --- cache-fidelity serialization (raw JSON + evidence/associated-video tuples) ---
+def _dump_raw(raw: dict) -> str:
+    try:
+        return json.dumps(raw or {}, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _load_raw(text: str | None) -> dict:
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _dump_paths(paths) -> str:
+    return json.dumps([str(p) for p in paths], ensure_ascii=False)
+
+
+def _load_paths(text: str | None) -> tuple[Path, ...]:
+    if not text:
+        return ()
+    try:
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(data, list):
+        return ()
+    return tuple(Path(str(p)) for p in data if p)
+
+
+def _dump_videos(videos) -> str:
+    return json.dumps(
+        [
+            {
+                "rank": v.rank,
+                "video_id": v.video_id,
+                "author_handle": v.author_handle,
+                "video_url": v.video_url,
+                "description": v.description,
+                "video_path": str(v.video_path) if v.video_path else None,
+                "screenshot_path": str(v.screenshot_path) if v.screenshot_path else None,
+                "page_title": v.page_title,
+                "captured_at": v.captured_at,
+                "download_bytes": v.download_bytes,
+            }
+            for v in videos
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _load_videos(text: str | None) -> tuple[AssociatedVideo, ...]:
+    if not text:
+        return ()
+    try:
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(data, list):
+        return ()
+    videos: list[AssociatedVideo] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        videos.append(
+            AssociatedVideo(
+                rank=int(entry.get("rank") or 0),
+                video_id=str(entry.get("video_id") or ""),
+                author_handle=str(entry.get("author_handle") or ""),
+                video_url=str(entry.get("video_url") or ""),
+                description=str(entry.get("description") or ""),
+                video_path=Path(entry["video_path"]) if entry.get("video_path") else None,
+                screenshot_path=Path(entry["screenshot_path"]) if entry.get("screenshot_path") else None,
+                page_title=str(entry.get("page_title") or ""),
+                captured_at=str(entry.get("captured_at") or ""),
+                download_bytes=entry.get("download_bytes"),
+            )
+        )
+    return tuple(videos)
+
+
+# Column order shared by rebuild() and upsert() so they never drift apart.
+_COLUMNS = (
+    "music_id", "title", "artist", "tags", "status", "associated_video_count",
+    "added_at", "packaged_at", "folder_path", "local_audio_path", "artwork_path",
+    "evidence_image_count", "usage_count", "source_provider", "source_confidence",
+    "vault_version", "canonical_url", "source_music_url", "music_page_title",
+    "video_manifest_captured_at", "transcript_text", "transcript_language",
+    "transcript_path", "duration_seconds", "search_text",
+    "raw_json", "evidence_paths", "associated_videos",
+)
+
+# Columns selected for read (everything except search_text), in _row_to_record order.
+_READ_COLUMNS = (
+    "music_id", "title", "artist", "tags", "status", "associated_video_count",
+    "added_at", "packaged_at", "folder_path", "local_audio_path", "artwork_path",
+    "usage_count", "source_provider", "source_confidence", "vault_version",
+    "canonical_url", "source_music_url", "music_page_title", "video_manifest_captured_at",
+    "transcript_text", "transcript_language", "transcript_path", "duration_seconds",
+    "raw_json", "evidence_paths", "associated_videos",
+)
+
+
+def _record_values(record: SoundRecord) -> tuple:
+    return (
+        record.music_id,
+        record.title,
+        record.artist,
+        ",".join(record.tags),
+        record.status,
+        record.associated_video_count,
+        record.added_at,
+        record.packaged_at,
+        str(record.folder_path) if record.folder_path else "",
+        str(record.local_audio_path) if record.local_audio_path else "",
+        str(record.artwork_path) if record.artwork_path else "",
+        len(record.evidence_images),
+        record.usage_count,
+        record.source_provider,
+        record.source_confidence,
+        record.vault_version,
+        record.canonical_url,
+        record.source_music_url,
+        record.music_page_title,
+        record.video_manifest_captured_at,
+        record.transcript_text,
+        record.transcript_language,
+        str(record.transcript_path) if record.transcript_path else "",
+        record.duration_seconds,
+        record.search_text,
+        _dump_raw(record.raw),
+        _dump_paths(record.evidence_images),
+        _dump_videos(record.associated_videos),
+    )
 
 
 class IndexDatabase:
@@ -30,16 +171,14 @@ class IndexDatabase:
     def rebuild(self, records: list[SoundRecord]) -> None:
         deduped = {record.music_id: record for record in records}
         with self._connect() as db:
-            rebuild_table = "sounds_rebuild"
-            rebuild_search_table = "sounds_search_rebuild"
             try:
                 db.execute("BEGIN IMMEDIATE")
                 db.execute("DROP TABLE IF EXISTS sounds_rebuild")
                 db.execute("DROP TABLE IF EXISTS sounds_search_rebuild")
-                self._create_sounds_table(db, rebuild_table)
-                self._create_search_table(db, rebuild_search_table)
-                self._insert_records(db, rebuild_table, list(deduped.values()))
-                self._insert_search_records(db, rebuild_search_table, list(deduped.values()))
+                self._create_sounds_table(db, "sounds_rebuild")
+                self._create_search_table(db, "sounds_search_rebuild")
+                self._insert_records(db, "sounds_rebuild", list(deduped.values()))
+                self._insert_search_records(db, "sounds_search_rebuild", list(deduped.values()))
                 db.execute("DROP TABLE sounds")
                 db.execute("DROP TABLE IF EXISTS sounds_search")
                 db.execute("ALTER TABLE sounds_rebuild RENAME TO sounds")
@@ -53,54 +192,50 @@ class IndexDatabase:
                 db.commit()
                 raise
 
+    def upsert(self, record: SoundRecord) -> None:
+        """Insert or update a single sound without rebuilding the whole cache."""
+        self.upsert_many([record])
+
+    def upsert_many(self, records: list[SoundRecord]) -> None:
+        deduped = {record.music_id: record for record in records}
+        if not deduped:
+            return
+        placeholders = ", ".join("?" for _ in _COLUMNS)
+        update_clause = ", ".join(f"{column}=excluded.{column}" for column in _COLUMNS if column != "music_id")
+        sql = (
+            f"INSERT INTO sounds ({', '.join(_COLUMNS)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(music_id) DO UPDATE SET {update_clause}"
+        )
+        with self._connect() as db:
+            for record in deduped.values():
+                db.execute(sql, _record_values(record))
+                # keep the standalone FTS5 table in sync (delete-then-insert)
+                db.execute("DELETE FROM sounds_search WHERE music_id = ?", (record.music_id,))
+                db.execute(
+                    "INSERT INTO sounds_search (music_id, search_text) VALUES (?, ?)",
+                    (record.music_id, record.search_text),
+                )
+            db.commit()
+
+    def delete_many(self, music_ids: list[str]) -> None:
+        ids = [mid for mid in music_ids if mid]
+        if not ids:
+            return
+        with self._connect() as db:
+            db.executemany("DELETE FROM sounds WHERE music_id = ?", [(mid,) for mid in ids])
+            db.executemany("DELETE FROM sounds_search WHERE music_id = ?", [(mid,) for mid in ids])
+            db.commit()
+
     def _insert_records(
         self,
         db: sqlite3.Connection,
         table_name: str,
         records: list[SoundRecord],
     ) -> None:
+        placeholders = ", ".join("?" for _ in _COLUMNS)
         db.executemany(
-            f"""
-                INSERT INTO {table_name} (
-                    music_id, title, artist, tags, status, associated_video_count,
-                    added_at, packaged_at, folder_path, local_audio_path, artwork_path,
-                    evidence_image_count, usage_count, source_provider, source_confidence,
-                    vault_version, canonical_url, source_music_url, music_page_title,
-                    video_manifest_captured_at, transcript_text, transcript_language,
-                    transcript_path, duration_seconds, search_text
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-            [
-                (
-                    record.music_id,
-                    record.title,
-                    record.artist,
-                    ",".join(record.tags),
-                    record.status,
-                    record.associated_video_count,
-                    record.added_at,
-                    record.packaged_at,
-                    str(record.folder_path) if record.folder_path else "",
-                    str(record.local_audio_path) if record.local_audio_path else "",
-                    str(record.artwork_path) if record.artwork_path else "",
-                    len(record.evidence_images),
-                    record.usage_count,
-                    record.source_provider,
-                    record.source_confidence,
-                    record.vault_version,
-                    record.canonical_url,
-                    record.source_music_url,
-                    record.music_page_title,
-                    record.video_manifest_captured_at,
-                    record.transcript_text,
-                    record.transcript_language,
-                    str(record.transcript_path) if record.transcript_path else "",
-                    record.duration_seconds,
-                    record.search_text,
-                )
-                for record in records
-            ],
+            f"INSERT INTO {table_name} ({', '.join(_COLUMNS)}) VALUES ({placeholders})",
+            [_record_values(record) for record in records],
         )
 
     def _insert_search_records(
@@ -110,12 +245,12 @@ class IndexDatabase:
         records: list[SoundRecord],
     ) -> None:
         db.executemany(
-            f"""
-                INSERT INTO {table_name} (music_id, search_text)
-                VALUES (?, ?)
-                """,
+            f"INSERT INTO {table_name} (music_id, search_text) VALUES (?, ?)",
             [(record.music_id, record.search_text) for record in records],
         )
+
+    def _select_columns(self, prefix: str = "sounds.") -> str:
+        return ", ".join(f"{prefix}{column}" for column in _READ_COLUMNS)
 
     def search(
         self,
@@ -133,17 +268,7 @@ class IndexDatabase:
         else:
             limit = 50000
         fts_query = self._fts_query(normalized)
-        sql = """
-            SELECT sounds.music_id, sounds.title, sounds.artist, sounds.tags, sounds.status,
-                   sounds.associated_video_count, sounds.added_at, sounds.packaged_at,
-                   sounds.folder_path, sounds.local_audio_path, sounds.artwork_path,
-                   sounds.usage_count, sounds.source_provider, sounds.source_confidence,
-                   sounds.vault_version, sounds.canonical_url, sounds.source_music_url,
-                   sounds.music_page_title, sounds.video_manifest_captured_at,
-                   sounds.transcript_text, sounds.transcript_language, sounds.transcript_path,
-                   sounds.duration_seconds
-            FROM sounds
-        """
+        sql = f"SELECT {self._select_columns()} FROM sounds"
         clauses: list[str] = []
         params_list: list[object] = []
         if fts_query:
@@ -207,16 +332,7 @@ class IndexDatabase:
         return " ".join(f"{token}*" for token in tokens)
 
     def get(self, music_id: str) -> SoundRecord | None:
-        sql = """
-            SELECT music_id, title, artist, tags, status, associated_video_count,
-                   added_at, packaged_at, folder_path, local_audio_path, artwork_path,
-                   usage_count, source_provider, source_confidence, vault_version, canonical_url,
-                   source_music_url, music_page_title, video_manifest_captured_at,
-                   transcript_text, transcript_language, transcript_path, duration_seconds
-            FROM sounds
-            WHERE music_id = ?
-            LIMIT 1
-        """
+        sql = f"SELECT {self._select_columns()} FROM sounds WHERE music_id = ? LIMIT 1"
         with self._connect() as db:
             rows = db.execute(sql, (music_id,)).fetchall()
         if not rows:
@@ -248,7 +364,9 @@ class IndexDatabase:
             transcript_language=str(row[20] or ""),
             transcript_path=Path(str(row[21])) if row[21] else None,
             duration_seconds=float(row[22]) if row[22] is not None else None,
-            raw={},
+            raw=_load_raw(row[23] if len(row) > 23 else None),
+            evidence_images=_load_paths(row[24] if len(row) > 24 else None),
+            associated_videos=_load_videos(row[25] if len(row) > 25 else None),
         )
 
     def stats(self) -> IndexStats:
@@ -325,6 +443,9 @@ class IndexDatabase:
                 "transcript_path": "ALTER TABLE sounds ADD COLUMN transcript_path TEXT NOT NULL DEFAULT ''",
                 "duration_seconds": "ALTER TABLE sounds ADD COLUMN duration_seconds REAL",
                 "search_text": "ALTER TABLE sounds ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+                "raw_json": "ALTER TABLE sounds ADD COLUMN raw_json TEXT NOT NULL DEFAULT ''",
+                "evidence_paths": "ALTER TABLE sounds ADD COLUMN evidence_paths TEXT NOT NULL DEFAULT ''",
+                "associated_videos": "ALTER TABLE sounds ADD COLUMN associated_videos TEXT NOT NULL DEFAULT ''",
             }
             for column, statement in migrations.items():
                 if column not in columns:
@@ -396,7 +517,10 @@ class IndexDatabase:
                     transcript_language TEXT NOT NULL DEFAULT '',
                     transcript_path TEXT NOT NULL DEFAULT '',
                     duration_seconds REAL,
-                    search_text TEXT NOT NULL
+                    search_text TEXT NOT NULL,
+                    raw_json TEXT NOT NULL DEFAULT '',
+                    evidence_paths TEXT NOT NULL DEFAULT '',
+                    associated_videos TEXT NOT NULL DEFAULT ''
                 )
                 """
         )
@@ -413,12 +537,7 @@ class IndexDatabase:
 
     def _ensure_search_table(self, db: sqlite3.Connection) -> None:
         exists = db.execute(
-            """
-                SELECT 1
-                FROM sqlite_master
-                WHERE name = 'sounds_search'
-                LIMIT 1
-                """
+            "SELECT 1 FROM sqlite_master WHERE name = 'sounds_search' LIMIT 1"
         ).fetchone()
         if exists:
             return
@@ -426,8 +545,7 @@ class IndexDatabase:
         db.execute(
             """
                 INSERT INTO sounds_search (music_id, search_text)
-                SELECT music_id, search_text
-                FROM sounds
+                SELECT music_id, search_text FROM sounds
                 """
         )
 

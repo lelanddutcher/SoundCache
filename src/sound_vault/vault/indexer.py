@@ -794,6 +794,16 @@ def hydrate_record(vault_root: Path, record: SoundRecord) -> SoundRecord:
     return hydrated or record
 
 
+def build_record(vault_root: Path, data: dict[str, Any]) -> SoundRecord | None:
+    """Build one SoundRecord from a single catalog/metadata dict.
+
+    Public single-record path used by the ingest flow's incremental upsert. Reuses
+    build_index's per-row enrichment (sidecars, hashtags) so a freshly-packaged
+    sound indexes identically to a full rebuild.
+    """
+    return _record_from_data(resolve_vault_root(vault_root), data)
+
+
 def _index_worker_count() -> int:
     raw = os.environ.get("SOUND_VAULT_INDEX_WORKERS", "").strip()
     if raw:
