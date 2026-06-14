@@ -292,8 +292,13 @@ def test_desktop_has_import_workers_dashboard_actions():
     assert 'import_export = QPushButton("Import TikTok export")' in source
     assert "import_export.clicked.connect(self.import_tiktok_favorite_sounds_export)" in source
     assert "def import_tiktok_favorite_sounds_export" in source
-    assert 'enrich_oembed = QPushButton("Run oEmbed enrichment")' in source
+    assert 'enrich_oembed = QPushButton("Enrich from data export…")' in source
     assert "enrich_oembed.clicked.connect(self.run_oembed_enrichment)" in source
+    # In-app re-enrichment of incomplete vault sounds (not just the data-export lane).
+    assert 'reenrich = QPushButton("Re-enrich incomplete…")' in source
+    assert "reenrich.clicked.connect(self.reenrich_incomplete_metadata)" in source
+    assert "self.vm.reenrich_incomplete_async(" in source
+    assert "def reenrich_incomplete_metadata" in source
     assert 'package_import = QPushButton("Package imported metadata")' in source
     assert "package_import.clicked.connect(self.package_imported_metadata)" in source
     assert "self.vm.enrich_favorite_sounds_oembed_async(Path(selected))" in source

@@ -1355,12 +1355,24 @@ class SoundVaultWindow(QMainWindow):
         worker_title.setObjectName("sectionTitle")
         refresh_worker = QPushButton("Refresh worker status")
         refresh_worker.clicked.connect(self.refresh_worker_status)
-        enrich_oembed = QPushButton("Run oEmbed enrichment")
+        reenrich = QPushButton("Re-enrich incomplete…")
+        reenrich.setObjectName("primaryButton")
+        reenrich.setToolTip(
+            "Re-run metadata enrichment (page scrape + oEmbed) on sounds in the vault that are "
+            "missing artist, artwork, or popularity. Updates them in place — no re-download."
+        )
+        reenrich.clicked.connect(self.reenrich_incomplete_metadata)
+        enrich_oembed = QPushButton("Enrich from data export…")
+        enrich_oembed.setToolTip(
+            "Batch-enrich a TikTok 'favorite sounds' data-export JSON via oEmbed (opens a file picker). "
+            "For re-enriching sounds already in your vault, use “Re-enrich incomplete”."
+        )
         enrich_oembed.clicked.connect(self.run_oembed_enrichment)
         package_import = QPushButton("Package imported metadata")
         package_import.clicked.connect(self.package_imported_metadata)
         header.addWidget(worker_title)
         header.addStretch(1)
+        header.addWidget(reenrich)
         header.addWidget(enrich_oembed)
         header.addWidget(package_import)
         header.addWidget(refresh_worker)
@@ -2960,6 +2972,27 @@ class SoundVaultWindow(QMainWindow):
         name = self._worker_job_name
         try:
             result = self._worker_future.result()
+            if isinstance(result, dict) and "scanned" in result:
+                # Re-enrich incomplete metadata summary.
+                self._worker_future = None
+                self.worker_label.setText(
+                    f"Worker\n{name} done • {result['enriched']:,} enriched / {result['scanned']:,} scanned"
+                )
+                self._set_index_status("INDEX READY", state="ready")
+                QMessageBox.information(
+                    self,
+                    "Re-enrich complete",
+                    "\n".join([
+                        f"Scanned: {result['scanned']:,}",
+                        f"Enriched: {result['enriched']:,}",
+                        f"Unchanged: {result['unchanged']:,}",
+                        f"Failed: {result['failed']:,}",
+                    ]),
+                )
+                self.refresh_worker_status()
+                if result["enriched"]:
+                    self.rebuild_index()
+                return
             summary = result.summary
             if hasattr(summary, "ok_count"):
                 self.worker_label.setText(
@@ -3008,6 +3041,32 @@ class SoundVaultWindow(QMainWindow):
         finally:
             self._worker_future = None
             self._worker_job_name = ""
+
+    def reenrich_incomplete_metadata(self) -> None:
+        if self._worker_future is not None and not self._worker_future.done():
+            self.statusBar().showMessage(f"Worker already running: {self._worker_job_name}", 3000)
+            return
+        incomplete = self.vm.sounds_needing_enrichment(limit=500)
+        count = len(incomplete)
+        if count == 0:
+            QMessageBox.information(
+                self, "Nothing to re-enrich",
+                "Every sound with a TikTok URL already has artist, artwork, and popularity. ✨",
+            )
+            return
+        cap = min(count, 50)
+        choice = QMessageBox.question(
+            self,
+            "Re-enrich incomplete sounds",
+            f"{count:,} sound(s) are missing artist, artwork, or popularity.\n\n"
+            f"Re-scrape metadata for the first {cap} now? Each opens an authenticated "
+            f"browser briefly (no audio re-download). Existing audio is untouched.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        )
+        if choice != QMessageBox.StandardButton.Ok:
+            return
+        future = self.vm.reenrich_incomplete_async(limit=cap)
+        self._start_worker_job(f"re-enrich {cap}", future)
 
     def run_oembed_enrichment(self) -> None:
         if self._worker_future is not None and not self._worker_future.done():

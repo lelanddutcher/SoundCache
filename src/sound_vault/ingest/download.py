@@ -172,6 +172,23 @@ class PlaywrightCaptureDownloader:
             ok=True, audio_path=target, info=self._read_capture_meta(dest_dir, music_id), method="playwright"
         )
 
+    def capture_metadata_only(self, url: str, *, dest_dir: Path, music_id: str) -> dict:
+        """Scrape only the music-page metadata + cover (no audio download).
+
+        Used by the re-enrich worker to refresh title/author/cover/usage for an
+        already-packaged sound without re-fetching audio. Returns the parsed
+        capture sidecar (empty-ish on failure)."""
+        if not self.available():
+            return {}
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        cmd = ["node", str(self.node_script), url, str(dest_dir), music_id, str(self.storage_state), "meta-only"]
+        try:
+            self._runner(cmd, cwd=self._project_cwd)
+        except Exception:  # noqa: BLE001 - best-effort enrichment
+            return {}
+        return self._read_capture_meta(dest_dir, music_id)
+
     @staticmethod
     def _read_capture_meta(dest_dir: Path, music_id: str) -> dict:
         """Merge the optional <music_id>_meta.json the capture script writes
@@ -219,6 +236,13 @@ class CompositeDownloader:
         self.primary = primary
         self.fallback = fallback
         self.should_fallback = should_fallback
+
+    def capture_metadata_only(self, url: str, *, dest_dir: Path, music_id: str) -> dict:
+        """Delegate a metadata-only scrape to the Playwright fallback, if present."""
+        fn = getattr(self.fallback, "capture_metadata_only", None)
+        if fn is None:
+            return {}
+        return fn(url, dest_dir=dest_dir, music_id=music_id)
 
     def download(
         self, url: str, *, dest_dir: Path, basename: str, source_id: str | None = None, **extra: Any

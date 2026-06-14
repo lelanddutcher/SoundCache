@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 from pathlib import Path
 import shutil
 from typing import Callable
@@ -167,6 +168,89 @@ class IngestService:
             audio_path=packaged.audio_path,
             method=download.method,
         )
+
+    def reenrich_existing(
+        self,
+        *,
+        folder: Path,
+        music_id: str,
+        canonical_url: str,
+        fetch_meta: "Callable[[str], dict]",
+    ) -> dict:
+        """Refresh metadata for an already-packaged sound IN PLACE.
+
+        ``fetch_meta(canonical_url)`` returns enriched fields (title / author /
+        usage_count / cover_path / source_provider). Only fills gaps — never
+        overwrites a non-empty value — and never re-downloads or touches the
+        existing audio. Updates metadata.json + cover artwork and re-indexes.
+        Returns a small summary dict ({status, filled:[...]}).
+        """
+        folder = Path(folder)
+        meta_path = folder / "metadata.json"
+        if not meta_path.exists():
+            return {"status": "skipped", "music_id": music_id, "reason": "no metadata.json"}
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"status": "failed", "music_id": music_id, "reason": f"unreadable metadata: {exc}"}
+
+        enriched = fetch_meta(canonical_url) or {}
+        filled: list[str] = []
+
+        author = str(enriched.get("author") or enriched.get("author_name") or "").strip()
+        if author and str(metadata.get("tiktok_author_or_copyright") or "").strip() in ("", "Unknown"):
+            metadata["tiktok_author_or_copyright"] = author
+            metadata["source_artist"] = author
+            filled.append("artist")
+
+        title = str(enriched.get("title") or "").strip()
+        if title and str(metadata.get("tiktok_visible_title") or "").strip() in ("", "Unknown"):
+            metadata["tiktok_visible_title"] = title
+            filled.append("title")
+
+        usage = enriched.get("usage_count")
+        if usage is not None and metadata.get("usage_count") is None:
+            try:
+                metadata["usage_count"] = int(usage)
+                filled.append("popularity")
+            except (TypeError, ValueError):
+                pass
+
+        provider = str(enriched.get("source_provider") or "").strip()
+        if provider and not metadata.get("source_provider"):
+            metadata["source_provider"] = provider
+
+        paths = metadata.setdefault("paths", {})
+        cover = enriched.get("cover_path")
+        if cover and not paths.get("artwork"):
+            cover_path = Path(str(cover))
+            if cover_path.exists():
+                ext = (cover_path.suffix or ".jpg").lstrip(".") or "jpg"
+                dst = folder / f"artwork.{ext}"
+                try:
+                    shutil.copyfile(cover_path, dst)
+                    rel = f"{paths.get('folder') or ('sounds/' + folder.name)}/artwork.{ext}"
+                    paths["artwork"] = rel
+                    assets = metadata.setdefault("assets", [])
+                    if isinstance(assets, list):
+                        assets.append({"asset_type": "artwork", "path": rel, "source": "tiktok_music_page"})
+                    filled.append("artwork")
+                except OSError:
+                    pass
+
+        if not filled:
+            return {"status": "unchanged", "music_id": music_id, "filled": []}
+
+        metadata["packaged_at"] = self._now()
+        meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+        if self._index_updater is not None:
+            try:
+                self._index_updater(
+                    PackagedSound(music_id=music_id, folder=folder, metadata_path=meta_path, audio_path=None, metadata=metadata)
+                )
+            except Exception:  # noqa: BLE001 - re-index failure shouldn't lose the metadata write
+                pass
+        return {"status": "enriched", "music_id": music_id, "filled": filled}
 
     def drain_inbox(
         self, store: ShortcutInboxStore, *, max_attempts: int = 3

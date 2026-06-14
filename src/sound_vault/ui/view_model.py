@@ -238,6 +238,92 @@ class LibraryViewModel:
     def package_imported_sounds_async(self, input_path: Path) -> Future[PackageImportResult]:
         return self._executor.submit(package_imported_sounds, input_path, self.vault_root)
 
+    def sounds_needing_enrichment(self, *, limit: int = 500):
+        """Indexed sounds with a TikTok URL but missing artist, artwork, or popularity."""
+        out = []
+        for r in self.db.search("", limit=10000):
+            if not (getattr(r, "canonical_url", "") or "").strip():
+                continue
+            if r.folder_path is None:
+                continue
+            thin = (
+                (r.artist or "").strip() in ("", "Unknown")
+                or r.artwork_path is None
+                or r.usage_count is None
+            )
+            if thin:
+                out.append(r)
+                if len(out) >= limit:
+                    break
+        return out
+
+    def reenrich_incomplete_async(self, *, music_ids=None, limit: int = 50) -> Future:
+        """Re-run metadata enrichment (page scrape + oEmbed) on incomplete sounds, off-thread."""
+        return self._executor.submit(self._reenrich_incomplete, music_ids, limit)
+
+    def _reenrich_incomplete(self, music_ids, limit: int) -> dict:
+        import tempfile
+
+        from sound_vault.ingest.factory import build_ingest_service
+        from sound_vault.workers.oembed import fetch_sound_metadata
+
+        service = build_ingest_service(vault_root=self.vault_root, db=self.db)
+        downloader = service.downloader
+        targets = self.sounds_needing_enrichment(limit=limit)
+        if music_ids:
+            wanted = {str(m) for m in music_ids}
+            targets = [r for r in targets if r.music_id in wanted]
+
+        summary = {"scanned": len(targets), "enriched": 0, "unchanged": 0, "failed": 0, "details": []}
+        for record in targets:
+            try:
+                with tempfile.TemporaryDirectory(prefix="sc-reenrich-") as td:
+                    def fetch_meta(url, _td=td, _mid=record.music_id):
+                        merged: dict[str, Any] = {}
+                        cap = getattr(downloader, "capture_metadata_only", None)
+                        if cap is not None and url:
+                            info = cap(url, dest_dir=Path(_td), music_id=_mid)
+                            author = info.get("artist") or info.get("uploader") or ""
+                            merged = {
+                                "title": info.get("title") or "",
+                                "author": author,
+                                "usage_count": info.get("usage_count"),
+                                "cover_path": info.get("cover_path") or "",
+                                "source_provider": info.get("source_provider") or "",
+                            }
+                        if not merged.get("author") or not merged.get("title"):
+                            ext = fetch_sound_metadata(url) if url else {}
+                            if not merged.get("author") and ext.get("author_name"):
+                                merged["author"] = ext["author_name"]
+                            if not merged.get("title") and ext.get("title"):
+                                merged["title"] = ext["title"]
+                            merged.setdefault("source_provider", ext.get("provider_name") or "")
+                        return merged
+
+                    result = service.reenrich_existing(
+                        folder=record.folder_path,
+                        music_id=record.music_id,
+                        canonical_url=record.canonical_url,
+                        fetch_meta=fetch_meta,
+                    )
+            except Exception as exc:  # noqa: BLE001 - one bad sound shouldn't stop the batch
+                summary["failed"] += 1
+                summary["details"].append({"music_id": record.music_id, "status": "failed", "reason": str(exc)})
+                continue
+            status = result.get("status")
+            if status == "enriched":
+                summary["enriched"] += 1
+                refreshed = self.db.get(record.music_id)
+                if refreshed is not None:
+                    with self._lock:
+                        self._records_by_id[record.music_id] = refreshed
+            elif status in ("unchanged",):
+                summary["unchanged"] += 1
+            else:
+                summary["failed"] += 1
+            summary["details"].append({"music_id": record.music_id, **result})
+        return summary
+
     def add_shortcut_url(self, url: str, *, source: str, relay_id: str | None = None) -> ShortcutInboxItem:
         return self.inbox.add_url(url, source=source, relay_id=relay_id)
 
