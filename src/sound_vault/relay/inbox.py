@@ -14,6 +14,12 @@ def _hash_pair_code(pair_code: str) -> str:
     return hashlib.sha256(pair_code.strip().upper().encode("utf-8")).hexdigest()
 
 
+def _hash_secret(device_secret: str) -> str:
+    # Device secrets are full-entropy 256-bit tokens, so a plain SHA-256 digest is
+    # sufficient and lets us avoid ever storing the secret in plaintext.
+    return hashlib.sha256(device_secret.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class InboxItem:
     id: str
@@ -53,12 +59,14 @@ class InboxStore:
             self._load_from_db()
 
     def register_device(self, *, device_id: str, device_secret: str) -> None:
-        self._devices[device_id] = device_secret
+        # Store only the hash; the plaintext secret never touches memory or disk.
+        secret_hash = _hash_secret(device_secret)
+        self._devices[device_id] = secret_hash
         if self._db_path is not None:
             with self._connect() as db:
                 db.execute(
                     "INSERT OR REPLACE INTO devices (device_id, device_secret) VALUES (?, ?)",
-                    (device_id, device_secret),
+                    (device_id, secret_hash),
                 )
 
     def register_pair_code(self, pair_code: str, *, device_id: str) -> None:
@@ -112,7 +120,8 @@ class InboxStore:
         return item
 
     def poll(self, *, device_id: str, device_secret: str, pair_code: str) -> list[InboxItem]:
-        if self._devices.get(device_id) != device_secret:
+        expected = self._devices.get(device_id)
+        if expected is None or not secrets.compare_digest(expected, _hash_secret(device_secret)):
             return []
         now = self._now()
         wanted = _hash_pair_code(pair_code)

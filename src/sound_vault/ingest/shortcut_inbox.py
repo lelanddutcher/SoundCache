@@ -26,6 +26,8 @@ class ShortcutInboxItem:
     status: str
     created_at: str
     relay_id: str | None = None
+    attempts: int = 0
+    error: str | None = None
 
 
 class ShortcutInboxStore:
@@ -76,11 +78,43 @@ class ShortcutInboxStore:
         return [item for item in self.all_items() if item.status == "pending"]
 
     def mark_imported(self, item_id: str) -> None:
-        items = [
-            ShortcutInboxItem(**{**asdict(item), "status": "imported"}) if item.id == item_id else item
-            for item in self.all_items()
-        ]
-        self._write_all(items)
+        self._update(item_id, status="imported")
+
+    def mark_failed(self, item_id: str, error: str) -> None:
+        self._update(item_id, status="failed", error=error, bump_attempts=True)
+
+    def record_failure(self, item_id: str, error: str, *, max_attempts: int = 3) -> None:
+        """Increment attempts; mark failed once exhausted, otherwise keep it pending for retry."""
+        for item in self.all_items():
+            if item.id == item_id:
+                attempts = item.attempts + 1
+                status = "failed" if attempts >= max_attempts else "pending"
+                self._update(item_id, status=status, error=error, attempts=attempts)
+                return
+
+    def _update(
+        self,
+        item_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        attempts: int | None = None,
+        bump_attempts: bool = False,
+    ) -> None:
+        updated: list[ShortcutInboxItem] = []
+        for item in self.all_items():
+            if item.id == item_id:
+                fields = {**asdict(item), "status": status}
+                if error is not None:
+                    fields["error"] = error
+                if attempts is not None:
+                    fields["attempts"] = attempts
+                elif bump_attempts:
+                    fields["attempts"] = item.attempts + 1
+                updated.append(ShortcutInboxItem(**fields))
+            else:
+                updated.append(item)
+        self._write_all(updated)
 
     def _write_all(self, items: list[ShortcutInboxItem]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,6 +140,11 @@ def _item_from_row(data: Any) -> ShortcutInboxItem | None:
     item_id = str(data.get("id") or _stable_id(url, relay_id))
     if item_id.startswith("in_"):
         item_id = _stable_id(url, relay_id)
+    try:
+        attempts = int(data.get("attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    error = data.get("error")
     return ShortcutInboxItem(
         id=item_id,
         url=url,
@@ -113,4 +152,6 @@ def _item_from_row(data: Any) -> ShortcutInboxItem | None:
         status=str(data.get("status") or "pending"),
         created_at=str(data.get("created_at") or _now_iso()),
         relay_id=relay_id,
+        attempts=attempts,
+        error=str(error) if error else None,
     )

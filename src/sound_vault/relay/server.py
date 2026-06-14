@@ -6,12 +6,22 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 
 from sound_vault.relay.inbox import InboxStore
+from sound_vault.relay.leaderboard import LeaderboardStore
 from sound_vault.relay.pairing import PairingRegistry
 
 app = FastAPI(title="Sound Vault Pairing Relay", version="0.1.0")
+# Allow browsers (the landing-page leaderboard widget) to read the API. Submit/poll
+# stay protected by pair code + device secret regardless of origin.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 logger = logging.getLogger(__name__)
 pairings = PairingRegistry()
 
@@ -77,12 +87,32 @@ def enforce_rate_limit(request: Request, *, bucket: str) -> None:
         raise HTTPException(status_code=429, detail="rate limit exceeded")
 
 
-def build_inbox_store() -> InboxStore:
+def _database_url() -> str:
+    return os.getenv("DATABASE_URL") or os.getenv("SOUND_VAULT_RELAY_DATABASE_URL") or ""
+
+
+def build_inbox_store():
+    dsn = _database_url()
+    if dsn:
+        from sound_vault.relay.pg_store import PostgresInboxStore
+
+        return PostgresInboxStore(dsn)
     storage_path = os.getenv("SOUND_VAULT_RELAY_STORAGE_PATH")
     return InboxStore(db_path=Path(storage_path).expanduser()) if storage_path else InboxStore()
 
 
+def build_leaderboard_store():
+    dsn = _database_url()
+    if dsn:
+        from sound_vault.relay.pg_store import PostgresLeaderboardStore
+
+        return PostgresLeaderboardStore(dsn)
+    storage_path = os.getenv("SOUND_VAULT_LEADERBOARD_STORAGE_PATH")
+    return LeaderboardStore(db_path=Path(storage_path).expanduser()) if storage_path else LeaderboardStore()
+
+
 inbox = build_inbox_store()
+leaderboard_store = build_leaderboard_store()
 
 
 class CreatePairingRequest(BaseModel):
@@ -93,6 +123,13 @@ class SubmitLinkRequest(BaseModel):
     pair_code: str
     url: HttpUrl
     source: str = "ios_shortcut"
+
+
+class SaveEventRequest(BaseModel):
+    sound_id: str
+    platform: str = ""
+    title: str = ""
+    artist: str = ""
 
 
 @app.get("/v1/health")
@@ -134,6 +171,39 @@ def poll(pair_code: str, request: Request, x_device_id: str = Header(default="")
     items = inbox.poll(device_id=x_device_id, device_secret=x_device_secret, pair_code=pair_code)
     log_relay_event("poll", pair_code=pair_code, device_id=x_device_id, device_secret=x_device_secret)
     return {"items": [{"id": item.id, "url": item.url, "source": item.source} for item in items]}
+
+
+@app.post("/v1/events/save")
+def record_save_event(request: SaveEventRequest, http_request: Request) -> dict[str, str]:
+    enforce_rate_limit(http_request, bucket="events_save")
+    sound_id = request.sound_id.strip()
+    if not sound_id:
+        raise HTTPException(status_code=422, detail="sound_id is required")
+    leaderboard_store.record_save(
+        sound_id=sound_id, platform=request.platform, title=request.title, artist=request.artist
+    )
+    log_relay_event("save_event", sound_id=sound_id, platform=request.platform)
+    return {"status": "recorded"}
+
+
+@app.get("/v1/leaderboard")
+def get_leaderboard(request: Request, limit: int = 50, window: str = "all") -> dict[str, object]:
+    enforce_rate_limit(request, bucket="leaderboard")
+    entries = leaderboard_store.leaderboard(limit=limit, window=window)
+    return {
+        "window": window,
+        "limit": limit,
+        "entries": [
+            {
+                "sound_id": entry.sound_id,
+                "title": entry.title,
+                "artist": entry.artist,
+                "platform": entry.platform,
+                "saves": entry.saves,
+            }
+            for entry in entries
+        ],
+    }
 
 
 def main() -> None:

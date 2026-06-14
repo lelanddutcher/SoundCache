@@ -1,76 +1,50 @@
-# Sound Vault iOS Shortcut — V1 Recipe
+# Build the "Save to Sound Vault" iOS Shortcut
 
-This is the first manual Shortcut shape for testing the pairing-code relay.
+This Shortcut appears in the **Share Sheet of every app that shares a link** —
+TikTok, Instagram, YouTube, X, Reddit, anything — and POSTs the shared URL to your
+relay. iOS 15+ only imports shortcuts signed through the Shortcuts app, so build it
+once by hand (≈2 minutes); then you can Share → Export to distribute it. The exact
+structure is also generated as a reference at `web/shortcut/SoundVault.unsigned.plist`
+(`python scripts/build_ios_shortcut.py`).
 
-## Inputs
+## Prerequisites
+- The relay URL (your `*.vercel.app` URL once deployed, or `http://<mac-ip>:43117` on LAN for testing).
+- A pairing code from the desktop app: **Settings → Create pairing code** (e.g. `RIVER-7421`).
 
-- Share Sheet input: URL
-- User-provided setting: `PAIR_CODE`, e.g. `RIVER-7421`
-- Relay URL: placeholder until deployed, e.g. `https://sound-vault-relay.example.com`
+## Build it (Shortcuts app → ＋ New Shortcut)
 
-## Shortcut actions
+1. **Receive what's shared.** Tap the shortcut's **ⓘ / Details** → enable **Show in Share Sheet**. Under **Share Sheet Types**, turn ON **URLs** and **Text** (turn the rest off). *This is what makes it show up in TikTok/Instagram/etc.*
 
-1. **Receive URLs from Share Sheet**
-   - Types: URLs
+2. **Add action: "Get Contents of URL".**
+   - URL: `https://<your-relay>/v1/inbox/submit`
+   - Tap **Show More**:
+     - **Method:** `POST`
+     - **Headers:** add `Content-Type` = `application/json`
+     - **Request Body:** `JSON`, add three fields:
+       - `pair_code` (Text) = `YOUR-PAIR-CODE`
+       - `url` (Text) = the **Shortcut Input** magic variable (tap the field → Select Variable → **Shortcut Input**)
+       - `source` (Text) = `ios_shortcut`
 
-2. **Get URLs from Input**
-   - Use the first URL for V1.
+3. **Add action: "Show Notification"** → text: `Sent to Sound Vault ✨`. (Optional but nice.)
 
-3. **Text**
+4. **Name it** "Save to Sound Vault" and pick a fun glyph/color.
 
-```json
-{
-  "pair_code": "RIVER-7421",
-  "url": "Shortcut Input URL here",
-  "source": "ios_shortcut"
-}
-```
+## Test it
+- Open TikTok (or any app) → a sound/post → **Share** → **Save to Sound Vault**.
+- You should see the notification. A successful relay submit returns `{ "id": "in_…", "status": "queued" }`.
+- On the desktop, the link downloads automatically if the background agent is running
+  (`sound-vault-agent install`) or when you hit **Download & import** — see
+  [background-fetch.md](background-fetch.md).
 
-4. **Get Contents of URL**
-   - URL: `https://relay-host.example.com/v1/inbox/submit`
-   - Method: `POST`
-   - Headers:
-     - `Content-Type: application/json`
-   - Request Body: JSON
-     - `pair_code`: `RIVER-7421`
-     - `url`: shared URL
-     - `source`: `ios_shortcut`
+## Share / back it up
+With the Shortcut open: **Share → Copy iCloud Link** (or **Export → Save to Files** for a
+`.shortcut`). That link/file is how you reinstall it or share it with others.
 
-5. **Show Notification**
-
-```text
-Sent to Sound Vault
-```
-
-## Test success
-
-A successful relay submit returns:
-
-```json
-{ "id": "in_...", "status": "queued" }
-```
-
-Then the desktop app polls:
-
-```http
-GET /v1/inbox/poll?pair_code=RIVER-7421
-X-Device-Id: dev_...
-X-Device-Secret: ...
-```
-
-The desktop writes the pulled URL into:
-
-```text
-{vault}/inbox/urls/shortcut-inbox.jsonl
-```
-
-## Why this avoids accounts
-
-The Shortcut only knows a pairing code. The desktop owns the device secret. The relay stores only URLs temporarily and never stores media files or a user library.
+## Why this stays account-free
+The Shortcut only knows a pairing code. The desktop owns the device secret. The relay
+stores only URLs briefly and never media or a user library.
 
 ## Later polish
-
-- Generate QR code for pairing code + relay host.
-- Shortcut imports config from QR/deep link.
-- Add local LAN endpoint fallback when phone and desktop are on the same network.
-- Add “sent / already queued / invalid URL” user messages.
+- QR pairing (scan to fill relay URL + pair code).
+- A LAN fallback endpoint when phone + desktop are on the same network.
+- "sent / already queued / invalid URL" branches in the Shortcut.
