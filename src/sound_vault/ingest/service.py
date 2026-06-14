@@ -78,6 +78,34 @@ class IngestService:
         except Exception:  # noqa: BLE001 - transcription is best-effort, never fatal to ingest
             return False
 
+    def _download_thumbnail(self, url: str, dest_dir: Path, music_id: str) -> Path | None:
+        """Fetch a yt-dlp thumbnail URL to a local cover file (best-effort, certifi SSL).
+
+        Gives Instagram / YouTube / etc. cover artwork without a platform-specific
+        scraper. Returns the saved path, or None on any failure."""
+        if not url.startswith(("http://", "https://")):
+            return None
+        try:
+            import urllib.request
+
+            from sound_vault.net import ssl_context
+
+            ext = "jpg"
+            for cand in (".jpg", ".jpeg", ".png", ".webp"):
+                if cand in url.split("?", 1)[0].lower():
+                    ext = cand.lstrip(".")
+                    break
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=20, context=ssl_context()) as response:  # nosec B310
+                data = response.read()
+            if len(data) < 256:
+                return None
+            dest = Path(dest_dir) / f"{music_id}_cover.{ext}"
+            dest.write_bytes(data)
+            return dest
+        except Exception:  # noqa: BLE001 - artwork is best-effort, never fatal
+            return None
+
     def _enrich_via_oembed(self, canonical_url: str) -> dict:
         """Best-effort oEmbed lookup to fill a missing title/author."""
         if not canonical_url:
@@ -150,6 +178,19 @@ class IngestService:
                     artist = extra["author_name"]
                 if extra.get("provider_name"):
                     info.setdefault("source_provider", extra["provider_name"])
+            # Platform-agnostic enrichment: for any platform (Instagram, YouTube,
+            # ...) fill artwork + popularity + provider from yt-dlp's own metadata
+            # when the TikTok page-scrape didn't supply them.
+            if not info.get("source_provider") and resolved.platform not in ("", "unknown"):
+                info["source_provider"] = resolved.platform
+            if info.get("usage_count") is None:
+                count = info.get("view_count") or info.get("like_count")
+                if count is not None:
+                    info["usage_count"] = count
+            if not info.get("cover_path") and info.get("thumbnail"):
+                thumb = self._download_thumbnail(str(info["thumbnail"]), work, music_id)
+                if thumb is not None:
+                    info["cover_path"] = str(thumb)
             packaged = package_sound(
                 vault_root=self.vault_root,
                 music_id=music_id,

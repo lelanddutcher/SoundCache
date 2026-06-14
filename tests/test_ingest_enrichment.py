@@ -186,6 +186,43 @@ def test_reenrich_existing_does_not_overwrite_present_values(tmp_path):
     assert md["usage_count"] == 999
 
 
+def test_ingest_enriches_non_tiktok_from_ytdlp(tmp_path, monkeypatch):
+    """Instagram/YouTube: artwork + popularity + provider come from yt-dlp's own
+    metadata (thumbnail + view_count) since there's no TikTok page-scrape."""
+    from sound_vault.ingest.download import DownloadResult
+
+    class _IGDownloader:
+        def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
+            Path(dest_dir).mkdir(parents=True, exist_ok=True)
+            audio = Path(dest_dir) / f"{basename}.m4a"
+            audio.write_bytes(b"\x00audio")
+            return DownloadResult(ok=True, audio_path=audio, method="yt-dlp", info={
+                "id": source_id, "title": "Video by wemetatedc", "uploader": "Sivan & Chef",
+                "thumbnail": "https://example.com/thumb.jpg", "view_count": 50000,
+            })
+
+    def ig_resolve(u):
+        return ResolvedSource(
+            input_url=u, final_url=u, platform="instagram", kind="video",
+            canonical_url=u, source_id="DZi", slug=None, title_guess=None, share_music_id=None, status="ok",
+        )
+
+    cover = tmp_path / "thumb.jpg"
+    cover.write_bytes(b"\xff\xd8" + b"x" * 400)
+    svc = IngestService(vault_root=tmp_path / "vault", downloader=_IGDownloader(),
+                        resolve_source=ig_resolve, tagger=_tagger, now=lambda: "2026-06-14T00:00:00Z")
+    monkeypatch.setattr(svc, "_download_thumbnail", lambda url, d, mid: cover)
+    out = svc.ingest_url("https://www.instagram.com/reel/DZi/")
+    assert out.status == "ingested"
+    md = json.loads((out.folder / "metadata.json").read_text())
+    assert md["platform"] == "instagram"
+    assert md["source_provider"] == "instagram"
+    assert md["usage_count"] == 50000
+    assert md["paths"]["artwork"]  # cover copied from the yt-dlp thumbnail
+    assert md["tiktok_visible_title"] == "Video by wemetatedc"
+    assert md["tiktok_author_or_copyright"] == "Sivan & Chef"
+
+
 def _fake_transcriber(audio_path):
     return {"text": "road work ahead? uh yeah i sure hope it does", "language": "en", "model": "base", "engine": "faster-whisper"}
 

@@ -53,10 +53,19 @@ def sanitize_filename_component(value: str, max_len: int = 80) -> str:
     return value or "untitled"
 
 
-def build_human_filename(title: str, artist: str, music_id: str, status: str, ext: str = "m4a") -> str:
+_PLATFORM_TAGS = {"tiktok": "TT", "instagram": "IG", "youtube": "YT"}
+
+
+def _platform_tag(platform: str) -> str:
+    return _PLATFORM_TAGS.get((platform or "").lower(), "SC")
+
+
+def build_human_filename(
+    title: str, artist: str, music_id: str, status: str, ext: str = "m4a", *, platform_tag: str = "TT"
+) -> str:
     title_clean = sanitize_filename_component(_strip_notes(title) or "Unknown", 60)
     author_clean = sanitize_filename_component((artist or "Unknown").strip(), 40)
-    base = f"{title_clean} - {author_clean} [TT-{music_id}] [{status}]"
+    base = f"{title_clean} - {author_clean} [{platform_tag}-{music_id}] [{status}]"
     return sanitize_filename_component(base, 140) + f".{ext}"
 
 
@@ -151,7 +160,7 @@ def package_sound(
     if audio_path is not None:
         src = Path(audio_path)
         if src.exists():
-            human = build_human_filename(title, artist, music_id, status)
+            human = build_human_filename(title, artist, music_id, status, platform_tag=_platform_tag(platform))
             dst = folder / human
             tagger(src, dst, _tag_dict(title, artist, music_id, canonical_url, source_confidence, tags))
             if dst.exists():
