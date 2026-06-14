@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxStore
+from sound_vault.net import ssl_context
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,9 @@ class RelayInboxItem:
 def _default_get_json(url: str, *, params: dict[str, str], headers: dict[str, str], timeout: float) -> dict[str, Any]:
     full_url = f"{url}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(full_url, headers=headers, method="GET")
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310 - user-configured relay URL
+    # certifi CA bundle: framework Python has none, so plain HTTPS fails with
+    # CERTIFICATE_VERIFY_FAILED — which silently broke relay polling.
+    with urllib.request.urlopen(request, timeout=timeout, context=ssl_context()) as response:  # nosec B310 - user-configured relay URL
         return json.loads(response.read().decode("utf-8"))
 
 

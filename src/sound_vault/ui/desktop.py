@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
 
 from sound_vault.diagnostics import exception_fields, write_event
 from sound_vault.ingest import shortcut_builder
+from sound_vault.net import ssl_context
 from sound_vault.settings import AppSettings, index_path_for_vault
 from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.view_model import LibraryViewModel
@@ -487,7 +488,7 @@ class SettingsDialog(QDialog):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=10) as response:  # nosec B310 - user relay URL
+            with urllib.request.urlopen(request, timeout=10, context=ssl_context()) as response:  # nosec B310 - user relay URL
                 payload = json.loads(response.read().decode("utf-8"))
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             self.result_label.setText(f"Pairing failed: {exc}")
@@ -700,6 +701,30 @@ class _ImportWorker(QThread):
             self.importFinished.emit([], f"{type(exc).__name__}: {exc}")
 
 
+class _PollWorker(QThread):
+    """Lightweight off-thread relay poll (pull links into the inbox, no download)."""
+
+    pollFinished = Signal(object, object)  # (items, error|None)
+
+    def __init__(self, vm, *, base_url, pair_code, device_id, device_secret, parent=None) -> None:
+        super().__init__(parent)
+        self._vm = vm
+        self._creds = (base_url, pair_code, device_id, device_secret)
+
+    def run(self) -> None:
+        try:
+            base_url, pair_code, device_id, device_secret = self._creds
+            items = self._vm.poll_relay_inbox(
+                base_url=base_url,
+                pair_code=pair_code,
+                device_id=device_id,
+                device_secret=device_secret,
+            )
+            self.pollFinished.emit(items, None)
+        except Exception as exc:  # noqa: BLE001 - surface failure to the UI thread
+            self.pollFinished.emit(None, exc)
+
+
 class SoundVaultWindow(QMainWindow):
     previewHydrated = Signal(int, str, object)
 
@@ -743,6 +768,11 @@ class SoundVaultWindow(QMainWindow):
         self._search_timer.setInterval(80)
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self.refresh_table)
+        # Background relay poll so shared links land in the inbox without a click.
+        self._poll_worker = None
+        self._relay_poll_timer = QTimer(self)
+        self._relay_poll_timer.setInterval(60_000)
+        self._relay_poll_timer.timeout.connect(self._auto_poll_relay)
         self.audio_output = None
         self.audio_player = None
         self.external_audio_process: subprocess.Popen | None = None
@@ -766,6 +796,57 @@ class SoundVaultWindow(QMainWindow):
             write_event("gui.auto_index_disabled", vault_root=str(self.vault_root))
         else:
             self.rebuild_index()
+        self._start_relay_auto_poll()
+
+    def _start_relay_auto_poll(self) -> None:
+        """Begin background relay polling when a pairing is configured.
+
+        Safe to call repeatedly (e.g. after saving relay settings). Disabled in
+        headless test/CI runs to keep no live network calls running.
+        """
+        if _env_flag("SOUND_VAULT_DISABLE_RELAY_POLL"):
+            return
+        if not self.settings.relay_pair_code().strip():
+            return
+        if not self._relay_poll_timer.isActive():
+            self._relay_poll_timer.start()
+            QTimer.singleShot(1500, self._auto_poll_relay)  # one prompt poll on launch
+
+    def _auto_poll_relay(self) -> None:
+        """Silently pull new relay links into the inbox off the UI thread."""
+        if getattr(self, "_poll_worker", None) is not None and self._poll_worker.isRunning():
+            return
+        if getattr(self, "_import_worker", None) is not None and self._import_worker.isRunning():
+            return
+        base_url = self.settings.relay_base_url()
+        pair_code = self.settings.relay_pair_code()
+        device_id = self.settings.relay_device_id()
+        device_secret = self.settings.relay_device_secret()
+        if not all((base_url, pair_code, device_id, device_secret)):
+            return
+        self._poll_worker = _PollWorker(
+            self.vm,
+            base_url=base_url,
+            pair_code=pair_code,
+            device_id=device_id,
+            device_secret=device_secret,
+            parent=self,
+        )
+        self._poll_worker.pollFinished.connect(self._on_auto_poll_finished)
+        self._poll_worker.start()
+
+    def _on_auto_poll_finished(self, items, error) -> None:
+        self._poll_worker = None
+        if error is not None:
+            write_event("gui.auto_poll_failed", **exception_fields(error))
+            return
+        if items:
+            self.refresh_inbox()
+            self.refresh_review_queues()
+            write_event("gui.auto_poll_pulled", count=str(len(items)))
+            self.statusBar().showMessage(
+                f"{len(items)} new shared link(s) pulled into the inbox.", 5000
+            )
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -1697,6 +1778,11 @@ class SoundVaultWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         self._stop_external_audio()
+        if getattr(self, "_relay_poll_timer", None) is not None:
+            self._relay_poll_timer.stop()
+        poll_worker = getattr(self, "_poll_worker", None)
+        if poll_worker is not None and poll_worker.isRunning():
+            poll_worker.wait(3000)
         self.save_table_layout("library", self.table)
         self.save_table_layout("inbox", self.inbox_table)
         self.settings.set_hidden_table_columns("library", self.hidden_library_columns())
@@ -2541,6 +2627,7 @@ class SoundVaultWindow(QMainWindow):
         dialog = SettingsDialog(settings=self.settings, parent=self)
         dialog.exec()
         self.update_pairing_status()
+        self._start_relay_auto_poll()  # begin polling if a pairing was just configured
 
     def refresh_inbox(self) -> None:
         self.current_inbox_rows = self.vm.pending_inbox()
