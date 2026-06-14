@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
 )
 
 from sound_vault.diagnostics import exception_fields, write_event
+from sound_vault.ingest import shortcut_builder
 from sound_vault.settings import AppSettings, index_path_for_vault
 from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.view_model import LibraryViewModel
@@ -449,12 +450,16 @@ class SettingsDialog(QDialog):
         actions = QHBoxLayout()
         create_pairing = QPushButton("Create pairing code")
         create_pairing.clicked.connect(self.create_pairing_code)
+        pair_phone = QPushButton("Pair iPhone…")
+        pair_phone.setToolTip("Scan-to-set-up QR + export the Save to Sound Cache shortcut")
+        pair_phone.clicked.connect(self.open_pair_phone)
         save = QPushButton("Save relay settings")
         save.setObjectName("primaryButton")
         save.clicked.connect(self.save_settings)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         actions.addWidget(create_pairing)
+        actions.addWidget(pair_phone)
         actions.addStretch(1)
         actions.addWidget(save)
         actions.addWidget(close)
@@ -494,6 +499,177 @@ class SettingsDialog(QDialog):
         self.result_label.setText(
             "Create pairing code succeeded. Put this pair code in the iOS Shortcut: "
             f"{self.pair_code.text()}"
+        )
+
+    def open_pair_phone(self) -> None:
+        # Persist whatever is in the fields so the QR/export use current values.
+        self.save_settings()
+        if not self.relay_url.text().strip() or not self.pair_code.text().strip():
+            self.result_label.setText(
+                "Set a relay URL and pair code first (use “Create pairing code”), then pair your iPhone."
+            )
+            return
+        PairPhoneDialog(
+            relay_url=self.relay_url.text().strip().rstrip("/"),
+            pair_code=self.pair_code.text().strip().upper(),
+            parent=self,
+        ).exec()
+
+
+def _qr_pixmap(data: str, target_px: int = 320, *, quiet_zone: int = 4) -> QPixmap | None:
+    """Render ``data`` to a crisp black-on-white QR QPixmap, or None if qrcode is missing."""
+    try:
+        matrix = shortcut_builder.qr_matrix(data)
+    except Exception:
+        return None
+    modules = len(matrix) + quiet_zone * 2
+    scale = max(1, target_px // modules)
+    dim = modules * scale
+    pixmap = QPixmap(dim, dim)
+    pixmap.fill(QColor("#ffffff"))
+    painter = QPainter(pixmap)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#0a0518"))
+    for y, row in enumerate(matrix):
+        for x, dark in enumerate(row):
+            if dark:
+                painter.drawRect((x + quiet_zone) * scale, (y + quiet_zone) * scale, scale, scale)
+    painter.end()
+    return pixmap
+
+
+class PairPhoneDialog(QDialog):
+    """Scan-to-set-up QR + one-click export of the Save to Sound Cache shortcut."""
+
+    def __init__(self, *, relay_url: str, pair_code: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.relay_url = relay_url.strip().rstrip("/")
+        self.pair_code = pair_code.strip().upper()
+        self.setWindowTitle("Pair iPhone")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        intro = QLabel(
+            "Get the <b>Save to Sound Cache</b> shortcut onto your iPhone. It adds a "
+            "share-sheet button to TikTok, Instagram, YouTube, X — share a link and it "
+            "lands in your vault."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        # --- QR ---
+        qr_box = QHBoxLayout()
+        self.qr_label = QLabel()
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_label.setMinimumSize(300, 300)
+        setup = shortcut_builder.setup_url(self.relay_url, self.pair_code)
+        pixmap = _qr_pixmap(setup, 300)
+        if pixmap is not None:
+            self.qr_label.setPixmap(pixmap)
+        else:
+            self.qr_label.setWordWrap(True)
+            self.qr_label.setText(
+                "QR needs the qrcode package (pip install qrcode).\n\nScan-to-set-up URL:\n" + setup
+            )
+        qr_box.addStretch(1)
+        qr_box.addWidget(self.qr_label)
+        qr_box.addStretch(1)
+        layout.addLayout(qr_box)
+
+        scan_hint = QLabel(
+            "1. Scan this with your iPhone camera → opens the guided setup page.<br>"
+            "2. Tap <b>Add Shortcut</b>, then paste the two values below if asked."
+        )
+        scan_hint.setWordWrap(True)
+        layout.addWidget(scan_hint)
+
+        # --- copyable values ---
+        values = QFormLayout()
+        self.relay_field = QLineEdit(self.relay_url)
+        self.relay_field.setReadOnly(True)
+        self.code_field = QLineEdit(self.pair_code)
+        self.code_field.setReadOnly(True)
+        relay_row = QHBoxLayout()
+        relay_row.addWidget(self.relay_field, 1)
+        relay_copy = QPushButton("Copy")
+        relay_copy.clicked.connect(lambda: self._copy(self.relay_url, "Relay URL copied"))
+        relay_row.addWidget(relay_copy)
+        code_row = QHBoxLayout()
+        code_row.addWidget(self.code_field, 1)
+        code_copy = QPushButton("Copy")
+        code_copy.clicked.connect(lambda: self._copy(self.pair_code, "Pair code copied"))
+        code_row.addWidget(code_copy)
+        values.addRow("Relay URL", relay_row)
+        values.addRow("Pair code", code_row)
+        layout.addLayout(values)
+
+        self.status_label = QLabel(
+            "Prefer building it by hand? Export a pre-filled shortcut file, or follow the "
+            "recipe in docs/ios-shortcut-v1-recipe.md."
+        )
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        actions = QHBoxLayout()
+        save_qr = QPushButton("Save QR image…")
+        save_qr.clicked.connect(self.save_qr)
+        export = QPushButton("Export shortcut file…")
+        export.clicked.connect(self.export_shortcut)
+        close = QPushButton("Close")
+        close.setObjectName("primaryButton")
+        close.clicked.connect(self.accept)
+        actions.addWidget(save_qr)
+        actions.addWidget(export)
+        actions.addStretch(1)
+        actions.addWidget(close)
+        layout.addLayout(actions)
+
+    def _copy(self, text: str, message: str) -> None:
+        QApplication.clipboard().setText(text)
+        self.status_label.setText(message)
+
+    def save_qr(self) -> None:
+        setup = shortcut_builder.setup_url(self.relay_url, self.pair_code)
+        path, _ = QFileDialog.getSaveFileName(self, "Save setup QR", "sound-cache-pairing.png", "PNG image (*.png)")
+        if not path:
+            return
+        pixmap = _qr_pixmap(setup, 720)
+        if pixmap is None:
+            # qrcode missing: fall back to the scalable SVG next to the chosen path.
+            try:
+                svg_path = path[:-4] + ".svg" if path.lower().endswith(".png") else path + ".svg"
+                with open(svg_path, "w", encoding="utf-8") as handle:
+                    handle.write(shortcut_builder.qr_svg(setup))
+                self.status_label.setText(f"Saved QR (SVG): {svg_path}")
+            except Exception as exc:
+                self.status_label.setText(f"Could not save QR: {exc}")
+            return
+        if pixmap.save(path, "PNG"):
+            self.status_label.setText(f"Saved QR: {path}")
+        else:
+            self.status_label.setText("Could not save the QR image.")
+
+    def export_shortcut(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Save to Sound Cache shortcut",
+            "Save to Sound Cache.unsigned.plist",
+            "Shortcut plist (*.plist)",
+        )
+        if not path:
+            return
+        try:
+            data = shortcut_builder.workflow_plist_bytes(self.relay_url, self.pair_code)
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except Exception as exc:
+            self.status_label.setText(f"Export failed: {exc}")
+            return
+        self.status_label.setText(
+            f"Exported {path}. iOS won’t import a raw plist directly — use the QR/iCloud "
+            "route, or import via community tooling (routinehub / shortcuts-toolkit)."
         )
 
 
