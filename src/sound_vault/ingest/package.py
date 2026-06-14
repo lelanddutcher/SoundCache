@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Any, Callable
 
@@ -25,6 +26,15 @@ _NOTE_PREFIXES = ("♬", "🎵", "🎶")
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _strip_notes(text: str) -> str:
@@ -153,6 +163,23 @@ def package_sound(
                 except OSError:
                     pass
 
+    # Cover artwork: if the downloader captured one, copy it in as artwork.<ext>
+    # (the indexer finds it via the artwork.* glob / paths.artwork).
+    rel_artwork: str | None = None
+    assets: list[dict[str, Any]] = []
+    cover_src = info.get("cover_path")
+    if cover_src:
+        cover_path = Path(str(cover_src))
+        if cover_path.exists():
+            ext = (cover_path.suffix or ".jpg").lstrip(".") or "jpg"
+            artwork_dst = folder / f"artwork.{ext}"
+            try:
+                shutil.copyfile(cover_path, artwork_dst)
+                rel_artwork = f"{rel_folder}/artwork.{ext}"
+                assets.append({"asset_type": "artwork", "path": rel_artwork, "source": "tiktok_music_page"})
+            except OSError:
+                rel_artwork = None
+
     metadata: dict[str, Any] = {
         "vault_version": 1,
         "tiktok_music_id": music_id,
@@ -165,20 +192,21 @@ def package_sound(
         "tiktok_visible_title": title,
         "tiktok_author_or_copyright": artist,
         "duration": info.get("duration"),
-        "usage_count": None,
-        "associated_video_count": None,
-        "source_title": info.get("track") or None,
-        "source_artist": info.get("artist") or None,
-        "source_provider": None,
+        "usage_count": _optional_int(info.get("usage_count")),
+        "associated_video_count": _optional_int(info.get("associated_video_count")),
+        "source_title": info.get("track") or info.get("title") or None,
+        "source_artist": info.get("artist") or info.get("uploader") or None,
+        "source_provider": info.get("source_provider") or None,
         "source_confidence": source_confidence,
         "tags": tags,
         "status": status,
         "paths": {
             "folder": rel_folder,
             "audio": rel_audio,
+            "artwork": rel_artwork,
             "page_snapshot": None,
         },
-        "assets": [],
+        "assets": assets,
         "evidence": {
             "download_method": info.get("_method") or "",
             "webpage_url": info.get("webpage_url") or "",

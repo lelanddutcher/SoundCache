@@ -9,6 +9,7 @@ and tests can inject fakes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import shutil
 from typing import Any, Callable, Protocol
@@ -168,8 +169,41 @@ class PlaywrightCaptureDownloader:
                 )
             shutil.move(str(produced[0]), str(target))
         return DownloadResult(
-            ok=True, audio_path=target, info={"id": music_id}, method="playwright"
+            ok=True, audio_path=target, info=self._read_capture_meta(dest_dir, music_id), method="playwright"
         )
+
+    @staticmethod
+    def _read_capture_meta(dest_dir: Path, music_id: str) -> dict:
+        """Merge the optional <music_id>_meta.json the capture script writes
+        (title / author / cover / usage scraped from the same page load)."""
+        info: dict[str, Any] = {"id": music_id}
+        meta_path = dest_dir / f"{music_id}_meta.json"
+        if not meta_path.exists():
+            return info
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return info
+        if not isinstance(meta, dict):
+            return info
+        author = str(meta.get("author") or "").strip()
+        cover_path = meta.get("coverPath")
+        if cover_path and not Path(str(cover_path)).is_absolute():
+            cover_path = str(dest_dir / str(cover_path))
+        info.update(
+            {
+                "title": str(meta.get("title") or "").strip(),
+                "uploader": author,
+                "artist": author,
+                "thumbnail": str(meta.get("coverUrl") or "").strip(),
+                "cover_path": cover_path if cover_path and Path(str(cover_path)).exists() else "",
+                "usage_count": meta.get("usageCount"),
+                "associated_video_count": meta.get("videoCount"),
+                "source_provider": "TikTok",
+                "webpage_url": str(meta.get("pageUrl") or "").strip(),
+            }
+        )
+        return info
 
 
 class CompositeDownloader:

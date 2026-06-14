@@ -52,6 +52,7 @@ class IngestService:
         index_updater: IndexUpdater | None = None,
         work_dir: Path | None = None,
         now: Callable[[], str] | None = None,
+        oembed_lookup: Callable[[str], dict] | None = None,
     ) -> None:
         self.vault_root = Path(vault_root)
         self.downloader = downloader
@@ -60,6 +61,21 @@ class IngestService:
         self._index_updater = index_updater
         self._work_dir = Path(work_dir) if work_dir else self.vault_root / "inbox" / "working"
         self._now = now or _now_iso
+        self._oembed_lookup = oembed_lookup
+
+    def _enrich_via_oembed(self, canonical_url: str) -> dict:
+        """Best-effort oEmbed lookup to fill a missing title/author."""
+        if not canonical_url:
+            return {}
+        lookup = self._oembed_lookup
+        if lookup is None:
+            from sound_vault.workers.oembed import fetch_sound_metadata
+
+            lookup = fetch_sound_metadata
+        try:
+            return lookup(canonical_url) or {}
+        except Exception:  # noqa: BLE001 - enrichment is never fatal
+            return {}
 
     def _folder_for(self, music_id: str) -> Path | None:
         sounds_root = self.vault_root / "sounds"
@@ -110,6 +126,15 @@ class IngestService:
 
             title, artist = self._title_artist(resolved, download.info)
             info = {**download.info, "_method": download.method}
+            # Fill a still-thin title/author via oEmbed (capture sidecar wins when present).
+            if resolved.platform == "tiktok" and (title in ("", "Unknown") or not artist):
+                extra = self._enrich_via_oembed(resolved.canonical_url or url)
+                if title in ("", "Unknown") and extra.get("title"):
+                    title = extra["title"]
+                if not artist and extra.get("author_name"):
+                    artist = extra["author_name"]
+                if extra.get("provider_name"):
+                    info.setdefault("source_provider", extra["provider_name"])
             packaged = package_sound(
                 vault_root=self.vault_root,
                 music_id=music_id,

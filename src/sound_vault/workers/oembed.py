@@ -43,6 +43,37 @@ FetchJson = Callable[[str], dict[str, Any]]
 Sleep = Callable[[float], None]
 
 
+def fetch_sound_metadata(
+    canonical_url: str,
+    *,
+    fetch_json: FetchJson | None = None,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> dict[str, Any]:
+    """Best-effort oEmbed lookup for a single sound URL during ingest.
+
+    Returns ``{title, author_name, provider_name, thumbnail_url}`` (any may be
+    empty) or ``{}`` on failure. oEmbed is unreliable for ``/music/`` pages, so
+    callers should treat this as a fallback, not the source of truth.
+    """
+    target = (canonical_url or "").strip()
+    if not target:
+        return {}
+    fetch = fetch_json or (lambda url: _fetch_oembed_json(url, user_agent=user_agent))
+    api_url = "https://www.tiktok.com/oembed?url=" + urllib.parse.quote(target, safe="")
+    try:
+        data = fetch(api_url)
+    except Exception:  # noqa: BLE001 - enrichment is best-effort, never fatal
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "title": str(data.get("title") or "").strip(),
+        "author_name": str(data.get("author_name") or "").strip(),
+        "provider_name": str(data.get("provider_name") or "").strip(),
+        "thumbnail_url": str(data.get("thumbnail_url") or "").strip(),
+    }
+
+
 def enrich_favorite_sounds_oembed(
     input_path: Path,
     out_dir: Path | None = None,

@@ -83,6 +83,64 @@ const { chromium } = require("playwright");
     spawnSync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", rawPath, "-vn", "-c:a", "aac", "-b:a", "192k", audioPath]);
     if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1000) {
       try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+
+      // Best-effort: scrape sound metadata from the SAME authenticated page load
+      // (title / creator / cover / usage count) and write a <musicId>_meta.json
+      // sidecar. Never fails the capture — audio is the priority.
+      try {
+        const meta = await page.evaluate(() => {
+          const txt = (sel) => { const el = document.querySelector(sel); return el ? (el.textContent || "").trim() : ""; };
+          const attr = (sel, a) => { const el = document.querySelector(sel); return el ? (el.getAttribute(a) || "") : ""; };
+          const og = (p) => attr(`meta[property="${p}"]`, "content") || attr(`meta[name="${p}"]`, "content");
+          let title = txt('h1[data-e2e="music-title"]') || txt("h1");
+          let author = txt('h2[data-e2e="music-creator"]') || txt('[data-e2e="music-creator"] a');
+          const ogTitle = og("og:title");
+          if ((!title || !author) && ogTitle) {
+            const cleaned = ogTitle.replace(/\s*\|\s*TikTok.*$/i, "").trim();
+            const parts = cleaned.split(" - ");
+            if (!title) title = (parts[0] || cleaned).trim();
+            if (!author && parts.length > 1) author = parts.slice(1).join(" - ").trim();
+          }
+          const coverUrl = attr('[data-e2e="music-cover"] img', "src") || attr('img[class*="ImgCover"]', "src") || og("og:image");
+          let usage = "";
+          for (const el of Array.from(document.querySelectorAll('[data-e2e="music-video-count"], strong, h2'))) {
+            const t = (el.textContent || "").trim();
+            if (/^[\d.,]+\s*[kKmMbB]?\s*(videos?|posts?)$/i.test(t)) { usage = t; break; }
+          }
+          return { title, author, coverUrl, usage, pageUrl: location.href };
+        });
+        const parseCount = (s) => {
+          if (!s) return null;
+          const m = String(s).match(/([\d.,]+)\s*([kKmMbB]?)/);
+          if (!m) return null;
+          let n = parseFloat(m[1].replace(/,/g, ""));
+          const suf = (m[2] || "").toLowerCase();
+          if (suf === "k") n *= 1e3; else if (suf === "m") n *= 1e6; else if (suf === "b") n *= 1e9;
+          return Math.round(n);
+        };
+        let coverBase = "";
+        if (meta.coverUrl) {
+          try {
+            const cr = await page.context().request.fetch(meta.coverUrl);
+            const cbuf = await cr.body();
+            const ext = ((meta.coverUrl.split("?")[0].match(/\.(jpe?g|png|webp)$/i) || [null, "jpg"])[1]).toLowerCase();
+            coverBase = `${musicId}_cover.${ext}`;
+            fs.writeFileSync(path.join(outFolder, coverBase), cbuf);
+          } catch (e) { coverBase = ""; }
+        }
+        const metaOut = {
+          title: meta.title || "",
+          author: meta.author || "",
+          coverUrl: meta.coverUrl || "",
+          coverPath: coverBase,
+          usageCount: parseCount(meta.usage),
+          pageUrl: meta.pageUrl || url,
+        };
+        fs.writeFileSync(path.join(outFolder, `${musicId}_meta.json`), JSON.stringify(metaOut, null, 2));
+      } catch (e) {
+        console.error("meta scrape skipped:", e && e.message ? e.message : String(e));
+      }
+
       console.log(audioPath);
     } else {
       console.error("ffmpeg produced no audio stream");
