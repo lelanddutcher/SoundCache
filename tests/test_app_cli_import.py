@@ -26,7 +26,7 @@ def test_diagnose_mode_does_not_import_gui_libraries(monkeypatch, tmp_path, caps
     app.main()
 
     output = capsys.readouterr().out
-    assert "Sound Vault diagnostics" in output
+    assert "Sound Cache diagnostics" in output
     assert "config dir:" in output
     assert "data dir:" in output
     assert "index path:" in output

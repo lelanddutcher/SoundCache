@@ -10,6 +10,23 @@ from typing import Any
 APP_DIR_NAME = "sound-vault"
 LEGACY_APP_DIR_NAME = ".sound-vault"
 
+# Human-readable folder name used for macOS/Windows app dirs and the default
+# vault. The product was renamed Sound Vault -> Sound Cache; we prefer the new
+# name but transparently fall back to an existing legacy folder so renaming the
+# app never orphans a user's saved settings, index, or vault.
+APP_DISPLAY_NAME = "Sound Cache"
+LEGACY_DISPLAY_NAME = "Sound Vault"
+
+
+def _named_app_dir(parent: Path) -> Path:
+    """Return ``parent / "Sound Cache"``, but keep using an existing legacy
+    ``parent / "Sound Vault"`` folder if the new one hasn't been created yet."""
+    new_dir = parent / APP_DISPLAY_NAME
+    legacy_dir = parent / LEGACY_DISPLAY_NAME
+    if not new_dir.exists() and legacy_dir.exists():
+        return legacy_dir
+    return new_dir
+
 
 def _mask_pair_code(pair_code: str) -> str:
     value = pair_code.strip().upper()
@@ -24,11 +41,11 @@ def user_config_dir() -> Path:
         return Path(override).expanduser()
     if os.name == "nt":
         root = os.getenv("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        return Path(root) / "Sound Vault"
+        return _named_app_dir(Path(root))
     if os.getenv("XDG_CONFIG_HOME"):
         return Path(os.environ["XDG_CONFIG_HOME"]) / APP_DIR_NAME
     if os.uname().sysname == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "Sound Vault"
+        return _named_app_dir(Path.home() / "Library" / "Application Support")
     return Path.home() / ".config" / APP_DIR_NAME
 
 
@@ -38,11 +55,11 @@ def user_data_dir() -> Path:
         return Path(override).expanduser()
     if os.name == "nt":
         root = os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(root) / "Sound Vault"
+        return _named_app_dir(Path(root))
     if os.getenv("XDG_DATA_HOME"):
         return Path(os.environ["XDG_DATA_HOME"]) / APP_DIR_NAME
     if os.uname().sysname == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "Sound Vault"
+        return _named_app_dir(Path.home() / "Library" / "Application Support")
     return Path.home() / ".local" / "share" / APP_DIR_NAME
 
 
@@ -53,7 +70,7 @@ def default_vault_root() -> Path:
     nas_default = Path("/nas/TikTok Sound Vault")
     if nas_default.exists():
         return nas_default
-    return Path.home() / "Documents" / "Sound Vault"
+    return _named_app_dir(Path.home() / "Documents")
 
 
 def default_index_path() -> Path:

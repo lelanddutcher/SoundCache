@@ -66,7 +66,7 @@ from sound_vault.ui.view_model import LibraryViewModel
 from sound_vault.vault.indexer import resolve_vault_root
 
 DESIGN_LANGUAGE = """
-Sound Vault visual direction: tactile retro-futurist control-room dashboard — brushed metal chrome, dark graphite inset panels, Aqua bevels, physical knobs/sliders/toggles, dense archive/evidence modules.
+Sound Cache visual direction: tactile retro-futurist control-room dashboard — brushed metal chrome, dark graphite inset panels, Aqua bevels, physical knobs/sliders/toggles, dense archive/evidence modules.
 Use electric blue/green utility accents, amber/red severity dots, beveled tabs, compact Verdana/SF system typography, and high-density panels that still read like a physical archive machine.
 """.strip()
 
@@ -478,7 +478,7 @@ class SettingsDialog(QDialog):
         try:
             request = urllib.request.Request(
                 f"{base_url}/v1/pairing/create",
-                data=json.dumps({"device_name": "Sound Vault Desktop"}).encode("utf-8"),
+                data=json.dumps({"device_name": "Sound Cache Desktop"}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -531,7 +531,7 @@ class SoundVaultWindow(QMainWindow):
         super().__init__()
         self.settings = settings or AppSettings()
         write_event("gui.window_init_start")
-        self.setWindowTitle("Sound Vault — local sound archive")
+        self.setWindowTitle("Sound Cache — local sound archive")
         self.resize(1420, 860)
         self.setMinimumSize(900, 600)
         self.vault_root = resolve_vault_root(vault_root or self.settings.vault_root())
@@ -606,7 +606,7 @@ class SoundVaultWindow(QMainWindow):
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(20, 22, 16, 22)
         side.setSpacing(10)
-        brand = QLabel("▸ Sound Vault")
+        brand = QLabel("▸ Sound Cache")
         brand.setObjectName("brand")
         side.addWidget(brand)
         self.nav_buttons = {}
@@ -1588,7 +1588,7 @@ class SoundVaultWindow(QMainWindow):
             self.refresh_worker_status()
 
     def choose_vault(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Choose Sound Vault", str(self.vault_root))
+        selected = QFileDialog.getExistingDirectory(self, "Choose Sound Cache", str(self.vault_root))
         if not selected:
             return
         self.vault_root = resolve_vault_root(Path(selected))
@@ -2643,7 +2643,7 @@ class SoundVaultWindow(QMainWindow):
         response = QMessageBox.question(
             self,
             "Quarantine duplicate folders?",
-            "The selected row is the keeper and stays in the Sound Vault. "
+            "The selected row is the keeper and stays in the Sound Cache. "
             "Only the other candidate folders in this group are moved into reports/duplicate-quarantine, "
             "so the action is reversible. "
             f"Keep {keep_music_id} and quarantine {len(duplicate_music_ids)} duplicate folder(s)?",

@@ -1,1 +1,1 @@
-"""Worker helpers for Sound Vault maintenance tasks."""
+"""Worker helpers for Sound Cache maintenance tasks."""

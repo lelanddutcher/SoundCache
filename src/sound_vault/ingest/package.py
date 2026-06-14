@@ -95,8 +95,8 @@ def _tag_dict(title: str, artist: str, music_id: str, canonical_url: str, source
     return {
         "title": _strip_notes(title) or "Unknown",
         "artist": artist or "Unknown",
-        "album": "TikTok Sound Vault",
-        "album_artist": "TikTok Sound Vault",
+        "album": "Sound Cache",
+        "album_artist": "Sound Cache",
         "comment": f"music_id={music_id} | {canonical_url} | source={source_confidence}",
         "genre": ", ".join(tags),
     }

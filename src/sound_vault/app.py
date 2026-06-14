@@ -20,14 +20,14 @@ def _write_launch_failure(exc: BaseException) -> Path:
     log_path = _app_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
-        "Sound Vault GUI launch failed\n\n" + "".join(traceback.format_exception(exc)),
+        "Sound Cache GUI launch failed\n\n" + "".join(traceback.format_exception(exc)),
         encoding="utf-8",
     )
     return log_path
 
 
 def _print_diagnostics(vault_root: Path) -> None:
-    print("Sound Vault diagnostics")
+    print("Sound Cache diagnostics")
     print(f"python: {sys.executable}")
     print(f"version: {sys.version.replace(chr(10), ' ')}")
     print(f"platform: {platform.platform()} {platform.machine()}")
@@ -42,8 +42,8 @@ def _print_diagnostics(vault_root: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sound Vault desktop app")
-    parser.add_argument("--vault", type=Path, default=None, help="Path to a Sound Vault folder")
+    parser = argparse.ArgumentParser(description="Sound Cache desktop app")
+    parser.add_argument("--vault", type=Path, default=None, help="Path to a Sound Cache folder")
     parser.add_argument("--cli", action="store_true", help="Print index count instead of opening the GUI")
     parser.add_argument("--diagnose", action="store_true", help="Print launch diagnostics without importing Qt")
     parser.add_argument(
@@ -235,7 +235,7 @@ def main() -> None:
         from sound_vault.vault.indexer import build_index
 
         records = build_index(vault_root, load_sidecars=False)
-        print(f"Sound Vault loaded {len(records)} records from {vault_root}")
+        print(f"Sound Cache loaded {len(records)} records from {vault_root}")
         write_event("app.cli_index_complete", vault_root=str(vault_root), records=len(records))
         return
     try:
@@ -247,7 +247,7 @@ def main() -> None:
     except Exception as exc:
         log_path = _write_launch_failure(exc)
         write_event("gui.launch_exception", log_path=str(log_path), **exception_fields(exc))
-        print(f"Sound Vault failed to launch. Details: {log_path}", file=sys.stderr)
+        print(f"Sound Cache failed to launch. Details: {log_path}", file=sys.stderr)
         raise
 
 

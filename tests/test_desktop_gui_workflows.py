@@ -122,7 +122,10 @@ def test_desktop_gui_qa_harness_exercises_core_editor_workflows(tmp_path, monkey
     window.open_selected_tiktok_sound()
     assert opened_urls == ["https://www.tiktok.com/music/Hot-Hook-hot"]
     assert window.artwork_label.size().width() == 210
-    assert "TRANSCRIPTS (1)" in window.portal_tabs["TRANSCRIPTS"].text()
+    # Portal count-tabs were replaced by the ArchiveHealthPanel (coverage %).
+    # 1 sound, 1 with a transcript -> 100% transcript coverage.
+    window.refresh_portal_tabs()
+    assert window.archive_health_panel._values["missing_transcript"].text() == "100%"
     window.close()
 
 
@@ -179,6 +182,7 @@ def test_library_popularity_sort_is_numeric_not_text(tmp_path, monkeypatch):
 
     assert [window.table.item(row, 7).text() for row in range(3)] == ["997600", "9997", "9954"]
     window.handle_library_header_clicked(7)
+    app.processEvents()  # header click defers refresh via QTimer.singleShot
     assert [window.table.item(row, 7).text() for row in range(3)] == ["9954", "9997", "997600"]
     window.close()
 
@@ -266,6 +270,7 @@ def test_continuous_play_advances_through_visible_playable_rows(tmp_path, monkey
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AFPLAY", "1")  # exercise QMediaPlayer mock, not macOS afplay
     vault = tmp_path / "vault"
     catalog = vault / "catalog"
     catalog.mkdir(parents=True)
@@ -304,6 +309,9 @@ def test_continuous_play_advances_through_visible_playable_rows(tmp_path, monkey
         def pause(self):
             self.state = QMediaPlayer.PlaybackState.PausedState
 
+        def stop(self):
+            self.state = QMediaPlayer.PlaybackState.StoppedState
+
     fake_player = FakeAudioPlayer()
     window.audio_player = fake_player
     monkeypatch.setattr(window, "_ensure_audio_player", lambda: True)
@@ -334,6 +342,7 @@ def test_random_transport_selects_and_plays_a_random_playable_row(tmp_path, monk
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AFPLAY", "1")  # exercise QMediaPlayer mock, not macOS afplay
     vault = tmp_path / "vault"
     catalog = vault / "catalog"
     catalog.mkdir(parents=True)
@@ -371,6 +380,9 @@ def test_random_transport_selects_and_plays_a_random_playable_row(tmp_path, monk
 
         def pause(self):
             self.state = QMediaPlayer.PlaybackState.PausedState
+
+        def stop(self):
+            self.state = QMediaPlayer.PlaybackState.StoppedState
 
     fake_player = FakeAudioPlayer()
     window.audio_player = fake_player
@@ -443,6 +455,7 @@ def test_duplicate_review_page_updates_inspector_and_closes_marked_groups(tmp_pa
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AFPLAY", "1")  # exercise QMediaPlayer mock, not macOS afplay
     vault = tmp_path / "vault"
     catalog = vault / "catalog"
     reports = vault / "reports"
@@ -503,6 +516,9 @@ def test_duplicate_review_page_updates_inspector_and_closes_marked_groups(tmp_pa
 
         def play(self):
             self.played = True
+
+        def stop(self):
+            self.played = False
 
     fake_player = FakePlayer()
     window.audio_player = fake_player

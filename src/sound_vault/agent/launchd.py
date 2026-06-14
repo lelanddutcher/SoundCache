@@ -93,7 +93,7 @@ def status(*, run=subprocess.run) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Manage the Sound Vault background fetch agent (macOS launchd)")
+    parser = argparse.ArgumentParser(description="Manage the Sound Cache background fetch agent (macOS launchd)")
     sub = parser.add_subparsers(dest="cmd", required=True)
     install_cmd = sub.add_parser("install", help="install + load the agent")
     install_cmd.add_argument("--interval", type=int, default=180, help="seconds between relay polls")

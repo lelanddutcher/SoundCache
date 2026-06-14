@@ -1,7 +1,7 @@
 [project]
 name = "sound-vault-desktop"
 version = "0.3.0"
-description = "Local-first TikTok Sound Vault desktop app and pairing-code relay."
+description = "Local-first Sound Cache desktop app and pairing-code relay."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

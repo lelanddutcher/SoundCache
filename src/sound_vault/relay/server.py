@@ -13,7 +13,7 @@ from sound_vault.relay.inbox import InboxStore
 from sound_vault.relay.leaderboard import LeaderboardStore
 from sound_vault.relay.pairing import PairingRegistry
 
-app = FastAPI(title="Sound Vault Pairing Relay", version="0.1.0")
+app = FastAPI(title="Sound Cache Pairing Relay", version="0.1.0")
 # Allow browsers (the landing-page leaderboard widget) to read the API. Submit/poll
 # stay protected by pair code + device secret regardless of origin.
 app.add_middleware(

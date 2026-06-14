@@ -54,7 +54,7 @@ def _print_cycle(outcomes: list[tuple[ShortcutInboxItem, IngestOutcome]]) -> Non
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sound Vault ingest worker (drain inbox -> vault)")
+    parser = argparse.ArgumentParser(description="Sound Cache ingest worker (drain inbox -> vault)")
     parser.add_argument("--vault", type=Path, default=None, help="Vault folder (default: app setting)")
     parser.add_argument("--index", type=Path, default=None, help="Index DB path (default: app data dir)")
     parser.add_argument("--watch", action="store_true", help="Loop instead of running once")
