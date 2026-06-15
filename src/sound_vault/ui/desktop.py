@@ -810,6 +810,11 @@ class SoundVaultWindow(QMainWindow):
         self.external_audio_target: Path | None = None
         self._external_audio_started_at: float | None = None
         self._external_audio_duration_ms: int = 0
+        # Wall-clock scrubber anchor: where in the song the current external
+        # process began (non-zero after a seek), and whether the chosen backend
+        # can honour a start offset (ffplay yes, afplay no).
+        self._external_audio_base_offset_ms: int = 0
+        self._external_seek_supported: bool = False
         self.playing_music_id: str | None = None
         self._external_audio_timer = QTimer(self)
         self._external_audio_timer.setInterval(300)
@@ -1470,7 +1475,11 @@ class SoundVaultWindow(QMainWindow):
         self._make_label_selectable(self.preview_tags)
         self.progress_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.progress_slider.setRange(0, 0)
-        self.progress_slider.sliderMoved.connect(self.seek_playback)
+        # While dragging, only preview the target time; commit the seek on
+        # release (a restart-based backend can't take a seek per drag tick).
+        # A click on the groove is a single discrete seek.
+        self.progress_slider.sliderMoved.connect(self._preview_seek_time)
+        self.progress_slider.sliderReleased.connect(self._commit_slider_seek)
         self.progress_slider.seekRequested.connect(self.seek_playback)
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setObjectName("muted")
@@ -1704,7 +1713,29 @@ class SoundVaultWindow(QMainWindow):
             return False
         if _env_flag("SOUND_VAULT_DISABLE_AFPLAY"):
             return False
-        return platform.system() == "Darwin" and shutil.which("afplay") is not None
+        if platform.system() != "Darwin":
+            return False
+        return shutil.which("ffplay") is not None or shutil.which("afplay") is not None
+
+    @staticmethod
+    def _external_player_command(target: Path, start_ms: int) -> tuple[list[str] | None, bool]:
+        """Pick the macOS external player and build its argv.
+
+        ``ffplay`` (ffmpeg) is preferred because it can start at an offset
+        (``-ss``), which is how we implement seeking — afplay has no seek and
+        always plays from the start. Returns ``(argv, seek_supported)``.
+        """
+        ffplay = shutil.which("ffplay")
+        if ffplay is not None:
+            cmd = [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet"]
+            if start_ms > 0:
+                cmd += ["-ss", f"{start_ms / 1000:.3f}"]
+            cmd.append(str(target))
+            return cmd, True
+        afplay = shutil.which("afplay")
+        if afplay is not None:
+            return [afplay, str(target)], False
+        return None, False
 
     def _stop_external_audio(self) -> None:
         process = self.external_audio_process
@@ -1715,16 +1746,18 @@ class SoundVaultWindow(QMainWindow):
         self.external_audio_process = None
         self.external_audio_target = None
         self._external_audio_started_at = None
+        self._external_audio_base_offset_ms = 0
         self._external_audio_timer.stop()
 
-    def _play_external_audio(self, target: Path) -> bool:
-        afplay = shutil.which("afplay")
-        if afplay is None:
+    def _play_external_audio(self, target: Path, start_ms: int = 0) -> bool:
+        start_ms = max(0, int(start_ms))
+        command, seek_supported = self._external_player_command(target, start_ms)
+        if command is None:
             return False
         self._stop_external_audio()
         try:
             self.external_audio_process = subprocess.Popen(
-                [afplay, str(target)],
+                command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -1734,15 +1767,19 @@ class SoundVaultWindow(QMainWindow):
             self.external_audio_process = None
             self.external_audio_target = None
             return False
+        backend = "ffplay" if seek_supported else "afplay"
         self.external_audio_target = target
-        # afplay reports no position, so estimate the scrubber from elapsed wall time.
+        # External players report no position, so estimate the scrubber from
+        # elapsed wall time, anchored at the offset we started playing from.
         self._external_audio_started_at = time.monotonic()
+        self._external_audio_base_offset_ms = start_ms
+        self._external_seek_supported = seek_supported
         self._external_audio_duration_ms = self._duration_ms_for_record(self.current_preview_record)
         if self._external_audio_duration_ms > 0:
             self.progress_slider.setRange(0, self._external_audio_duration_ms)
-            self.progress_slider.setValue(0)
+            self.progress_slider.setValue(min(start_ms, self._external_audio_duration_ms))
         self._external_audio_timer.start()
-        write_event("gui.external_audio_started", target=str(target), backend="afplay")
+        write_event("gui.external_audio_started", target=str(target), backend=backend, start_ms=str(start_ms))
         self.playback_status.setText(f"Playing {target.name} via macOS audio")
         return True
 
@@ -1750,7 +1787,7 @@ class SoundVaultWindow(QMainWindow):
         started = self._external_audio_started_at
         if started is None:
             return
-        elapsed_ms = int((time.monotonic() - started) * 1000)
+        elapsed_ms = self._external_audio_base_offset_ms + int((time.monotonic() - started) * 1000)
         duration = self._external_audio_duration_ms
         if duration > 0:
             position = min(elapsed_ms, duration)
@@ -1773,6 +1810,7 @@ class SoundVaultWindow(QMainWindow):
         self.external_audio_process = None
         self.external_audio_target = None
         self._external_audio_started_at = None
+        self._external_audio_base_offset_ms = 0
         self._external_audio_timer.stop()
         if self._external_audio_duration_ms > 0:
             self.progress_slider.setValue(self._external_audio_duration_ms)
@@ -1811,7 +1849,43 @@ class SoundVaultWindow(QMainWindow):
             self.playback_status.setText(f"Playback engine unavailable: {exc}")
             return False
 
+    def _preview_seek_time(self, position: int) -> None:
+        """During a drag, show the target time without committing the seek."""
+        duration = self._external_audio_duration_ms
+        if duration <= 0 and self.audio_player is not None:
+            duration = self.audio_player.duration()
+        if duration > 0:
+            self.time_label.setText(f"{self._format_ms(int(position))} / {self._format_ms(duration)}")
+
+    def _commit_slider_seek(self) -> None:
+        """Drag finished: seek to the handle's final position."""
+        self.seek_playback(self.progress_slider.value())
+
     def seek_playback(self, position: int) -> None:
+        position = max(0, int(position))
+        # External (macOS) backend: ffplay/afplay can't seek in place, so restart
+        # the player at the requested offset. Only ffplay honours an offset; with
+        # afplay-only we can't seek, so leave playback where it is.
+        if self.external_audio_target is not None:
+            if not self._external_seek_supported:
+                self.playback_status.setText("Seeking needs ffmpeg (ffplay) — install it to scrub macOS audio")
+                self._update_external_progress()  # snap the handle back to real position
+                return
+            # Ignore negligible seeks (e.g. just grabbing the handle) so we don't
+            # kill+respawn the player for a sub-half-second move.
+            if self._external_audio_started_at is not None:
+                current = self._external_audio_base_offset_ms + int(
+                    (time.monotonic() - self._external_audio_started_at) * 1000
+                )
+                if abs(position - current) < 400:
+                    return
+            target = self.external_audio_target
+            if self._play_external_audio(target, start_ms=position) and self.current_preview_record is not None:
+                self._set_playing(self.current_preview_record.music_id)
+                if hasattr(self, "transport_play_button"):
+                    self.transport_play_button.setText("▮▮")
+                    self.transport_play_button.setToolTip("Stop playback")
+            return
         if self.audio_player is not None:
             self.audio_player.setPosition(position)
 

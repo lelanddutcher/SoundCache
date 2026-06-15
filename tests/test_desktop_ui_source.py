@@ -64,17 +64,33 @@ def test_desktop_uses_integrated_qt_multimedia_not_os_open_for_audio():
     assert "QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))" not in source
 
 
-def test_desktop_uses_afplay_for_local_audio_on_macos_when_qt_multimedia_is_silent():
+def test_desktop_uses_external_player_for_local_audio_on_macos_when_qt_multimedia_is_silent():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
     assert "def _should_use_external_audio" in source
-    assert 'platform.system() == "Darwin"' in source
+    assert 'platform.system() != "Darwin"' in source
+    # ffplay is preferred (it can seek via -ss); afplay is the no-seek fallback.
+    assert 'shutil.which("ffplay")' in source
     assert 'shutil.which("afplay")' in source
     assert 'SOUND_VAULT_DISABLE_AFPLAY' in source
     assert "subprocess.Popen" in source
     assert "gui.external_audio_started" in source
     assert "self._stop_external_audio()" in source
     assert "self.external_audio_target == target" in source
+
+
+def test_desktop_external_audio_seek_restarts_player_at_offset():
+    source = DESKTOP_SOURCE.read_text(encoding="utf-8")
+
+    # Seeking restarts the external player at the requested offset (ffplay -ss).
+    assert "def _external_player_command" in source
+    assert '"-ss"' in source
+    assert "def seek_playback" in source
+    assert "start_ms=position" in source
+    assert "_external_seek_supported" in source
+    assert "_external_audio_base_offset_ms" in source
+    # commit the seek on release, not on every drag tick
+    assert "self.progress_slider.sliderReleased.connect(self._commit_slider_seek)" in source
 
 
 def test_desktop_playing_different_selection_switches_source_instead_of_pausing_old_source():
