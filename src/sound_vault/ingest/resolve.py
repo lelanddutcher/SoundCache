@@ -10,9 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable
+
+from sound_vault.url_safety import is_safe_public_url, is_safe_to_fetch
 
 
 def _build_ssl_context() -> ssl.SSLContext | None:
@@ -77,11 +80,37 @@ def classify_platform(url: str) -> str:
     return "other"
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects to non-web schemes or private/internal hosts (SSRF)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        if not is_safe_public_url(newurl):
+            raise urllib.error.HTTPError(newurl, code, "refused unsafe redirect target", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _build_opener():
+    handlers = [_SafeRedirectHandler()]
+    if _SSL_CONTEXT is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=_SSL_CONTEXT))
+    return urllib.request.build_opener(*handlers)
+
+
+_OPENER = _build_opener()
+
+
 def resolve_url(url: str) -> tuple[str | None, str | None]:
+    # SSRF defense-in-depth: the relay already gates submissions, but anything
+    # reaching here (incl. local/manual imports) is checked before we fetch.
+    if not is_safe_to_fetch(url):
+        return None, "URLError: refused unsafe URL (non-web scheme or private/internal host)"
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(request, timeout=25, context=_SSL_CONTEXT) as response:  # nosec B310 - user-shared URL
-            return response.geturl(), None
+        with _OPENER.open(request, timeout=25) as response:  # nosec B310 - validated http(s), public host, safe-redirect handler
+            final = response.geturl()
+        if final and not is_safe_public_url(final):
+            return None, "URLError: refused unsafe redirect target"
+        return final, None
     except Exception as exc:  # noqa: BLE001 - report any resolution failure verbatim
         return None, f"{type(exc).__name__}: {exc}"
 

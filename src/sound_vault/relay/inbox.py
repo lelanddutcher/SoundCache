@@ -44,7 +44,7 @@ class InboxStore:
         self,
         *,
         now=time.time,
-        item_ttl_seconds: int = 7 * 24 * 60 * 60,
+        item_ttl_seconds: int = 24 * 60 * 60,  # 24h: relay is a pass-through, not storage
         pair_code_ttl_seconds: int = DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS,
         db_path: Path | None = None,
     ) -> None:

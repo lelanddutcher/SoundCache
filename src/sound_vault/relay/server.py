@@ -7,19 +7,23 @@ from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 from sound_vault.relay.inbox import InboxStore
 from sound_vault.relay.leaderboard import LeaderboardStore
 from sound_vault.relay.pairing import PairingRegistry
+from sound_vault.url_safety import is_safe_public_url
 
 app = FastAPI(title="Sound Cache Pairing Relay", version="0.1.0")
-# Allow browsers (the landing-page leaderboard widget) to read the API. Submit/poll
-# stay protected by pair code + device secret regardless of origin.
+# The only browser caller is the landing page reading the public leaderboard (GET).
+# Submit/poll come from the iOS Shortcut + desktop (non-browser, CORS-exempt), so we
+# only need to allow cross-origin GET — and only from our own origins. This kills
+# browser-driven cross-site POSTs entirely.
+_CORS_ORIGIN_REGEX = r"^https://(soundcache\.io|[a-z0-9-]+\.vercel\.app)$|^http://localhost(:\d+)?$"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_origin_regex=_CORS_ORIGIN_REGEX,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 logger = logging.getLogger(__name__)
@@ -65,6 +69,17 @@ def _mask_value(value: str) -> str:
     return "[REDACTED]"
 
 
+def _mask_host(value: str) -> str:
+    # keep just the scheme+host for diagnostics; never log full URLs/notes/paths.
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(value)
+        return f"{p.scheme}://{p.hostname}" if p.scheme and p.hostname else "[REDACTED]"
+    except ValueError:
+        return "[REDACTED]"
+
+
 def log_relay_event(event: str, **fields: str) -> None:
     safe_fields = {}
     for key, value in fields.items():
@@ -72,16 +87,40 @@ def log_relay_event(event: str, **fields: str) -> None:
             safe_fields[key] = _mask_pair_code(value)
         elif "secret" in key or "token" in key or "credential" in key:
             safe_fields[key] = _mask_value(value)
+        elif key == "url":
+            safe_fields[key] = _mask_host(value)  # host only, never the full link
+        elif key == "note":
+            continue  # never log free-form user text
         else:
             safe_fields[key] = value
     logger.info("relay.%s %s", event, safe_fields)
 
 
-def enforce_rate_limit(request: Request, *, bucket: str) -> None:
+def _client_ip(request: Request) -> str:
+    # On Vercel the real client IP is in x-forwarded-for (left-most) / x-real-ip;
+    # request.client.host is the proxy. Fall back to the socket peer locally.
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    real = request.headers.get("x-real-ip", "")
+    if real:
+        return real.strip()
+    return request.client.host if request.client else "unknown"
+
+
+def enforce_rate_limit(request: Request, *, bucket: str, subject: str = "", by_host: bool = True) -> None:
     limit = int(os.getenv("SOUND_VAULT_RELAY_RATE_LIMIT", "60"))
     window = int(os.getenv("SOUND_VAULT_RELAY_RATE_WINDOW_SECONDS", "60"))
-    host = request.client.host if request.client else "unknown"
-    key = f"{bucket}:{host}"
+    host = _client_ip(request)
+    # by_host=True  -> per-IP cap (one client's request rate).
+    # by_host=False -> subject-only cap (e.g. total fill rate of one pair code's
+    #                  inbox, across ALL IPs) so a victim can't be flooded by a botnet.
+    if subject and not by_host:
+        key = f"{bucket}:{subject}"
+    elif subject:
+        key = f"{bucket}:{subject}:{host}"
+    else:
+        key = f"{bucket}:{host}"
     if not rate_limiter.allow(key, limit=limit, window_seconds=window):
         log_relay_event("rate_limited", bucket=bucket, client=host)
         raise HTTPException(status_code=429, detail="rate limit exceeded")
@@ -116,21 +155,31 @@ leaderboard_store = build_leaderboard_store()
 
 
 class CreatePairingRequest(BaseModel):
-    device_name: str
+    device_name: str = Field(max_length=128)
 
 
 class SubmitLinkRequest(BaseModel):
-    pair_code: str
+    pair_code: str = Field(max_length=64)
     url: HttpUrl
-    source: str = "ios_shortcut"
-    note: str = ""
+    source: str = Field(default="ios_shortcut", max_length=64)
+    note: str = Field(default="", max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def _reject_unsafe_url(cls, v: HttpUrl) -> HttpUrl:
+        # SSRF defense: only http(s) to a public host, reasonable length. The
+        # link is later fetched by the paired desktop, so block private/reserved
+        # IPs + internal hostnames + non-web schemes at the door.
+        if not is_safe_public_url(str(v)):
+            raise ValueError("url must be an http(s) link to a public host")
+        return v
 
 
 class SaveEventRequest(BaseModel):
-    sound_id: str
-    platform: str = ""
-    title: str = ""
-    artist: str = ""
+    sound_id: str = Field(max_length=256)
+    platform: str = Field(default="", max_length=32)
+    title: str = Field(default="", max_length=512)
+    artist: str = Field(default="", max_length=256)
 
 
 @app.get("/v1/health")
@@ -156,6 +205,9 @@ def create_pairing(request: CreatePairingRequest, http_request: Request) -> dict
 @app.post("/v1/inbox/submit")
 def submit_link(request: SubmitLinkRequest, http_request: Request) -> dict[str, str]:
     enforce_rate_limit(http_request, bucket="inbox_submit")
+    # second cap keyed on the target pair code: caps how fast any one inbox can be
+    # filled, even from a botnet of IPs (anti-flood for the victim desktop).
+    enforce_rate_limit(http_request, bucket="inbox_submit_pair", subject=request.pair_code.strip().upper(), by_host=False)
     if not inbox.can_accept_pair_code(request.pair_code):
         log_relay_event("submit_rejected", pair_code=request.pair_code, url=str(request.url))
         raise HTTPException(status_code=404, detail="unknown or expired pairing code")
