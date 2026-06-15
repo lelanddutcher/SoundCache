@@ -381,6 +381,71 @@ class ArchiveHealthPanel(QFrame):
             self._values[key].setText(f"{int(round(pct * 100))}%")
 
 
+class GradientCheck(QWidget):
+    """A holo-gradient disc with a checkmark — the 'pairing confirmed' mark."""
+
+    def __init__(self, parent: QWidget | None = None, diameter: int = 28) -> None:
+        super().__init__(parent)
+        self._d = diameter
+        self.setFixedSize(diameter, diameter)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = self.rect().adjusted(1, 1, -1, -1)
+        grad = QLinearGradient(r.topLeft(), r.bottomRight())
+        grad.setColorAt(0.0, QColor("#66ecff"))
+        grad.setColorAt(0.5, QColor("#b793ff"))
+        grad.setColorAt(1.0, QColor("#ff6ad5"))
+        p.setBrush(QBrush(grad))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(r)
+        pen = QPen(QColor("#0a0518"))
+        pen.setWidth(max(2, self._d // 9))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        x, y, w = r.left(), r.top(), r.width()
+        p.drawLine(int(x + w * 0.28), int(y + w * 0.53), int(x + w * 0.44), int(y + w * 0.68))
+        p.drawLine(int(x + w * 0.44), int(y + w * 0.68), int(x + w * 0.74), int(y + w * 0.34))
+
+
+class PairingBadge(QFrame):
+    """Lower-left pairing status: 📱 + a gradient checkmark = visually confirmed."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pairingCard")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(10)
+        self._phone = QLabel("📱")
+        self._phone.setStyleSheet("font-size:22px;background:transparent;")
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        self._title = QLabel("iPhone paired")
+        self._title.setStyleSheet("font-weight:700;color:#fbedff;background:transparent;")
+        self._sub = QLabel("ready to catch shares")
+        self._sub.setStyleSheet("font-size:11px;color:#c5b3e6;background:transparent;")
+        col.addWidget(self._title)
+        col.addWidget(self._sub)
+        self._check = GradientCheck(self, 26)
+        lay.addWidget(self._phone)
+        lay.addLayout(col, 1)
+        lay.addWidget(self._check)
+
+    def set_state(self, *, paired: bool, detail: str = "") -> None:
+        self._check.setVisible(paired)
+        if paired:
+            self._title.setText("iPhone paired")
+            self._sub.setText(detail or "ready to catch shares")
+            self._phone.setText("📱")
+        else:
+            self._title.setText("iPhone not paired")
+            self._sub.setText("open Settings to pair")
+            self._phone.setText("📱")
+
+
 class PlayButtonDelegate(QStyledItemDelegate):
     def __init__(self, play_callback, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -954,11 +1019,9 @@ class SoundVaultWindow(QMainWindow):
         side.addStretch(1)
         self.archive_health_panel = ArchiveHealthPanel()
         side.addWidget(self.archive_health_panel)
-        self.pairing_label = QLabel("Shortcut relay\nRelay not configured\nOpen Settings to pair")
-        self.pairing_label.setObjectName("pairingCard")
-        self.pairing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        side.addWidget(self.pairing_label)
-        self._refresh_pairing_card_visibility()
+        self.pairing_badge = PairingBadge()
+        side.addWidget(self.pairing_badge)
+        self.update_pairing_status()
         shell.addWidget(sidebar)
 
         main = QWidget()
@@ -2959,12 +3022,14 @@ class SoundVaultWindow(QMainWindow):
         return f"{minutes}:{seconds:02d}"
 
     def update_pairing_status(self) -> None:
-        self.pairing_label.setText("Shortcut relay\n" + self.settings.relay_status_text())
+        paired = bool(self.settings.relay_pair_code().strip())
+        self.pairing_badge.set_state(paired=paired)
         self._refresh_pairing_card_visibility()
 
     def _refresh_pairing_card_visibility(self) -> None:
-        configured = bool(self.settings.relay_pair_code().strip())
-        self.pairing_label.setVisible(configured)
+        # Always show the badge: a gradient checkmark when paired, a gentle
+        # "open Settings to pair" nudge otherwise.
+        self.pairing_badge.setVisible(True)
 
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(settings=self.settings, parent=self)
