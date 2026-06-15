@@ -192,6 +192,51 @@ def test_desktop_user_notes_editor_saves_and_searches(tmp_path, monkeypatch):
     window.close()
 
 
+def test_desktop_empty_transcript_box_explains_pending_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    vault = tmp_path / "vault"
+    catalog = vault / "catalog"
+    sound_dir = vault / "sounds" / "p1 - Pending"
+    catalog.mkdir(parents=True)
+    sound_dir.mkdir(parents=True)
+    audio = sound_dir / "p1.m4a"
+    audio.write_bytes(b"audio")
+    # Has audio, no transcript yet -> "pending" state.
+    (sound_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "tiktok_music_id": "p1",
+                "tiktok_visible_title": "Pending",
+                "paths": {"folder": str(sound_dir), "audio": str(audio)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (catalog / "sounds.jsonl").write_text(
+        json.dumps({"tiktok_music_id": "p1", "tiktok_visible_title": "Pending", "paths": {"folder": str(sound_dir)}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    window.show()
+    app.processEvents()
+    window.vm.rebuild_index()
+    window.refresh_table()
+    window.table.selectRow(0)
+    window.update_preview_from_selection()
+    app.processEvents()
+
+    # Empty box, but the placeholder + meta line explain why.
+    assert window.transcript_text.toPlainText() == ""
+    assert "Not transcribed yet" in window.transcript_text.placeholderText()
+    assert "transcript: not run yet" in window.preview_meta.text()
+    window.close()
+
+
 def test_library_popularity_sort_is_numeric_not_text(tmp_path, monkeypatch):
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))

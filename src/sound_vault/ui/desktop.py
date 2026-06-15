@@ -1488,7 +1488,7 @@ class SoundVaultWindow(QMainWindow):
         self.transcript_text = QTextEdit()
         self.transcript_text.setReadOnly(True)
         self.transcript_text.setMaximumHeight(260)
-        self.transcript_text.setPlaceholderText("No transcript text found in metadata or transcript sidecars.")
+        self.transcript_text.setPlaceholderText(self._DEFAULT_TRANSCRIPT_PLACEHOLDER)
         transcript_layout.addWidget(self.transcript_text)
         notes_group = QGroupBox("User notes")
         notes_layout = QVBoxLayout(notes_group)
@@ -2307,7 +2307,7 @@ class SoundVaultWindow(QMainWindow):
         self.preview_tags.setText("")
         if hasattr(self, "transcript_text"):
             self.transcript_text.clear()
-            self.transcript_text.setPlaceholderText("No transcript text found in metadata or transcript sidecars.")
+            self.transcript_text.setPlaceholderText(self._DEFAULT_TRANSCRIPT_PLACEHOLDER)
         self.artwork_label.setPixmap(QPixmap())
         self.artwork_label.setText("no artwork")
         self.evidence_list.setText("No local screenshots yet.")
@@ -2372,6 +2372,10 @@ class SoundVaultWindow(QMainWindow):
             self.now_playing_title.setText(full)
         self.preview_meta.setText(self._formatted_metadata(record))
         self.preview_tags.setText(" ".join(f"#{tag}" for tag in record.tags) or "no tags yet")
+        # Set the state-specific placeholder first, so an empty transcript box
+        # explains *why* (no speech / no audio / not run yet) rather than implying
+        # a lookup failure.
+        self.transcript_text.setPlaceholderText(self._transcript_placeholder(record))
         self.transcript_text.setPlainText(self._full_transcript_text(record))
         self._load_user_notes(record)
         self._populate_artwork(record)
@@ -2454,12 +2458,53 @@ class SoundVaultWindow(QMainWindow):
         return "\n".join(parts)
 
     @staticmethod
-    def _format_transcript_status(record) -> str:
-        if not record.transcript_text:
-            return "transcript: missing"
-        source = f" • {record.transcript_path.name}" if record.transcript_path else ""
-        language = f" • {record.transcript_language}" if record.transcript_language else ""
-        return f"transcript: available ({len(record.transcript_text):,} chars{language}{source})"
+    def _transcript_state(record) -> str:
+        """Classify a sound's transcript into one of four reportable states.
+
+        Derived entirely from persisted fields (no extra I/O):
+          * ``available`` — transcript text exists.
+          * ``empty``     — transcription ran (a sidecar/path exists) but found no
+                            speech (e.g. an instrumental).
+          * ``no_audio``  — nothing to transcribe (no local audio).
+          * ``pending``   — has audio but transcription hasn't run yet.
+        """
+        if (record.transcript_text or "").strip():
+            return "available"
+        # A sidecar that still exists on disk means transcription ran but found no
+        # speech (an instrumental). If the path is gone (deleted after indexing),
+        # don't claim "no speech detected" — fall through to pending/no_audio so we
+        # don't misattribute a missing file to an instrumental.
+        if record.transcript_path is not None and record.transcript_path.exists():
+            return "empty"
+        if record.local_audio_path is None:
+            return "no_audio"
+        return "pending"
+
+    @classmethod
+    def _format_transcript_status(cls, record) -> str:
+        state = cls._transcript_state(record)
+        if state == "available":
+            source = f" • {record.transcript_path.name}" if record.transcript_path else ""
+            language = f" • {record.transcript_language}" if record.transcript_language else ""
+            return f"transcript: available ({len(record.transcript_text):,} chars{language}{source})"
+        return {
+            "empty": "transcript: empty (no speech detected — likely instrumental)",
+            "no_audio": "transcript: no audio to transcribe",
+            "pending": "transcript: not run yet",
+        }[state]
+
+    # Placeholder shown in the (empty) transcript box, matched to the state above.
+    _TRANSCRIPT_PLACEHOLDERS = {
+        "empty": "Transcript is empty — no speech detected (likely an instrumental).",
+        "no_audio": "No audio is available for this sound, so there's nothing to transcribe.",
+        "pending": "Not transcribed yet — run transcription from Worker status, or Re-enrich this sound.",
+    }
+
+    @classmethod
+    def _transcript_placeholder(cls, record) -> str:
+        return cls._TRANSCRIPT_PLACEHOLDERS.get(cls._transcript_state(record), cls._DEFAULT_TRANSCRIPT_PLACEHOLDER)
+
+    _DEFAULT_TRANSCRIPT_PLACEHOLDER = "Select a sound to view its transcript."
 
     @staticmethod
     def _full_transcript_text(record) -> str:
