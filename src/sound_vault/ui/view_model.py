@@ -23,6 +23,7 @@ from sound_vault.vault.indexer import (
     hydrate_record,
     inspect_catalog_stats,
     resolve_vault_root,
+    transcript_state,
 )
 from sound_vault.vault.library_collections import LibraryBin, LibraryCollectionsStore
 from sound_vault.vault.package_writer import (
@@ -395,8 +396,10 @@ class LibraryViewModel:
             rows.append(("Missing evidence", health["missing_evidence"], "Add screenshots or source proof", "all", "missing_evidence"))
         if health["missing_artwork"]:
             rows.append(("Missing artwork", health["missing_artwork"], "Backfill true TikTok music-page artwork", "all", "missing_artwork"))
-        if health["missing_transcript"]:
-            rows.append(("Missing transcripts", health["missing_transcript"], "Run local ASR sidecar worker", "all", "missing_transcript"))
+        if health["pending_transcript"]:
+            # Only sounds that *can* be transcribed (have audio, none yet) are
+            # actionable; instrumentals (empty) aren't a gap to chase.
+            rows.append(("Not transcribed yet", health["pending_transcript"], "Run local ASR sidecar worker", "all", "pending_transcript"))
         if health["missing_associated_videos"]:
             rows.append(("Missing associated videos", health["missing_associated_videos"], "Backfill example/trend video evidence", "all", "missing_videos"))
         return rows or [("No review items", 0, "Archive is empty or fully reviewed", "all", "all")]
@@ -419,7 +422,8 @@ class LibraryViewModel:
             ("Missing local audio", f"{health['missing_audio']:,}"),
             ("Missing evidence", f"{health['missing_evidence']:,}"),
             ("Missing artwork", f"{health['missing_artwork']:,}"),
-            ("Missing transcripts", f"{health['missing_transcript']:,}"),
+            ("Not transcribed yet", f"{health['pending_transcript']:,}"),
+            ("Instrumental (no speech)", f"{health['empty_transcript']:,}"),
             ("Missing associated videos", f"{health['missing_associated_videos']:,}"),
             ("Pending inbox links", f"{len(self.pending_inbox()):,}"),
         ]
@@ -432,7 +436,12 @@ class LibraryViewModel:
             gaps.append("missing evidence")
         if record.artwork_path is None:
             gaps.append("missing artwork")
-        if not record.transcript_text:
+        tstate = transcript_state(record)
+        if tstate == "pending":
+            gaps.append("transcript not run yet")
+        elif tstate == "empty":
+            gaps.append("instrumental (no speech)")
+        elif tstate == "no_audio":
             gaps.append("missing transcript")
         if record.associated_video_count == 0:
             gaps.append("missing associated videos")

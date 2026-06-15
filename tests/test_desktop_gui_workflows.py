@@ -192,6 +192,41 @@ def test_desktop_user_notes_editor_saves_and_searches(tmp_path, monkeypatch):
     window.close()
 
 
+def test_desktop_smart_transcript_filters_use_4_state_classifier(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    from sound_vault.vault.indexer import SoundRecord
+
+    vault = tmp_path / "vault"
+    (vault / "catalog").mkdir(parents=True)
+    (vault / "catalog" / "sounds.jsonl").write_text("", encoding="utf-8")
+
+    sidecar = tmp_path / "t.json"
+    sidecar.write_text("{}", encoding="utf-8")
+
+    def rec(mid, **kw):
+        base = dict(music_id=mid, title="T", artist="A", tags=(), status="approved", raw={})
+        base.update(kw)
+        return SoundRecord(**base)
+
+    rows = [
+        rec("avail", transcript_text="hello"),
+        rec("inst", transcript_text="", transcript_path=sidecar, local_audio_path=tmp_path / "a.m4a"),
+        rec("pend", transcript_text="", transcript_path=None, local_audio_path=tmp_path / "b.m4a"),
+    ]
+
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    try:
+        window.active_library_filter = "smart:needs_transcript"
+        assert [r.music_id for r in window._apply_library_collection_filter(rows)] == ["pend"]
+        window.active_library_filter = "smart:instrumental"
+        assert [r.music_id for r in window._apply_library_collection_filter(rows)] == ["inst"]
+    finally:
+        window.close()
+
+
 def test_desktop_empty_transcript_box_explains_pending_state(tmp_path, monkeypatch):
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))

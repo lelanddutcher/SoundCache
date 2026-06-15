@@ -108,6 +108,36 @@ class SoundRecord:
         ).lower()
 
 
+# Canonical transcript states, shared by the inspector, filters, and health
+# metrics so the whole app agrees on what an "empty" transcript box means.
+TRANSCRIPT_STATES = ("available", "empty", "no_audio", "pending")
+
+
+def transcript_state(record: "SoundRecord") -> str:
+    """Classify a sound's transcript into one of :data:`TRANSCRIPT_STATES`.
+
+    * ``available`` — transcript text exists.
+    * ``empty``     — a transcript sidecar exists on disk but holds no text
+                      (transcription ran and found no speech → an instrumental).
+    * ``no_audio``  — there is no local audio, so nothing can be transcribed.
+    * ``pending``   — audio exists but transcription has not run yet.
+
+    Derived entirely from already-persisted fields. The on-disk check on
+    ``transcript_path`` distinguishes a real "ran but empty" result from a
+    sidecar that was deleted after indexing (which is treated as ``pending``).
+    The SQL surfaces in :mod:`sound_vault.db.index_db` mirror this logic, minus
+    the file-existence check (a coarse, stat-free approximation).
+    """
+    if (record.transcript_text or "").strip():
+        return "available"
+    path = record.transcript_path
+    if path is not None and path.exists():
+        return "empty"
+    if record.local_audio_path is None:
+        return "no_audio"
+    return "pending"
+
+
 def _normalize_tags(value: Any) -> tuple[str, ...]:
     if value is None:
         return ()

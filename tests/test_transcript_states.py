@@ -15,13 +15,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from sound_vault.ui.desktop import SoundVaultWindow
-from sound_vault.vault.indexer import SoundRecord
+from sound_vault.vault.indexer import SoundRecord, transcript_state
 
 
 def _record(**kw) -> SoundRecord:
     base = dict(music_id="m", title="T", artist="A", tags=(), status="approved", raw={})
     base.update(kw)
     return SoundRecord(**base)
+
+
+def test_desktop_delegates_to_shared_indexer_classifier():
+    # The inspector and the rest of the app must use one definition.
+    assert SoundVaultWindow._transcript_state is transcript_state
 
 
 def test_state_available_when_transcript_text_present():

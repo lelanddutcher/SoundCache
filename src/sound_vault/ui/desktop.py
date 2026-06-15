@@ -66,7 +66,7 @@ from sound_vault.net import ssl_context
 from sound_vault.settings import AppSettings, index_path_for_vault
 from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.view_model import LibraryViewModel
-from sound_vault.vault.indexer import resolve_vault_root
+from sound_vault.vault.indexer import resolve_vault_root, transcript_state
 
 DESIGN_LANGUAGE = """
 Sound Cache visual direction: tactile retro-futurist control-room dashboard — brushed metal chrome, dark graphite inset panels, Aqua bevels, physical knobs/sliders/toggles, dense archive/evidence modules.
@@ -1019,7 +1019,8 @@ class SoundVaultWindow(QMainWindow):
         sidebar_rows = [
             ("all", "All sounds", "Show full library"),
             ("favorites", "★ Favorites", "Show favorited sounds; drop rows here to favorite"),
-            ("smart:no_transcript", "No transcript / instrumental", "Sounds without transcript text"),
+            ("smart:needs_transcript", "Not transcribed yet", "Sounds with audio that haven't been transcribed"),
+            ("smart:instrumental", "Instrumentals", "Transcribed, but no speech was detected"),
             ("smart:missing_audio", "Missing audio", "Sounds with no local audio"),
             ("smart:high_popularity", "100K+ uses", "Popular sounds"),
             ("smart:has_videos", "Has example videos", "Sounds with associated videos"),
@@ -1052,8 +1053,10 @@ class SoundVaultWindow(QMainWindow):
     def apply_library_filter(self, value: str) -> None:
         self.active_library_filter = value
         self.show_view("library")
-        if value == "smart:no_transcript":
-            self._set_combo_by_data(self.media_filter, "missing_transcript")
+        if value == "smart:needs_transcript":
+            self._set_combo_by_data(self.media_filter, "pending_transcript")
+        elif value == "smart:instrumental":
+            self._set_combo_by_data(self.media_filter, "empty_transcript")
         elif value == "smart:missing_audio":
             self._set_combo_by_data(self.media_filter, "missing_audio")
         elif value == "smart:high_popularity":
@@ -1207,7 +1210,9 @@ class SoundVaultWindow(QMainWindow):
         self.media_filter.addItem("Has artwork", "has_artwork")
         self.media_filter.addItem("Missing artwork", "missing_artwork")
         self.media_filter.addItem("Has transcript", "has_transcript")
-        self.media_filter.addItem("Missing transcript", "missing_transcript")
+        self.media_filter.addItem("Missing transcript (any)", "missing_transcript")
+        self.media_filter.addItem("  ↳ Not transcribed yet", "pending_transcript")
+        self.media_filter.addItem("  ↳ Instrumental (no speech)", "empty_transcript")
         self.media_filter.addItem("Has associated videos", "has_videos")
         self.media_filter.addItem("Missing associated videos", "missing_videos")
         self.media_filter.addItem("Has evidence", "has_evidence")
@@ -1943,7 +1948,7 @@ class SoundVaultWindow(QMainWindow):
         self._set_combo_by_data(self.status_filter, str(state.get("status_filter") or "all"))
         self._set_combo_by_data(self.usage_filter, str(state.get("usage_filter") or "all"))
         self.active_library_filter = str(state.get("library_filter") or "all")
-        valid_filters = {"all", "favorites", "smart:no_transcript", "smart:missing_audio", "smart:high_popularity", "smart:has_videos"}
+        valid_filters = {"all", "favorites", "smart:needs_transcript", "smart:instrumental", "smart:missing_audio", "smart:high_popularity", "smart:has_videos"}
         valid_filters.update(f"bin:{bin_row.id}" for bin_row in self.vm.library_bins())
         if self.active_library_filter not in valid_filters:
             self.active_library_filter = "all"
@@ -2156,8 +2161,10 @@ class SoundVaultWindow(QMainWindow):
         if value.startswith("bin:"):
             ids = set(self.vm.library_bin_music_ids(value.removeprefix("bin:")))
             return [record for record in rows if record.music_id in ids]
-        if value == "smart:no_transcript":
-            return [record for record in rows if not record.transcript_text]
+        if value == "smart:needs_transcript":
+            return [record for record in rows if transcript_state(record) == "pending"]
+        if value == "smart:instrumental":
+            return [record for record in rows if transcript_state(record) == "empty"]
         if value == "smart:missing_audio":
             return [record for record in rows if not self._record_has_playable_pointer(record)]
         if value == "smart:high_popularity":
@@ -2457,28 +2464,9 @@ class SoundVaultWindow(QMainWindow):
         ]
         return "\n".join(parts)
 
-    @staticmethod
-    def _transcript_state(record) -> str:
-        """Classify a sound's transcript into one of four reportable states.
-
-        Derived entirely from persisted fields (no extra I/O):
-          * ``available`` — transcript text exists.
-          * ``empty``     — transcription ran (a sidecar/path exists) but found no
-                            speech (e.g. an instrumental).
-          * ``no_audio``  — nothing to transcribe (no local audio).
-          * ``pending``   — has audio but transcription hasn't run yet.
-        """
-        if (record.transcript_text or "").strip():
-            return "available"
-        # A sidecar that still exists on disk means transcription ran but found no
-        # speech (an instrumental). If the path is gone (deleted after indexing),
-        # don't claim "no speech detected" — fall through to pending/no_audio so we
-        # don't misattribute a missing file to an instrumental.
-        if record.transcript_path is not None and record.transcript_path.exists():
-            return "empty"
-        if record.local_audio_path is None:
-            return "no_audio"
-        return "pending"
+    # Canonical 4-state transcript classifier lives in the indexer so filters,
+    # health metrics, and this inspector all agree. See indexer.transcript_state.
+    _transcript_state = staticmethod(transcript_state)
 
     @classmethod
     def _format_transcript_status(cls, record) -> str:

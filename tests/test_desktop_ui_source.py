@@ -169,7 +169,8 @@ def test_desktop_has_favorites_bins_drag_drop_and_readable_menus():
     assert "create_sorting_bin" in source
     assert "Add to…" in source
     assert "New sorting bin…" in source
-    assert "smart:no_transcript" in source
+    assert "smart:needs_transcript" in source
+    assert "smart:instrumental" in source
     assert "QComboBox QAbstractItemView" in source
     assert "QMenu::item:selected" in source
     assert "selection-color: #ffffff" in source

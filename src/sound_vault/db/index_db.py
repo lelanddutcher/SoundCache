@@ -292,6 +292,19 @@ class IndexDatabase:
             clauses.append("COALESCE(sounds.transcript_text, '') != ''")
         elif media_filter == "missing_transcript":
             clauses.append("COALESCE(sounds.transcript_text, '') = ''")
+        elif media_filter == "empty_transcript":
+            # Transcribed (a sidecar path exists) but no text -> instrumental.
+            # Stat-free mirror of indexer.transcript_state's "empty".
+            clauses.append(
+                "COALESCE(sounds.transcript_text, '') = '' AND COALESCE(sounds.transcript_path, '') != ''"
+            )
+        elif media_filter == "pending_transcript":
+            # Has audio, no transcript sidecar yet -> not transcribed.
+            clauses.append(
+                "COALESCE(sounds.transcript_text, '') = '' "
+                "AND COALESCE(sounds.transcript_path, '') = '' "
+                "AND COALESCE(sounds.local_audio_path, '') != ''"
+            )
         elif media_filter == "has_videos":
             clauses.append("sounds.associated_video_count > 0")
         elif media_filter == "missing_videos":
@@ -419,7 +432,14 @@ class IndexDatabase:
                     SUM(CASE WHEN COALESCE(evidence_image_count, 0) = 0 THEN 1 ELSE 0 END) AS missing_evidence,
                     SUM(CASE WHEN COALESCE(artwork_path, '') = '' THEN 1 ELSE 0 END) AS missing_artwork,
                     SUM(CASE WHEN COALESCE(transcript_text, '') = '' THEN 1 ELSE 0 END) AS missing_transcript,
-                    SUM(CASE WHEN COALESCE(associated_video_count, 0) = 0 THEN 1 ELSE 0 END) AS missing_associated_videos
+                    SUM(CASE WHEN COALESCE(associated_video_count, 0) = 0 THEN 1 ELSE 0 END) AS missing_associated_videos,
+                    -- Split the empty-transcript total into the two actionable buckets
+                    -- (stat-free mirror of indexer.transcript_state).
+                    SUM(CASE WHEN COALESCE(transcript_text, '') = ''
+                             AND COALESCE(transcript_path, '') != '' THEN 1 ELSE 0 END) AS empty_transcript,
+                    SUM(CASE WHEN COALESCE(transcript_text, '') = ''
+                             AND COALESCE(transcript_path, '') = ''
+                             AND COALESCE(local_audio_path, '') != '' THEN 1 ELSE 0 END) AS pending_transcript
                 FROM sounds
                 """
             ).fetchone()
@@ -431,6 +451,8 @@ class IndexDatabase:
             "missing_artwork": int(row[4] or 0),
             "missing_transcript": int(row[5] or 0),
             "missing_associated_videos": int(row[6] or 0),
+            "empty_transcript": int(row[7] or 0),
+            "pending_transcript": int(row[8] or 0),
         }
 
     def _connect(self) -> sqlite3.Connection:
