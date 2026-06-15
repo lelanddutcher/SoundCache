@@ -2643,6 +2643,33 @@ class SoundVaultWindow(QMainWindow):
         self.video_table.selectRow(item.row())
         self.open_selected_associated_video()
 
+    @staticmethod
+    def _is_safe_web_url(url: str) -> bool:
+        """Only http/https are safe to hand to the OS URL handler.
+
+        Sound/video URLs ultimately come from third-party page scraping and
+        redirect-following, so a malicious page could plant a non-web scheme
+        (``file://``, a custom ``app:`` scheme, ``javascript:``) that
+        QDesktopServices.openUrl would dispatch to the OS. Defense-in-depth.
+        Local files are opened via QUrl.fromLocalFile and don't go through here.
+        """
+        from urllib.parse import urlparse
+
+        try:
+            return urlparse((url or "").strip()).scheme.lower() in ("http", "https")
+        except (ValueError, TypeError):
+            return False
+
+    def _open_web_url(self, url: str, *, success_msg: str = "") -> bool:
+        """Open an http/https URL externally; refuse anything else."""
+        if not self._is_safe_web_url(url):
+            self.statusBar().showMessage("Refused to open a non-web link (only http/https allowed)", 3000)
+            return False
+        QDesktopServices.openUrl(QUrl(url))
+        if success_msg:
+            self.statusBar().showMessage(success_msg, 2500)
+        return True
+
     def open_selected_associated_video(self, *, prefer_url: bool = False) -> None:
         video = self._selected_associated_video()
         if video is None:
@@ -2651,7 +2678,7 @@ class SoundVaultWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(video.video_path)))
             return
         if video.video_url:
-            QDesktopServices.openUrl(QUrl(video.video_url))
+            self._open_web_url(video.video_url)
 
     def open_selected_folder(self) -> None:
         if self.current_preview_record is None:
@@ -2668,8 +2695,7 @@ class SoundVaultWindow(QMainWindow):
         if url is None:
             self.statusBar().showMessage("No TikTok sound URL in metadata", 2500)
             return
-        QDesktopServices.openUrl(QUrl(url))
-        self.statusBar().showMessage("Opened TikTok sound page", 2500)
+        self._open_web_url(url, success_msg="Opened TikTok sound page")
 
     def copy_selected_metadata(self) -> None:
         if self.current_preview_record is None:

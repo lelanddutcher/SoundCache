@@ -36,8 +36,10 @@ def test_desktop_inspector_opens_tiktok_sound_url():
     assert "def _sound_url_for_record" in source
     assert "record.canonical_url" in source
     assert "raw.get(\"mobile_music_url\")" in source
-    assert "QDesktopServices.openUrl(QUrl(url))" in source
-    assert "Open TikTok sound page" in source
+    # web URLs go through the http/https scheme guard, not straight to the OS
+    assert "self._open_web_url(url" in source
+    assert "def _is_safe_web_url" in source
+    assert "Opened TikTok sound page" in source
 
 
 def test_desktop_sorted_tables_store_row_identity_in_item_data():
@@ -524,4 +526,5 @@ def test_desktop_inspector_opens_associated_video_assets_and_normalizes_artwork(
     assert "itemDoubleClicked.connect(self.open_associated_video_from_item)" in source
     assert "def open_selected_associated_video" in source
     assert "QDesktopServices.openUrl(QUrl.fromLocalFile(str(video.video_path)))" in source
-    assert "QDesktopServices.openUrl(QUrl(video.video_url))" in source
+    # the video web URL goes through the http/https scheme guard
+    assert "self._open_web_url(video.video_url)" in source
