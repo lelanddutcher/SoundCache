@@ -132,6 +132,115 @@ def workflow_plist_bytes(relay_url: str, pair_code: str) -> bytes:
     return plistlib.dumps(build_workflow(relay_url, pair_code), fmt=plistlib.FMT_XML)
 
 
+# A Text action (index 0) holds the pair code; an Import Question fills it at
+# install time, so ONE signed copy works for everyone. The relay URL is fixed
+# (always the production relay), so it doesn't need a question.
+_PAIR_UUID = "5C0DACAE-0002-4000-A000-50554E444E4F"
+
+
+def _pair_output() -> dict:
+    """References the install-time pair code (the Text action's output)."""
+    return {
+        "WFSerializationType": "WFTextTokenAttachment",
+        "Value": {"Type": "ActionOutput", "OutputUUID": _PAIR_UUID, "OutputName": "Pair code", "Aggrandizements": []},
+    }
+
+
+def build_import_question_workflow(relay_url: str) -> dict:
+    """A single, distributable shortcut: relay URL baked in, pair code asked
+    once at install via an Import Question.
+
+    Designed to be signed with ``shortcuts sign --mode anyone`` so it installs
+    in one tap with **no** "Allow Untrusted Shortcuts" toggle. iOS prompts for
+    the pair code at install (filling the index-0 Text action), and the POST
+    body references that action's output.
+    """
+    submit_url = submit_endpoint(relay_url)
+    headers = {
+        "WFSerializationType": "WFDictionaryFieldValue",
+        "Value": {"WFDictionaryFieldValueItems": [_dict_item("Content-Type", _text("application/json"))]},
+    }
+    json_body = {
+        "WFSerializationType": "WFDictionaryFieldValue",
+        "Value": {
+            "WFDictionaryFieldValueItems": [
+                _dict_item("pair_code", _pair_output()),
+                _dict_item("url", _shortcut_input()),
+                _dict_item("source", _text("ios_shortcut")),
+                _dict_item("note", _ask_output()),
+            ]
+        },
+    }
+    actions = [
+        {
+            # index 0 — the Import Question fills this Text action's value.
+            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
+            "WFWorkflowActionParameters": {
+                "WFTextActionText": "PASTE-YOUR-PAIR-CODE",
+                "UUID": _PAIR_UUID,
+                "CustomOutputName": "Pair code",
+            },
+        },
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.ask",
+            "WFWorkflowActionParameters": {
+                "WFInputType": "Text",
+                "WFAskActionPrompt": "Label or notes for this sound? (optional)",
+                "WFAskActionAllowsMultiline": True,
+                "UUID": _NOTE_UUID,
+                "CustomOutputName": "Sound note",
+            },
+        },
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
+            "WFWorkflowActionParameters": {
+                "WFURL": submit_url,
+                "WFHTTPMethod": "POST",
+                "WFHTTPHeaders": headers,
+                "WFHTTPBodyType": "JSON",
+                "WFJSONValues": json_body,
+                "ShowHeaders": True,
+            },
+        },
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.shownotification",
+            "WFWorkflowActionParameters": {
+                "WFNotificationActionTitle": "Sound Cache",
+                "WFNotificationActionBody": "Saved to Sound Cache ✨",
+            },
+        },
+    ]
+    return {
+        "WFWorkflowClientVersion": "2607.0.2",
+        "WFWorkflowMinimumClientVersion": 900,
+        "WFWorkflowMinimumClientVersionString": "900",
+        "WFWorkflowIcon": {"WFWorkflowIconStartColor": 4292093695, "WFWorkflowIconGlyphNumber": 61440},
+        "WFWorkflowImportQuestions": [
+            {
+                "ActionIndex": 0,
+                "Category": "Parameter",
+                "ParameterKey": "WFTextActionText",
+                "Text": "Paste your Sound Cache pair code (app → Settings → Create pairing code)",
+                "DefaultValue": "",
+            }
+        ],
+        "WFWorkflowName": "Save to Sound Cache",
+        "WFWorkflowTypes": ["ActionExtension"],
+        "WFWorkflowInputContentItemClasses": [
+            "WFURLContentItem",
+            "WFStringContentItem",
+            "WFSafariWebPageContentItem",
+            "WFRichTextContentItem",
+        ],
+        "WFWorkflowActions": actions,
+    }
+
+
+def import_question_plist_bytes(relay_url: str) -> bytes:
+    """Serialized (unsigned) distributable shortcut — sign before hosting."""
+    return plistlib.dumps(build_import_question_workflow(relay_url), fmt=plistlib.FMT_XML)
+
+
 def setup_url(relay_url: str, pair_code: str, *, site_base: str = DEFAULT_SITE_BASE) -> str:
     """Guided-setup URL to encode in the QR.
 

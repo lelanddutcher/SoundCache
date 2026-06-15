@@ -52,6 +52,34 @@ def test_build_workflow_targets_relay_and_carries_pair_code():
     assert notify["WFNotificationActionTitle"] == "Sound Cache"
 
 
+def test_import_question_workflow_asks_for_pair_code_at_install():
+    wf = sb.build_import_question_workflow("https://api.soundcache.io")
+    actions = wf["WFWorkflowActions"]
+
+    # index-0 Text action holds the pair code; the install question fills it
+    text_action = actions[0]
+    assert text_action["WFWorkflowActionIdentifier"] == "is.workflow.actions.gettext"
+    text_uuid = text_action["WFWorkflowActionParameters"]["UUID"]
+
+    [q] = wf["WFWorkflowImportQuestions"]
+    assert q["ActionIndex"] == 0
+    assert q["Category"] == "Parameter"
+    assert q["ParameterKey"] == "WFTextActionText"
+    assert "pair code" in q["Text"].lower()
+
+    by_id = {a["WFWorkflowActionIdentifier"]: a for a in actions}
+    post = by_id["is.workflow.actions.downloadurl"]
+    # relay URL is baked in (not a question — it's always the production relay)
+    assert post["WFWorkflowActionParameters"]["WFURL"] == "https://api.soundcache.io/v1/inbox/submit"
+    body = post["WFWorkflowActionParameters"]["WFJSONValues"]["Value"]["WFDictionaryFieldValueItems"]
+    keys = {i["WFKey"]["Value"]["string"]: i for i in body}
+    assert set(keys) == {"pair_code", "url", "source", "note"}
+    # the POST pair_code pulls from the install-filled Text action's output
+    pc = keys["pair_code"]["WFValue"]["Value"]
+    assert pc["Type"] == "ActionOutput"
+    assert pc["OutputUUID"] == text_uuid
+
+
 def test_workflow_plist_bytes_roundtrips():
     raw = sb.workflow_plist_bytes("https://api.soundcache.io", "ABC-1")
     parsed = plistlib.loads(raw)
