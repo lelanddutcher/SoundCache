@@ -13,12 +13,49 @@ from sound_vault.db.index_db import IndexDatabase
 from sound_vault.ingest.download import CompositeDownloader, PlaywrightCaptureDownloader, YtDlpDownloader
 from sound_vault.ingest.package import PackagedSound
 from sound_vault.ingest.service import IndexUpdater, IngestService
+from sound_vault.settings import user_data_dir
 from sound_vault.vault.indexer import build_record
+
+# Where Homebrew / MacPorts / /usr/local put node + ffmpeg. A GUI app launched
+# from Finder or a launchd agent inherits a minimal PATH (often just
+# /usr/bin:/bin), so node (the TikTok Playwright capture) and ffmpeg (yt-dlp's
+# audio post-processor) silently fail to resolve — which is exactly why some
+# inbox items failed with "ffprobe and ffmpeg not found". Augment PATH before any
+# ingest so both the in-process yt-dlp ffmpeg call and the node subprocess find them.
+_EXTRA_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin")
+
+
+def ensure_media_tools_on_path() -> None:
+    """Idempotently add common bin dirs to PATH so node/ffmpeg resolve under a
+    Finder/launchd-launched GUI (which gets a stripped PATH)."""
+    parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+    added = [d for d in _EXTRA_BIN_DIRS if d not in parts and os.path.isdir(d)]
+    if added:
+        os.environ["PATH"] = os.pathsep.join(parts + added)
 
 
 def _subprocess_runner(cmd, cwd=None):
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=240, check=False)
     return result.returncode, result.stdout, result.stderr
+
+
+def _repo_root() -> Path:
+    # src/sound_vault/ingest/factory.py -> parents[3] is the repo root, which
+    # holds scripts/ and node_modules/ (so `require('playwright')` resolves).
+    return Path(__file__).resolve().parents[3]
+
+
+def _default_capture_script() -> Path | None:
+    candidate = _repo_root() / "scripts" / "capture_tiktok_audio.cjs"
+    return candidate if candidate.exists() else None
+
+
+def _default_storage_state() -> Path | None:
+    """The TikTok auth state the capture browser logs in with. Kept in the app
+    data dir (out of source control) so it isn't tied to the NAS mount; override
+    with SOUND_VAULT_TIKTOK_STATE."""
+    candidate = user_data_dir() / "tiktok.storageState.json"
+    return candidate if candidate.exists() else None
 
 
 def build_downloader(
@@ -27,22 +64,29 @@ def build_downloader(
     playwright_state: Path | str | None = None,
     playwright_cwd: Path | str | None = None,
 ) -> CompositeDownloader:
-    """yt-dlp primary; add the authenticated Playwright TikTok fallback when configured.
+    """yt-dlp primary; add the authenticated Playwright TikTok fallback.
 
-    Falls back to env vars so the capture can be enabled without code changes:
-    SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT / SOUND_VAULT_TIKTOK_STATE / SOUND_VAULT_TIKTOK_CAPTURE_CWD.
+    yt-dlp cannot fetch a TikTok ``/music/`` sound's own audio (its sound
+    extractor only enumerates videos and is upstream-broken), so the Playwright
+    capture is the *only* path that works for shared sounds. Resolution order for
+    each input: explicit arg -> env var
+    (SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT / _STATE / _CAPTURE_CWD) -> bundled default
+    (the in-repo capture script + the app-data storageState). The fallback is only
+    attached when both a script and an auth-state file actually resolve, so it
+    stays a clean no-op on machines without the auth state.
     """
-    playwright_script = playwright_script or os.getenv("SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT")
-    playwright_state = playwright_state or os.getenv("SOUND_VAULT_TIKTOK_STATE")
-    playwright_cwd = playwright_cwd or os.getenv("SOUND_VAULT_TIKTOK_CAPTURE_CWD")
+    ensure_media_tools_on_path()
+    script = playwright_script or os.getenv("SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT") or _default_capture_script()
+    state = playwright_state or os.getenv("SOUND_VAULT_TIKTOK_STATE") or _default_storage_state()
+    cwd = playwright_cwd or os.getenv("SOUND_VAULT_TIKTOK_CAPTURE_CWD") or _repo_root()
 
     fallback = None
-    if playwright_script and playwright_state:
+    if script and state:
         fallback = PlaywrightCaptureDownloader(
-            node_script=Path(playwright_script),
-            storage_state=Path(playwright_state),
+            node_script=Path(script),
+            storage_state=Path(state),
             runner=_subprocess_runner,
-            project_cwd=Path(playwright_cwd) if playwright_cwd else None,
+            project_cwd=Path(cwd) if cwd else None,
         )
     return CompositeDownloader(
         primary=YtDlpDownloader(),

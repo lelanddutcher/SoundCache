@@ -1401,10 +1401,10 @@ class SoundVaultWindow(QMainWindow):
         header.addWidget(refresh_inbox)
         header.addWidget(mark_imported)
         layout.addLayout(header)
-        self.inbox_table = QTableWidget(0, 4)
-        self.inbox_table.setHorizontalHeaderLabels(["received", "source", "url", "status"])
+        self.inbox_table = QTableWidget(0, 5)
+        self.inbox_table.setHorizontalHeaderLabels(["received", "source", "url", "status", "error"])
         self._prepare_table(self.inbox_table, stretch_column=2)
-        self.restore_table_layout("inbox", self.inbox_table)
+        self.restore_table_layout("inbox_v2", self.inbox_table)
         layout.addWidget(self.inbox_table, 1)
         return view
 
@@ -2067,7 +2067,7 @@ class SoundVaultWindow(QMainWindow):
             if worker is not None and worker.isRunning():
                 worker.wait(5000)
         self.save_table_layout("library", self.table)
-        self.save_table_layout("inbox", self.inbox_table)
+        self.save_table_layout("inbox_v2", self.inbox_table)
         self.settings.set_hidden_table_columns("library", self.hidden_library_columns())
         self.save_library_search_state()
         super().closeEvent(event)
@@ -3045,9 +3045,12 @@ class SoundVaultWindow(QMainWindow):
         self.inbox_table.setRowCount(len(self.current_inbox_rows))
         for row_idx, item in enumerate(self.current_inbox_rows):
             received = getattr(item, "created_at", "") or getattr(item, "received_at", "") or ""
-            for col_idx, value in enumerate([received, item.source, item.url, item.status]):
+            err = getattr(item, "error", "") or ""
+            for col_idx, value in enumerate([received, item.source, item.url, item.status, err]):
                 table_item = QTableWidgetItem(str(value))
                 table_item.setData(Qt.ItemDataRole.UserRole, item.id)
+                if err:
+                    table_item.setToolTip(err)
                 self.inbox_table.setItem(row_idx, col_idx, table_item)
         self.inbox_table.setSortingEnabled(True)
         self.inbox_table.sortItems(0, Qt.SortOrder.DescendingOrder)
@@ -3103,8 +3106,28 @@ class SoundVaultWindow(QMainWindow):
             return
         self.refresh_inbox()
         self.rebuild_index()
-        imported = sum(1 for outcome in outcomes if getattr(outcome, "status", "") == "ingested")
-        self.statusBar().showMessage(f"Imported {imported} sound(s).", 5000)
+        imported = sum(1 for o in outcomes if getattr(o, "status", "") == "ingested")
+        duplicates = sum(1 for o in outcomes if getattr(o, "status", "") == "duplicate")
+        failures = [o for o in outcomes if getattr(o, "status", "") == "failed"]
+        parts = [f"Imported {imported} sound(s)"]
+        if duplicates:
+            parts.append(f"{duplicates} duplicate(s)")
+        if failures:
+            parts.append(f"{len(failures)} failed")
+        self.statusBar().showMessage(", ".join(parts) + ".", 8000)
+        # Per-item failures are returned in `outcomes` (the worker only raises on a
+        # whole-batch crash), so surface them explicitly — otherwise a run where
+        # every link failed reads as "Imported 0 sound(s)." and looks like success.
+        if failures:
+            sample = failures[0]
+            reason = getattr(sample, "reason", "") or "unknown error"
+            more = f"\n\n(+{len(failures) - 1} more)" if len(failures) > 1 else ""
+            QMessageBox.warning(
+                self,
+                "Some imports failed",
+                f"{len(failures)} of {len(outcomes)} link(s) failed.\n\n"
+                f"Example: {getattr(sample, 'url', '')}\n{reason}{more}",
+            )
 
     def refresh_review_queues(self) -> None:
         rows = self.vm.review_queue_rows()

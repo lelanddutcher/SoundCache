@@ -42,11 +42,50 @@ def test_make_index_updater_upserts(tmp_path):
     assert got is not None and got.title == "Kickoff"
 
 
-def test_build_downloader_no_fallback_by_default(monkeypatch):
+def test_build_downloader_no_fallback_when_unconfigured(monkeypatch):
+    # No env override and nothing resolvable -> no TikTok capture fallback.
     for var in ("SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT", "SOUND_VAULT_TIKTOK_STATE", "SOUND_VAULT_TIKTOK_CAPTURE_CWD"):
         monkeypatch.delenv(var, raising=False)
+    # Neutralize the bundled defaults so the result is machine-independent (on a
+    # configured machine the app-data storageState would otherwise enable it).
+    monkeypatch.setattr("sound_vault.ingest.factory._default_capture_script", lambda: None)
+    monkeypatch.setattr("sound_vault.ingest.factory._default_storage_state", lambda: None)
     dl = build_downloader()
     assert dl.fallback is None
+
+
+def test_build_downloader_auto_wires_from_defaults(monkeypatch, tmp_path):
+    # When the bundled script + an auth storageState both resolve, the fallback is
+    # attached automatically (no env vars / explicit args needed) — this is the
+    # wiring whose absence caused TikTok sound ingestion to silently fail.
+    for var in ("SOUND_VAULT_TIKTOK_CAPTURE_SCRIPT", "SOUND_VAULT_TIKTOK_STATE", "SOUND_VAULT_TIKTOK_CAPTURE_CWD"):
+        monkeypatch.delenv(var, raising=False)
+    script = tmp_path / "capture_tiktok_audio.cjs"
+    script.write_text("x", encoding="utf-8")
+    state = tmp_path / "tiktok.storageState.json"
+    state.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("sound_vault.ingest.factory._default_capture_script", lambda: script)
+    monkeypatch.setattr("sound_vault.ingest.factory._default_storage_state", lambda: state)
+    dl = build_downloader()
+    assert dl.fallback is not None
+    assert dl.should_fallback("u", None, platform="tiktok") is True
+
+
+def test_ensure_media_tools_on_path_adds_existing_dirs(monkeypatch, tmp_path):
+    # A Finder/launchd-launched GUI gets a stripped PATH; the augmenter must add
+    # real bin dirs (so node/ffmpeg resolve) and be idempotent.
+    from sound_vault.ingest import factory
+
+    binA = tmp_path / "binA"
+    binA.mkdir()
+    monkeypatch.setattr(factory, "_EXTRA_BIN_DIRS", (str(binA), "/no/such/dir/xyz"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    factory.ensure_media_tools_on_path()
+    parts = __import__("os").environ["PATH"].split(":")
+    assert str(binA) in parts  # real dir added
+    assert "/no/such/dir/xyz" not in parts  # missing dir skipped
+    factory.ensure_media_tools_on_path()  # idempotent
+    assert __import__("os").environ["PATH"].split(":").count(str(binA)) == 1
 
 
 def test_build_downloader_with_fallback_gates_to_tiktok(tmp_path):

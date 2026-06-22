@@ -40,6 +40,13 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
         const t = (el.textContent || "").trim();
         if (/^[\d.,]+\s*[kKmMbB]?\s*(videos?|posts?)$/i.test(t)) { usage = t; break; }
       }
+      // The creator h2 / og:title sometimes carries the usage count (e.g.
+      // "Toni_SP11 ∙ 8335 videos") — strip a trailing "· N videos/posts" so the
+      // author/title don't get polluted (and the on-disk folder name stays clean).
+      const stripUsage = (s) =>
+        (s || "").replace(/\s*[·∙•|/–-]+\s*[\d.,]+\s*[kKmMbB]?\s*(?:videos?|posts?|clips?)\b.*$/i, "").trim();
+      title = stripUsage(title);
+      author = stripUsage(author);
       return { title, author, coverUrl, usage, pageUrl: location.href };
     });
     const parseCount = (s) => {

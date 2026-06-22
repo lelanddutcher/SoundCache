@@ -30,7 +30,12 @@ PLIST
 
 cat > "$APP/Contents/MacOS/launch" <<'SH'
 #!/bin/bash
-# always run the latest code from the editable install — no rebuild needed.
+# Finder/launchd hand GUI apps a stripped PATH (often just /usr/bin:/bin), so
+# node (the TikTok sound capture) and ffmpeg (yt-dlp's audio post-processor)
+# wouldn't resolve and ingestion would silently fail. Prepend the usual
+# Homebrew/MacPorts/local bins, then run the latest code from the editable
+# install (no rebuild needed).
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"
 exec "$HOME/venvs/sound-vault/bin/sound-vault"
 SH
 chmod +x "$APP/Contents/MacOS/launch"
