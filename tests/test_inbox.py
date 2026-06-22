@@ -39,12 +39,12 @@ def test_wrong_device_secret_cannot_poll_links():
     assert store.poll(device_id="dev_1", device_secret="wrong", pair_code="RIVER-7421") == []
 
 
-def test_pair_code_acceptance_default_ttl_is_one_day():
+def test_pair_code_acceptance_default_ttl_is_thirty_days():
     now = {"value": 1000.0}
     store = InboxStore(now=lambda: now["value"])
     store.register_pair_code("RIVER-2345-6789", device_id="dev_1")
 
-    now["value"] = 1000.0 + (24 * 60 * 60)
+    now["value"] = 1000.0 + (30 * 24 * 60 * 60)
     assert store.can_accept_pair_code("RIVER-2345-6789") is True
 
     now["value"] += 1

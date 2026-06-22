@@ -12,7 +12,9 @@ _WORDS = [
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 _CODE_GROUPS = 2
 _CODE_GROUP_SIZE = 4
-DEFAULT_PAIRING_CODE_TTL_SECONDS = 5 * 60
+# 30 days — matches the inbox submission TTL so the create response's
+# advertised expires_at reflects how long the code actually works.
+DEFAULT_PAIRING_CODE_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 @dataclass(frozen=True)

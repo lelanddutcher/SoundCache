@@ -7,7 +7,7 @@ import secrets
 import sqlite3
 import time
 
-DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
 
 def _hash_pair_code(pair_code: str) -> str:
