@@ -99,7 +99,7 @@ def build_workflow(relay_url: str, pair_code: str) -> dict:
             },
         },
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.shownotification",
+            "WFWorkflowActionIdentifier": "is.workflow.actions.notification",
             "WFWorkflowActionParameters": {
                 "WFNotificationActionTitle": "Sound Cache",
                 "WFNotificationActionBody": "Saved to Sound Cache ✨",
@@ -203,7 +203,7 @@ def build_import_question_workflow(relay_url: str) -> dict:
             },
         },
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.shownotification",
+            "WFWorkflowActionIdentifier": "is.workflow.actions.notification",
             "WFWorkflowActionParameters": {
                 "WFNotificationActionTitle": "Sound Cache",
                 "WFNotificationActionBody": "Saved to Sound Cache ✨",

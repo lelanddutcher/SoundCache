@@ -47,8 +47,8 @@ def test_build_workflow_targets_relay_and_carries_pair_code():
     assert note_value["Type"] == "ActionOutput"
     assert note_value["OutputUUID"] == ask_uuid
 
-    # branding in the confirmation toast
-    notify = by_id["is.workflow.actions.shownotification"]["WFWorkflowActionParameters"]
+    # branding in the confirmation toast (real "Show Notification" identifier)
+    notify = by_id["is.workflow.actions.notification"]["WFWorkflowActionParameters"]
     assert notify["WFNotificationActionTitle"] == "Sound Cache"
 
 
