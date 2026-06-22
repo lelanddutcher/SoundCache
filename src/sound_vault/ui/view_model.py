@@ -760,3 +760,65 @@ class LibraryViewModel:
             get_json=get_json,
         )
         return self.import_pending()
+
+    def transcription_targets(self, music_ids: "list[str] | None" = None) -> list[tuple[str, Path, Path]]:
+        """Sounds that still need transcription: audio present, no transcript yet.
+
+        Returns ``(music_id, folder, audio_path)`` tuples. Pass ``music_ids`` to
+        scope to a specific set (e.g. a freshly-imported batch); omit to scan the
+        whole index. Used to drive a bounded background transcription pass."""
+        with self._lock:
+            if music_ids is None:
+                records = list(self._records_by_id.values())
+            else:
+                records = [self._records_by_id.get(m) for m in music_ids]
+        targets: list[tuple[str, Path, Path]] = []
+        for record in records:
+            if record is None or transcript_state(record) != "pending":
+                continue
+            folder = record.folder_path
+            audio = record.local_audio_path
+            if folder is not None and audio is not None:
+                targets.append((record.music_id, Path(folder), Path(audio)))
+        return targets
+
+    def transcribe_targets(
+        self,
+        targets: "list[tuple[str, Path, Path]]",
+        *,
+        transcriber: "Callable[[Path], dict[str, Any]] | None" = None,
+        progress: "Callable[[int, int, str], None] | None" = None,
+    ) -> int:
+        """Transcribe a bounded list of sounds in place (writes metadata.json).
+
+        Idempotent (skips sounds that already have a transcript) and best-effort
+        per item, so one failure never aborts the batch. Builds the local
+        faster-whisper transcriber once unless one is injected. Returns how many
+        sounds gained a transcript result."""
+        if not targets:
+            return 0
+        from sound_vault.workers.transcription import transcribe_sound_folder
+
+        if transcriber is None:
+            from sound_vault.ingest.factory import build_transcriber
+
+            transcriber = build_transcriber()
+        if transcriber is None:
+            return 0
+        done = 0
+        total = len(targets)
+        for index, (music_id, folder, audio) in enumerate(targets):
+            try:
+                result = transcribe_sound_folder(Path(folder), audio_path=Path(audio), transcriber=transcriber)
+                if result.get("status") in ("ok", "empty"):
+                    done += 1
+                else:
+                    write_event(
+                        "transcribe.skip", music_id=str(music_id),
+                        status=str(result.get("status")), reason=str(result.get("reason") or ""),
+                    )
+            except Exception as exc:  # noqa: BLE001 - per-item best-effort, but never silent
+                write_event("transcribe.error", music_id=str(music_id), **exception_fields(exc))
+            if progress is not None:
+                progress(index + 1, total, music_id)
+        return done

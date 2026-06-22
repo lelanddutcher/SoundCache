@@ -1013,6 +1013,30 @@ class _ImportWorker(QThread):
             self.importFinished.emit([], f"{type(exc).__name__}: {exc}")
 
 
+class _TranscriptionWorker(QThread):
+    """Transcribe a bounded batch of just-imported sounds off the UI thread.
+
+    Decoupled from the import itself so transcripts fill in hands-free even if the
+    inline attempt was skipped, without blocking the import or freezing the UI."""
+
+    progress = Signal(int, int)  # done, total
+    finished_ok = Signal(int, object)  # transcribed_count, error|None
+
+    def __init__(self, vm, targets, parent=None) -> None:
+        super().__init__(parent)
+        self._vm = vm
+        self._targets = targets
+
+    def run(self) -> None:
+        try:
+            count = self._vm.transcribe_targets(
+                self._targets, progress=lambda done, total, _mid: self.progress.emit(done, total)
+            )
+            self.finished_ok.emit(count, None)
+        except Exception as exc:  # noqa: BLE001 - surface to UI thread
+            self.finished_ok.emit(0, exc)
+
+
 class _PollWorker(QThread):
     """Lightweight off-thread relay poll (pull links into the inbox, no download)."""
 
@@ -2298,7 +2322,7 @@ class SoundVaultWindow(QMainWindow):
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 timer.stop()
-        for worker_name in ("_poll_worker", "_import_worker"):
+        for worker_name in ("_poll_worker", "_import_worker", "_transcribe_worker"):
             worker = getattr(self, worker_name, None)
             if worker is not None and worker.isRunning():
                 worker.wait(5000)
@@ -3354,6 +3378,18 @@ class SoundVaultWindow(QMainWindow):
         imported = sum(1 for o in outcomes if getattr(o, "status", "") == "ingested")
         duplicates = sum(1 for o in outcomes if getattr(o, "status", "") == "duplicate")
         failures = [o for o in outcomes if getattr(o, "status", "") == "failed"]
+        # Kick off transcription for exactly the sounds just imported (bounded to
+        # this batch — never a vault-wide sweep over the legacy backlog). Runs off
+        # the UI thread; transcripts fill in and the index refreshes when done.
+        transcribe_targets = [
+            (o.music_id, o.folder, o.audio_path)
+            for o in outcomes
+            if getattr(o, "status", "") == "ingested"
+            and getattr(o, "music_id", None)
+            and getattr(o, "folder", None)
+            and getattr(o, "audio_path", None)
+        ]
+        self._start_transcription(transcribe_targets, reason="post-import")
         parts = [f"Imported {imported} sound(s)"]
         if duplicates:
             parts.append(f"{duplicates} duplicate(s)")
@@ -3409,6 +3445,38 @@ class SoundVaultWindow(QMainWindow):
                 "fresh auth",
             )
         )
+
+    def _start_transcription(self, targets, *, reason: str) -> None:
+        """Transcribe a bounded batch (the just-imported sounds) in the background."""
+        if _env_flag("SOUND_VAULT_DISABLE_TRANSCRIBE"):
+            return
+        if not targets:
+            return
+        worker = getattr(self, "_transcribe_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        write_event("gui.transcription_started", reason=reason, count=str(len(targets)))
+        self.worker_label.setText(f"Worker\ntranscribing 0/{len(targets)}…")
+        self._transcribe_worker = _TranscriptionWorker(self.vm, targets, parent=self)
+        self._transcribe_worker.progress.connect(self._on_transcription_progress)
+        self._transcribe_worker.finished_ok.connect(self._on_transcription_finished)
+        self._transcribe_worker.start()
+
+    def _on_transcription_progress(self, done: int, total: int) -> None:
+        self.worker_label.setText(f"Worker\ntranscribing {done}/{total}…")
+        self.statusBar().showMessage(f"Transcribing sounds… {done}/{total}", 4000)
+
+    def _on_transcription_finished(self, count: int, error) -> None:
+        self._transcribe_worker = None
+        self.worker_label.setText("Worker\nidle")
+        if error is not None:
+            write_event("gui.transcription_failed", **exception_fields(error))
+            self.statusBar().showMessage("Transcription failed — see logs.", 6000)
+            return
+        write_event("gui.transcription_done", count=str(count))
+        if count:
+            self.rebuild_index()  # surface the new transcripts in the library + inspector
+            self.statusBar().showMessage(f"Transcribed {count} sound(s).", 6000)
 
     def refresh_review_queues(self) -> None:
         rows = self.vm.review_queue_rows()

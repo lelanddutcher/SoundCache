@@ -67,15 +67,32 @@ class IngestService:
         self._transcriber = transcriber
 
     def _transcribe_into(self, folder: Path, audio_path: Path | None) -> bool:
-        """Best-effort transcription of a packaged sound; returns True if metadata changed."""
-        if self._transcriber is None or audio_path is None:
+        """Best-effort transcription of a packaged sound; returns True if metadata changed.
+
+        Logs every outcome (skip/ok/empty/error) to the diagnostics event log so a
+        silent "no transcript" in the GUI is diagnosable instead of invisible."""
+        from sound_vault.diagnostics import exception_fields, write_event
+
+        if self._transcriber is None:
+            write_event("ingest.transcribe_skip", folder=folder.name, reason="no_transcriber")
+            return False
+        if audio_path is None or not Path(audio_path).exists():
+            write_event(
+                "ingest.transcribe_skip", folder=folder.name,
+                reason="no_audio", audio=str(audio_path),
+            )
             return False
         try:
             from sound_vault.workers.transcription import transcribe_sound_folder
 
             result = transcribe_sound_folder(folder, audio_path=audio_path, transcriber=self._transcriber)
+            write_event(
+                "ingest.transcribe", folder=folder.name,
+                status=str(result.get("status")), reason=str(result.get("reason") or ""),
+            )
             return result.get("status") == "ok"
-        except Exception:  # noqa: BLE001 - transcription is best-effort, never fatal to ingest
+        except Exception as exc:  # noqa: BLE001 - transcription is best-effort, never fatal to ingest
+            write_event("ingest.transcribe_error", folder=folder.name, **exception_fields(exc))
             return False
 
     def _download_thumbnail(self, url: str, dest_dir: Path, music_id: str) -> Path | None:
