@@ -13,7 +13,6 @@ from sound_vault.db.index_db import IndexDatabase
 from sound_vault.ingest.download import CompositeDownloader, PlaywrightCaptureDownloader, YtDlpDownloader
 from sound_vault.ingest.package import PackagedSound
 from sound_vault.ingest.service import IndexUpdater, IngestService
-from sound_vault.settings import user_data_dir
 from sound_vault.vault.indexer import build_record
 
 # Where Homebrew / MacPorts / /usr/local put node + ffmpeg. A GUI app launched
@@ -51,10 +50,12 @@ def _default_capture_script() -> Path | None:
 
 
 def _default_storage_state() -> Path | None:
-    """The TikTok auth state the capture browser logs in with. Kept in the app
-    data dir (out of source control) so it isn't tied to the NAS mount; override
-    with SOUND_VAULT_TIKTOK_STATE."""
-    candidate = user_data_dir() / "tiktok.storageState.json"
+    """The TikTok auth state the capture browser logs in with — written by the
+    in-app "Connect TikTok" onboarding (see ingest.tiktok_auth). Kept in the app
+    data dir (out of source control); override with SOUND_VAULT_TIKTOK_STATE."""
+    from sound_vault.ingest import tiktok_auth
+
+    candidate = tiktok_auth.state_path()
     return candidate if candidate.exists() else None
 
 

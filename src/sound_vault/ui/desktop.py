@@ -61,7 +61,8 @@ from PySide6.QtWidgets import (
 )
 
 from sound_vault.diagnostics import exception_fields, write_event
-from sound_vault.ingest import shortcut_builder
+from sound_vault.ingest import shortcut_builder, tiktok_auth
+from sound_vault.ingest.factory import ensure_media_tools_on_path
 from sound_vault.net import ssl_context
 from sound_vault.settings import AppSettings, index_path_for_vault
 from sound_vault.telemetry.reporter import SaveEventReporter
@@ -446,6 +447,220 @@ class PairingBadge(QFrame):
             self._phone.setText("📱")
 
 
+class TikTokStatusBadge(QFrame):
+    """Lower-left TikTok connection status: 🎵 + a gradient checkmark when the
+    saved session is active. Click to open the Connect TikTok dialog."""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pairingCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(10)
+        self._icon = QLabel("🎵")
+        self._icon.setStyleSheet("font-size:22px;background:transparent;")
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        self._title = QLabel("TikTok connected")
+        self._title.setStyleSheet("font-weight:700;color:#fbedff;background:transparent;")
+        self._sub = QLabel("ready to grab sounds")
+        self._sub.setStyleSheet("font-size:11px;color:#c5b3e6;background:transparent;")
+        col.addWidget(self._title)
+        col.addWidget(self._sub)
+        self._check = GradientCheck(self, 26)
+        lay.addWidget(self._icon)
+        lay.addLayout(col, 1)
+        lay.addWidget(self._check)
+
+    def set_status(self, status: "tiktok_auth.TikTokAuthStatus") -> None:
+        self._check.setVisible(status.connected)
+        if status.connected:
+            self._title.setText("TikTok connected")
+            if status.days_left is not None and status.expiring_soon:
+                self._sub.setText(f"session expires in {status.days_left}d — tap to renew")
+            elif status.days_left is not None:
+                self._sub.setText(f"session active · {status.days_left}d left")
+            else:
+                self._sub.setText("ready to grab sounds")
+            self._icon.setText("🎵")
+        else:
+            self._title.setText("TikTok not connected")
+            self._sub.setText("tap to connect → grab sounds")
+            self._icon.setText("🎵")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class _TikTokLoginWorker(QThread):
+    """Runs the interactive (headed) TikTok login off the UI thread; the user
+    signs in on TikTok's own page in the window it opens."""
+
+    loginFinished = Signal(bool, str)  # (connected, message)
+
+    def run(self) -> None:
+        ensure_media_tools_on_path()  # a Finder-launched GUI has a stripped PATH → node must resolve
+        cmd = tiktok_auth.login_command()
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(tiktok_auth.project_cwd()), text=True, capture_output=True,
+                timeout=360, check=False,
+            )
+        except FileNotFoundError:
+            self.loginFinished.emit(False, "Could not find Node.js — install it (brew install node) to connect TikTok.")
+            return
+        except subprocess.TimeoutExpired:
+            self.loginFinished.emit(tiktok_auth.connection_status().connected, "Login timed out — try again.")
+            return
+        except Exception as exc:  # noqa: BLE001 - surface to UI
+            self.loginFinished.emit(False, f"{type(exc).__name__}: {exc}")
+            return
+        status = tiktok_auth.connection_status()
+        if status.connected:
+            self.loginFinished.emit(True, "")
+        elif result.returncode == 6:
+            self.loginFinished.emit(False, "The login window was closed before sign-in finished.")
+        elif result.returncode == 7:
+            self.loginFinished.emit(False, "Timed out waiting for sign-in.")
+        else:
+            tail = (result.stderr or "").strip().splitlines()[-1:] or [""]
+            self.loginFinished.emit(False, tail[0] or "Login did not complete.")
+
+
+class TikTokConnectDialog(QDialog):
+    """First-run onboarding: explain *why* a logged-in TikTok session is needed,
+    then connect one via a real login window (or import an existing session)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Connect TikTok")
+        self.setMinimumWidth(520)
+        self._worker: _TikTokLoginWorker | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        lead = QLabel("Connect your TikTok account")
+        lead.setObjectName("previewTitle")
+        layout.addWidget(lead)
+
+        why = QLabel(
+            "Sound Cache saves the <b>real audio</b> of a TikTok sound — the actual track, "
+            "not a screen recording.<br><br>"
+            "• TikTok only hands that audio to a <b>logged-in browser</b>, so Sound Cache "
+            "borrows your TikTok session to grab the sounds you save.<br>"
+            "• You'll sign in on <b>TikTok's own page</b> — Sound Cache never sees your "
+            "password. Only the session is saved, and only on this Mac.<br>"
+            "• Disconnect anytime. Sessions expire after a while; just reconnect when they do."
+        )
+        why.setWordWrap(True)
+        why.setObjectName("onboardBody")
+        layout.addWidget(why)
+
+        self.status_badge = TikTokStatusBadge()
+        layout.addWidget(self.status_badge)
+
+        self.detail = QLabel("")
+        self.detail.setWordWrap(True)
+        self.detail.setObjectName("muted")
+        layout.addWidget(self.detail)
+
+        actions = QHBoxLayout()
+        self.import_btn = QPushButton("Import login file…")
+        self.import_btn.setToolTip("Advanced: use an existing Playwright storageState.json")
+        self.import_btn.clicked.connect(self.import_state)
+        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn.clicked.connect(self.disconnect_state)
+        self.connect_btn = QPushButton("Connect TikTok account →")
+        self.connect_btn.setObjectName("primaryButton")
+        self.connect_btn.clicked.connect(self.start_login)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        actions.addWidget(self.import_btn)
+        actions.addWidget(self.disconnect_btn)
+        actions.addStretch(1)
+        actions.addWidget(self.connect_btn)
+        actions.addWidget(close)
+        layout.addLayout(actions)
+
+        privacy = QLabel(
+            f"Saved at {tiktok_auth.state_path()} (file-private). "
+            "Used only to fetch the sounds you save — never shared."
+        )
+        privacy.setWordWrap(True)
+        privacy.setObjectName("muted")
+        layout.addWidget(privacy)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        status = tiktok_auth.connection_status()
+        self.status_badge.set_status(status)
+        self.detail.setText(status.reason)
+        self.disconnect_btn.setEnabled(status.connected)
+        self.connect_btn.setText("Reconnect TikTok →" if status.connected else "Connect TikTok account →")
+
+    def start_login(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.connect_btn.setEnabled(False)
+        self.import_btn.setEnabled(False)
+        self.detail.setText(
+            "Opening a TikTok login window… sign in there, then come back. "
+            "This window updates automatically."
+        )
+        self._worker = _TikTokLoginWorker(self)
+        self._worker.loginFinished.connect(self._on_login_finished)
+        self._worker.start()
+
+    def _on_login_finished(self, connected: bool, message: str) -> None:
+        self._worker = None
+        self.connect_btn.setEnabled(True)
+        self.import_btn.setEnabled(True)
+        self._refresh()
+        if connected:
+            self.detail.setText("✓ TikTok connected. You can close this and import your sounds.")
+        elif message:
+            self.detail.setText(message)
+
+    def import_state(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import TikTok login (storageState.json)", "", "Login state (*.json)"
+        )
+        if not path:
+            return
+        src = Path(path)
+        if not tiktok_auth.is_valid_state_file(src):
+            self.detail.setText("That file isn't a valid logged-in TikTok session.")
+            return
+        dst = tiktok_auth.state_path()
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o600)
+        except OSError as exc:
+            self.detail.setText(f"Could not import: {exc}")
+            return
+        self._refresh()
+        self.detail.setText("✓ Imported a TikTok session.")
+
+    def disconnect_state(self) -> None:
+        tiktok_auth.disconnect()
+        self._refresh()
+        self.detail.setText("Disconnected. Reconnect whenever you want to grab more sounds.")
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            worker.wait(2000)
+        super().closeEvent(event)
+
+
 class PlayButtonDelegate(QStyledItemDelegate):
     def __init__(self, play_callback, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -547,6 +762,9 @@ class SettingsDialog(QDialog):
         pair_phone = QPushButton("Pair iPhone…")
         pair_phone.setToolTip("Scan-to-set-up QR + export the Save to Sound Cache shortcut")
         pair_phone.clicked.connect(self.open_pair_phone)
+        connect_tiktok = QPushButton("Connect TikTok…")
+        connect_tiktok.setToolTip("Sign in so Sound Cache can grab the real audio of saved sounds")
+        connect_tiktok.clicked.connect(lambda: TikTokConnectDialog(parent=self).exec())
         save = QPushButton("Save relay settings")
         save.setObjectName("primaryButton")
         save.clicked.connect(self.save_settings)
@@ -554,6 +772,7 @@ class SettingsDialog(QDialog):
         close.clicked.connect(self.accept)
         actions.addWidget(create_pairing)
         actions.addWidget(pair_phone)
+        actions.addWidget(connect_tiktok)
         actions.addStretch(1)
         actions.addWidget(save)
         actions.addWidget(close)
@@ -908,6 +1127,19 @@ class SoundVaultWindow(QMainWindow):
         else:
             self.rebuild_index()
         self._start_relay_auto_poll()
+        self._maybe_prompt_tiktok_connect()
+
+    def _maybe_prompt_tiktok_connect(self) -> None:
+        """First-run nudge: if the user has paired an iPhone (so they intend to
+        save sounds) but hasn't connected TikTok yet, open the onboarding once on
+        launch — otherwise their first share would silently fail to fetch audio."""
+        if _env_flag("SOUND_VAULT_DISABLE_TIKTOK_PROMPT"):
+            return
+        if not self.settings.relay_pair_code().strip():
+            return  # not set up to receive shares yet — don't nag
+        if tiktok_auth.connection_status().connected:
+            return
+        QTimer.singleShot(1200, self.open_tiktok_connect)
 
     def _start_relay_auto_poll(self) -> None:
         """Begin background relay polling when a pairing is configured.
@@ -1022,6 +1254,10 @@ class SoundVaultWindow(QMainWindow):
         self.pairing_badge = PairingBadge()
         side.addWidget(self.pairing_badge)
         self.update_pairing_status()
+        self.tiktok_badge = TikTokStatusBadge()
+        self.tiktok_badge.clicked.connect(self.open_tiktok_connect)
+        side.addWidget(self.tiktok_badge)
+        self.update_tiktok_status()
         shell.addWidget(sidebar)
 
         main = QWidget()
@@ -3031,10 +3267,19 @@ class SoundVaultWindow(QMainWindow):
         # "open Settings to pair" nudge otherwise.
         self.pairing_badge.setVisible(True)
 
+    def update_tiktok_status(self) -> None:
+        if hasattr(self, "tiktok_badge"):
+            self.tiktok_badge.set_status(tiktok_auth.connection_status())
+
+    def open_tiktok_connect(self) -> None:
+        TikTokConnectDialog(parent=self).exec()
+        self.update_tiktok_status()
+
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(settings=self.settings, parent=self)
         dialog.exec()
         self.update_pairing_status()
+        self.update_tiktok_status()
         self._start_relay_auto_poll()  # begin polling if a pairing was just configured
 
     def refresh_inbox(self) -> None:
@@ -3122,12 +3367,48 @@ class SoundVaultWindow(QMainWindow):
             sample = failures[0]
             reason = getattr(sample, "reason", "") or "unknown error"
             more = f"\n\n(+{len(failures) - 1} more)" if len(failures) > 1 else ""
+            # If the failures look like a missing/expired TikTok session, route the
+            # user straight to the fix instead of showing a dead-end error.
+            tiktok_failures = [o for o in failures if self._looks_like_tiktok_auth_failure(o)]
+            if tiktok_failures and not tiktok_auth.connection_status().connected:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Warning)
+                box.setWindowTitle("Connect TikTok to grab these sounds")
+                box.setText(
+                    f"{len(tiktok_failures)} TikTok sound(s) couldn't be saved because Sound "
+                    "Cache isn't connected to a TikTok account.\n\n"
+                    "TikTok only serves a sound's audio to a logged-in session — connect once "
+                    "and these will import."
+                )
+                connect = box.addButton("Connect TikTok…", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() is connect:
+                    self.open_tiktok_connect()
+                return
             QMessageBox.warning(
                 self,
                 "Some imports failed",
                 f"{len(failures)} of {len(outcomes)} link(s) failed.\n\n"
                 f"Example: {getattr(sample, 'url', '')}\n{reason}{more}",
             )
+
+    @staticmethod
+    def _looks_like_tiktok_auth_failure(outcome) -> bool:
+        url = (getattr(outcome, "url", "") or "").lower()
+        reason = (getattr(outcome, "reason", "") or "").lower()
+        if "tiktok" not in url:
+            return False
+        return any(
+            marker in reason
+            for marker in (
+                "no working app info",       # yt-dlp's broken sound extractor
+                "playwright capture unavailable",  # no script/state wired
+                "no audio captured",
+                "no media captured",
+                "fresh auth",
+            )
+        )
 
     def refresh_review_queues(self) -> None:
         rows = self.vm.review_queue_rows()
@@ -3625,6 +3906,7 @@ QMainWindow, QWidget {
 #sectionTitle { font-family: "Fredoka", sans-serif; font-size: 14px; font-weight: 600; color: #fbedff; background: transparent; }
 #previewTitle { font-family: "Fredoka", sans-serif; font-size: 16px; font-weight: 600; color: #fbedff; background: transparent; }
 #muted { color: #8c7fb5; font-size: 11px; background: transparent; }
+#onboardBody { color: #d9cef0; font-size: 12px; line-height: 150%; background: transparent; }
 
 /* Chrome header strip — glossy holo sheen */
 #chromeHeader {
