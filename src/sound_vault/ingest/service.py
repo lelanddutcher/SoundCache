@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import tempfile
 from typing import Any, Callable
 
 from sound_vault.ingest.download import AudioDownloader
@@ -169,8 +170,10 @@ class IngestService:
                 status="duplicate", url=url, music_id=music_id, folder=self._folder_for(music_id)
             )
 
-        work = self._work_dir / music_id
-        work.mkdir(parents=True, exist_ok=True)
+        # Unique per attempt so a retry (or a concurrent attempt of the same id)
+        # can't reuse a half-written download dir; the finally below removes it.
+        self._work_dir.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix=f"{music_id}_", dir=self._work_dir))
         try:
             download = self.downloader.download(
                 resolved.final_url or url,

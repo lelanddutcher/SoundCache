@@ -74,6 +74,25 @@ def test_transcribe_targets_writes_transcript_with_injected_transcriber(tmp_path
     assert meta["transcription"]["local"]["status"] == "ok"
 
 
+def test_existing_or_rebased_path_resolves_vault_relative_subdir(tmp_path):
+    # A vault-relative transcript sidecar lives in a subdir; the rebaser must
+    # resolve the full relative path (not just the basename) so the empty/pending
+    # transcript classifier keeps working after the path is stored relative.
+    from sound_vault.vault.indexer import _existing_or_rebased_path
+
+    folder = tmp_path / "vault" / "sounds" / "1 - x"
+    sub = folder / "transcripts" / "local_faster-whisper"
+    sub.mkdir(parents=True)
+    (sub / "transcript.json").write_text("{}", encoding="utf-8")
+    resolved = _existing_or_rebased_path(
+        "sounds/1 - x/transcripts/local_faster-whisper/transcript.json", folder
+    )
+    assert resolved is not None and resolved.exists()
+    # legacy direct-child (basename in folder) still resolves
+    (folder / "a.m4a").write_bytes(b"x")
+    assert _existing_or_rebased_path("sounds/1 - x/a.m4a", folder).exists()
+
+
 def test_transcribe_targets_empty_is_noop(tmp_path):
     vm = _vm(tmp_path)
     assert vm.transcribe_targets([]) == 0

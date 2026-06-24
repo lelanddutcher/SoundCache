@@ -16,6 +16,7 @@ from sound_vault.importers.tiktok_archive import (
 )
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
 from sound_vault.relay.client import RelayClient, RelayInboxItem, _default_get_json
+from sound_vault.vault.metadata_io import atomic_write_json
 from sound_vault.vault.indexer import (
     CatalogStats,
     SoundRecord,
@@ -65,6 +66,14 @@ class LibraryViewModel:
         self._catalog_stats = CatalogStats(0, 0, 0, 0, 0)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sound-vault-index")
         self._lock = Lock()
+
+    def close(self) -> None:
+        """Shut down the index executor — call before discarding this view model
+        (e.g. switching vaults) so its worker thread doesn't leak."""
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # noqa: BLE001 - teardown best-effort
+            pass
 
     def rebuild_index(self) -> int:
         write_event(
@@ -135,13 +144,16 @@ class LibraryViewModel:
             usage_filter=usage_filter,
         )
         hydrated: list[SoundRecord] = []
-        for record in records:
-            cached = self._records_by_id.get(record.music_id)
-            if cached is not None:
-                hydrated.append(cached)
-                continue
-            self._records_by_id[record.music_id] = record
-            hydrated.append(record)
+        # Under the lock so this read-modify-write can't tear against the indexer's
+        # atomic dict rebind or the import worker's record refreshes.
+        with self._lock:
+            for record in records:
+                cached = self._records_by_id.get(record.music_id)
+                if cached is not None:
+                    hydrated.append(cached)
+                    continue
+                self._records_by_id[record.music_id] = record
+                hydrated.append(record)
         return hydrated
 
     def is_favorite(self, music_id: str) -> bool:
@@ -166,15 +178,18 @@ class LibraryViewModel:
         return self.collections.bin_music_ids(bin_id)
 
     def preview_for(self, music_id: str) -> SoundRecord:
-        if music_id not in self._records_by_id:
+        with self._lock:
+            record = self._records_by_id.get(music_id)
+        if record is None:
             record = self.db.get(music_id)
             if record is None:
                 raise KeyError(music_id)
-            self._records_by_id[record.music_id] = record
-        record = self._records_by_id[music_id]
+            with self._lock:
+                self._records_by_id[record.music_id] = record
         if not record.raw or record.associated_video_count > len(record.associated_videos):
             record = hydrate_record(self.vault_root, record)
-            self._records_by_id[record.music_id] = record
+            with self._lock:
+                self._records_by_id[record.music_id] = record
         return record
 
     def stats_text(self) -> str:
@@ -346,7 +361,7 @@ class LibraryViewModel:
                 try:
                     data = _json.loads(meta_path.read_text(encoding="utf-8"))
                     data["user_notes"] = notes
-                    meta_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                    atomic_write_json(meta_path, data)
                 except (OSError, ValueError):
                     pass
         self.db.update_user_notes(music_id, notes)
@@ -721,7 +736,10 @@ class LibraryViewModel:
         """
         from sound_vault.ingest.factory import build_ingest_service
 
-        service = build_ingest_service(vault_root=self.vault_root, db=self.db)
+        # ASR is decoupled from the interactive import: the GUI runs a bounded
+        # background transcription pass afterwards, so don't block each import on a
+        # CPU-bound whisper run here (transcriber=None skips the inline attempt).
+        service = build_ingest_service(vault_root=self.vault_root, db=self.db, transcriber=None)
         results = service.drain_inbox(self.inbox)
         with self._lock:
             for _item, outcome in results:
@@ -739,7 +757,11 @@ class LibraryViewModel:
                             title=record.title if record else "",
                             artist=record.artist if record else "",
                         )
-            self._catalog_stats = inspect_catalog_stats(self.vault_root)
+            # A transient FS/mount hiccup here must not fail a completed import.
+            try:
+                self._catalog_stats = inspect_catalog_stats(self.vault_root)
+            except OSError as exc:
+                write_event("import.catalog_refresh_failed", **exception_fields(exc))
         return [outcome for _item, outcome in results]
 
     def poll_and_import(

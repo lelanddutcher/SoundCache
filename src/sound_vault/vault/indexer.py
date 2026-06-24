@@ -251,16 +251,26 @@ def _existing_or_rebased_path(value: Any, folder: Path | None) -> Path | None:
     if not value or folder is None:
         return None
     try:
-        name = Path(str(value)).name
+        rel = Path(str(value))
     except (OSError, ValueError):
         return None
-    if not name:
-        return None
-    candidate = folder / name
-    try:
-        return candidate if candidate.exists() else None
-    except OSError:
-        return None
+    # Resolve a stored (typically vault-relative) path that didn't exist as-is.
+    # Try the full relative path against the vault root then the sound folder
+    # (handles sidecars in subdirs, e.g. transcripts/local_*/transcript.json),
+    # then fall back to the basename in the folder (legacy direct-child layout).
+    candidates: list[Path] = []
+    if not rel.is_absolute():
+        candidates.append(folder.parent.parent / rel)  # vault_root / "sounds/<name>/..."
+        candidates.append(folder / rel)
+    if rel.name:
+        candidates.append(folder / rel.name)
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def _rebased_path_no_validate(value: Any, folder: Path | None) -> Path | None:

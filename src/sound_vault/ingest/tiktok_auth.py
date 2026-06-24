@@ -114,6 +114,18 @@ def is_valid_state_file(path: Path) -> bool:
     return connection_status(path).connected
 
 
+def harden_state_file(path: Path | None = None) -> None:
+    """Ensure the saved session is private (0600 file, 0700 parent) no matter
+    which code path last wrote it. Session cookies are account-takeover-grade."""
+    path = path or state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if path.exists():
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def disconnect(path: Path | None = None) -> bool:
     """Delete the saved session. Returns True if a file was removed."""
     path = path or state_path()

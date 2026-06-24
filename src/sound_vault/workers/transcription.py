@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from sound_vault.vault.metadata_io import atomic_write_json
 from sound_vault.workers.result import WorkerRunResult, write_worker_run
 
 
@@ -57,8 +58,13 @@ def transcribe_cloud_batch(vault_root: Path, *, config: CloudASRConfig, transcri
             _write_json(transcript_path, transcript_payload)
             paths = metadata.setdefault("paths", {})
             if isinstance(paths, dict):
-                paths["transcript"] = str(transcript_path)
-                paths["cloud_transcript_dir"] = str(transcript_dir)
+                # Vault-relative (portable); the indexer rebases on read.
+                try:
+                    paths["transcript"] = str(transcript_path.relative_to(vault_root))
+                    paths["cloud_transcript_dir"] = str(transcript_dir.relative_to(vault_root))
+                except ValueError:
+                    paths["transcript"] = str(transcript_path)
+                    paths["cloud_transcript_dir"] = str(transcript_dir)
             metadata["speech_transcript_v2"] = {
                 "provider": config.provider,
                 "model": config.model,
@@ -127,7 +133,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
-    path.write_text(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+    atomic_write_json(path, data, sort_keys=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -240,7 +246,12 @@ def transcribe_sound_folder(
     metadata["speech_transcript_v2"] = {"text": text, "language": language, "model": model, "engine": engine}
     paths = metadata.setdefault("paths", {})
     if isinstance(paths, dict):
-        paths["transcript"] = str(transcript_path)
+        # Store vault-relative (like package_sound) so the path survives a vault
+        # move/remount; the indexer rebases it back to absolute on read.
+        try:
+            paths["transcript"] = str(transcript_path.relative_to(folder.parent.parent))
+        except ValueError:
+            paths["transcript"] = str(transcript_path)
     transcription = metadata.setdefault("transcription", {})
     if isinstance(transcription, dict):
         transcription["local"] = {
@@ -253,5 +264,5 @@ def transcribe_sound_folder(
     audit = metadata.setdefault("audit", {})
     if isinstance(audit, dict):
         audit["missing_transcript"] = not text
-    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(meta_path, metadata)
     return {"status": "ok" if text else "empty", "has_text": bool(text)}

@@ -528,13 +528,24 @@ class _TikTokLoginWorker(QThread):
             return
         status = tiktok_auth.connection_status()
         if status.connected:
+            tiktok_auth.harden_state_file()  # ensure the saved session is 0600
             self.loginFinished.emit(True, "")
+            return
+        stderr = result.stderr or ""
+        if "Cannot find module" in stderr and "playwright" in stderr.lower():
+            self.loginFinished.emit(
+                False, "Playwright isn't installed. In the Sound Cache folder run: npm install"
+            )
+        elif "Executable doesn't exist" in stderr or "playwright install" in stderr:
+            self.loginFinished.emit(
+                False, "The browser isn't installed. Run: npx playwright install chromium"
+            )
         elif result.returncode == 6:
             self.loginFinished.emit(False, "The login window was closed before sign-in finished.")
         elif result.returncode == 7:
             self.loginFinished.emit(False, "Timed out waiting for sign-in.")
         else:
-            tail = (result.stderr or "").strip().splitlines()[-1:] or [""]
+            tail = stderr.strip().splitlines()[-1:] or [""]
             self.loginFinished.emit(False, tail[0] or "Login did not complete.")
 
 
@@ -2436,6 +2447,11 @@ class SoundVaultWindow(QMainWindow):
         self.vault_root = resolve_vault_root(Path(selected))
         self.settings.set_vault_root(self.vault_root)
         self.vault_label.setText(str(self.vault_root))
+        # Tear down the previous view model's executor before rebinding so its
+        # worker thread doesn't leak across vault switches.
+        old_vm = getattr(self, "vm", None)
+        if old_vm is not None:
+            old_vm.close()
         self.vm = LibraryViewModel(
             vault_root=self.vault_root,
             index_path=index_path_for_vault(self.vault_root),
@@ -3411,22 +3427,23 @@ class SoundVaultWindow(QMainWindow):
             QMessageBox.warning(self, "Import failed", str(error))
             return
         self.refresh_inbox()
-        self.rebuild_index()
+        # The ingest factory already upserted each new record to the index and
+        # import_pending refreshed _records_by_id, so the new sounds are queryable
+        # without a full vault rebuild — just refresh the table (the post-transcription
+        # rebuild later surfaces transcripts). Avoids two full rebuilds per import.
+        self.refresh_table()
         imported = sum(1 for o in outcomes if getattr(o, "status", "") == "ingested")
         duplicates = sum(1 for o in outcomes if getattr(o, "status", "") == "duplicate")
         failures = [o for o in outcomes if getattr(o, "status", "") == "failed"]
-        # Kick off transcription for exactly the sounds just imported (bounded to
-        # this batch — never a vault-wide sweep over the legacy backlog). Runs off
-        # the UI thread; transcripts fill in and the index refreshes when done.
-        transcribe_targets = [
-            (o.music_id, o.folder, o.audio_path)
-            for o in outcomes
-            if getattr(o, "status", "") == "ingested"
-            and getattr(o, "music_id", None)
-            and getattr(o, "folder", None)
-            and getattr(o, "audio_path", None)
+        # Transcribe exactly the sounds just imported, but derived from the
+        # state-aware filter (audio present, no transcript) so we never re-run
+        # whisper on an instrumental or an already-transcribed sound. Bounded to
+        # this batch — never a vault-wide sweep over the legacy backlog.
+        ingested_ids = [
+            o.music_id for o in outcomes
+            if getattr(o, "status", "") == "ingested" and getattr(o, "music_id", None)
         ]
-        self._start_transcription(transcribe_targets, reason="post-import")
+        self._start_transcription(self.vm.transcription_targets(ingested_ids), reason="post-import")
         parts = [f"Imported {imported} sound(s)"]
         if duplicates:
             parts.append(f"{duplicates} duplicate(s)")

@@ -92,7 +92,10 @@ def test_cloud_asr_worker_writes_sidecars_updates_metadata_and_never_logs_api_ke
         transcriber=transcriber,
     )
     metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
-    transcript_path = Path(metadata["paths"]["transcript"])
+    # paths.transcript is stored vault-relative (portable); resolve against the vault.
+    rel_transcript = metadata["paths"]["transcript"]
+    assert not Path(rel_transcript).is_absolute()
+    transcript_path = vault / rel_transcript
     assert result.status == "ok"
     assert transcript_path.exists()
     assert metadata["speech_transcript_v2"]["best_text"] == "this is the catchphrase"

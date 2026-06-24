@@ -32,7 +32,7 @@ const hasSession = (cookies) =>
     console.error("usage: tiktok_login.cjs <out_state_path>");
     process.exit(2);
   }
-  fs.mkdirSync(path.dirname(OUT), { recursive: true });
+  fs.mkdirSync(path.dirname(OUT), { recursive: true, mode: 0o700 });
 
   const browser = await chromium.launch({
     headless: false,
@@ -51,6 +51,7 @@ const hasSession = (cookies) =>
       const cookies = await context.cookies();
       if (!hasSession(cookies)) return;
       await context.storageState({ path: OUT });
+      fs.chmodSync(OUT, 0o600); // session cookies are account-takeover-grade — keep private
       saved = true;
       console.error("saved session (" + reason + ")");
     } catch (e) {

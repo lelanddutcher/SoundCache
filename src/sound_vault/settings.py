@@ -72,9 +72,6 @@ def default_vault_root() -> Path:
     override = os.getenv("SOUND_VAULT_DEFAULT_VAULT")
     if override:
         return Path(override).expanduser()
-    nas_default = Path("/nas/TikTok Sound Vault")
-    if nas_default.exists():
-        return nas_default
     return _named_app_dir(Path.home() / "Documents")
 
 
