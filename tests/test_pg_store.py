@@ -86,3 +86,15 @@ def test_pg_leaderboard_ranks_and_windows():
     assert board[0].title == "Alpha"
     week = [e.sound_id for e in store.leaderboard(window="7d")]
     assert "old" not in week and "a" in week
+
+
+def test_pg_rate_limiter_enforces_window():
+    from sound_vault.relay.pg_store import PostgresRateLimiter
+
+    rl = PostgresRateLimiter(DSN, now=lambda: 5000.0)
+    rl.reset()
+    assert rl.allow("bucket:subj", limit=2, window_seconds=60) is True
+    assert rl.allow("bucket:subj", limit=2, window_seconds=60) is True
+    assert rl.allow("bucket:subj", limit=2, window_seconds=60) is False  # over budget
+    # a different key has its own budget
+    assert rl.allow("bucket:other", limit=2, window_seconds=60) is True

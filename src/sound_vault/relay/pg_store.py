@@ -265,3 +265,77 @@ class PostgresLeaderboardStore:
             LeaderboardEntry(sound_id=str(r[0]), title=str(r[2]), artist=str(r[3]), platform=str(r[4]), saves=int(r[1]))
             for r in rows
         ]
+
+
+class PostgresRateLimiter:
+    """Durable fixed-window rate limiter backed by Postgres.
+
+    The in-memory RateLimiter is per-process, so on Vercel serverless (where each
+    invocation may hit a fresh instance) it doesn't actually limit anything. This
+    keeps the count in a shared table keyed by (key, window_start) and increments
+    atomically with an upsert, so the budget holds across all instances. Same
+    interface as RateLimiter.allow(key, ...) so enforce_rate_limit is unchanged.
+
+    Fails OPEN on any DB error: rate limiting is best-effort abuse protection and
+    must never take the relay down.
+    """
+
+    def __init__(self, dsn: str, *, now=time.time) -> None:
+        self._dsn = dsn
+        self._now = now
+        self._ensure_schema()
+
+    def _connect(self):
+        return psycopg.connect(self._dsn)
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rate_limit_hits (
+                    key TEXT NOT NULL,
+                    window_start BIGINT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (key, window_start)
+                );
+                CREATE INDEX IF NOT EXISTS idx_rate_limit_window ON rate_limit_hits (window_start);
+                """
+            )
+            conn.commit()
+
+    def reset(self) -> None:
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM rate_limit_hits")
+                conn.commit()
+        except psycopg.Error:
+            pass
+
+    def allow(self, key: str, *, limit: int, window_seconds: int) -> bool:
+        if limit <= 0:
+            return True
+        if window_seconds <= 0:
+            window_seconds = 1
+        now = int(self._now())
+        window_start = (now // window_seconds) * window_seconds
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO rate_limit_hits (key, window_start, count) VALUES (%s, %s, 1)
+                    ON CONFLICT (key, window_start)
+                    DO UPDATE SET count = rate_limit_hits.count + 1
+                    RETURNING count
+                    """,
+                    (key, window_start),
+                )
+                count = int(cur.fetchone()[0])
+                # Opportunistic cleanup of expired windows (cheap, indexed).
+                cur.execute(
+                    "DELETE FROM rate_limit_hits WHERE window_start < %s",
+                    (window_start - window_seconds * 5,),
+                )
+                conn.commit()
+            return count <= limit
+        except psycopg.Error:
+            return True  # fail open — never take the relay down over rate limiting

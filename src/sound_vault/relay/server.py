@@ -53,7 +53,21 @@ class RateLimiter:
         return True
 
 
-rate_limiter = RateLimiter()
+def build_rate_limiter():
+    """Durable Postgres limiter in production (works across serverless instances);
+    in-memory only when no database is configured (local dev/tests)."""
+    dsn = os.getenv("DATABASE_URL") or os.getenv("SOUND_VAULT_RELAY_DATABASE_URL") or ""
+    if dsn:
+        try:
+            from sound_vault.relay.pg_store import PostgresRateLimiter
+
+            return PostgresRateLimiter(dsn)
+        except Exception:  # noqa: BLE001 - fall back to in-memory rather than fail boot
+            logger.exception("relay.rate_limiter_pg_init_failed")
+    return RateLimiter()
+
+
+rate_limiter = build_rate_limiter()
 
 
 def _mask_pair_code(pair_code: str) -> str:
