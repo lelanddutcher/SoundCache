@@ -55,11 +55,23 @@ Python 3.12 · PySide6 (Qt) desktop · FastAPI relay on Vercel + Neon Postgres �
 ## Run it (dev)
 
 ```bash
+# 1. External tools (TikTok sound capture drives a real browser via Playwright;
+#    yt-dlp + ffmpeg handle download/transcode):
+brew install node ffmpeg yt-dlp           # macOS (use your package manager elsewhere)
+npm install                               # installs Playwright into ./node_modules
+npx playwright install chromium           # one-time browser download
+
+# 2. Python app:
 python -m venv ~/venvs/sound-cache && source ~/venvs/sound-cache/bin/activate
 pip install -e .
-sound-vault                     # launch the desktop app
-# in-app: Settings → Create pairing code → Pair iPhone
+sound-vault                               # launch the desktop app
+# in-app: Settings → Create pairing code → Pair iPhone → Connect TikTok
 ```
+
+> TikTok serves a sound's audio only to a logged-in browser, so the first run
+> walks you through **Connect TikTok** (a one-time login the app keeps locally).
+> Without Node/Playwright/Chromium the app still runs, but TikTok sound capture
+> is disabled — the in-app prompts tell you exactly what's missing.
 
 Tests: `pytest -q` (set `SOUND_VAULT_DISABLE_RELAY_POLL=1 SOUND_VAULT_DISABLE_TRANSCRIBE=1` for a fast offline run).
 

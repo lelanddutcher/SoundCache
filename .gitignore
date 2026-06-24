@@ -27,3 +27,8 @@ build/
 # deploy + node tooling (Vercel link, Playwright capture deps)
 .vercel
 node_modules/
+
+# dev scratch / personal config (kept locally, out of the repo)
+/.claude/
+/analysis/
+docs/*-2026-*
