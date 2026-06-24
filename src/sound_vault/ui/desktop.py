@@ -425,15 +425,18 @@ class PairingBadge(QFrame):
         col = QVBoxLayout()
         col.setSpacing(1)
         self._title = QLabel("iPhone paired")
+        self._title.setWordWrap(True)
         self._title.setStyleSheet("font-weight:700;color:#fbedff;background:transparent;")
         self._sub = QLabel("ready to catch shares")
+        self._sub.setWordWrap(True)
         self._sub.setStyleSheet("font-size:11px;color:#c5b3e6;background:transparent;")
         col.addWidget(self._title)
         col.addWidget(self._sub)
         self._check = GradientCheck(self, 26)
-        lay.addWidget(self._phone)
+        self._check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        lay.addWidget(self._phone, 0, Qt.AlignmentFlag.AlignTop)
         lay.addLayout(col, 1)
-        lay.addWidget(self._check)
+        lay.addWidget(self._check, 0, Qt.AlignmentFlag.AlignTop)
 
     def set_state(self, *, paired: bool, detail: str = "") -> None:
         self._check.setVisible(paired)
@@ -465,15 +468,18 @@ class TikTokStatusBadge(QFrame):
         col = QVBoxLayout()
         col.setSpacing(1)
         self._title = QLabel("TikTok connected")
+        self._title.setWordWrap(True)
         self._title.setStyleSheet("font-weight:700;color:#fbedff;background:transparent;")
         self._sub = QLabel("ready to grab sounds")
+        self._sub.setWordWrap(True)
         self._sub.setStyleSheet("font-size:11px;color:#c5b3e6;background:transparent;")
         col.addWidget(self._title)
         col.addWidget(self._sub)
         self._check = GradientCheck(self, 26)
-        lay.addWidget(self._icon)
+        self._check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        lay.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignTop)
         lay.addLayout(col, 1)
-        lay.addWidget(self._check)
+        lay.addWidget(self._check, 0, Qt.AlignmentFlag.AlignTop)
 
     def set_status(self, status: "tiktok_auth.TikTokAuthStatus") -> None:
         self._check.setVisible(status.connected)
@@ -1070,9 +1076,10 @@ class SoundVaultWindow(QMainWindow):
         write_event("gui.window_init_start")
         self.setWindowTitle("Sound Cache — local sound archive")
         self.resize(1420, 860)
-        # Big enough that the 3-column layout (library + filters + inspector) and the
-        # transport/search row stay legible instead of crunching at small sizes.
-        self.setMinimumSize(1280, 760)
+        # The layout now degrades gracefully (sidebar scrolls, inspector stacks to
+        # artwork width, transport capsule + badges shrink/wrap), so the window can
+        # go smaller without scrunching unreadably.
+        self.setMinimumSize(1080, 700)
         self.vault_root = resolve_vault_root(vault_root or self.settings.vault_root())
         write_event("gui.vault_resolved", vault_root=str(self.vault_root))
         self.vm = LibraryViewModel(
@@ -1239,6 +1246,18 @@ class SoundVaultWindow(QMainWindow):
         brand.setObjectName("brand")
         side.addWidget(brand)
         self.nav_buttons = {}
+        # The nav + library/playlist list lives in a vertical scroll area so a long
+        # list (or a short window) scrolls gracefully instead of scrunching the
+        # rows; the health panel + status badges stay pinned below it.
+        nav_scroll = QScrollArea()
+        nav_scroll.setObjectName("navScroll")
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        nav_body = QWidget()
+        nav_layout = QVBoxLayout(nav_body)
+        nav_layout.setContentsMargins(0, 0, 4, 0)
+        nav_layout.setSpacing(10)
         library_row = QHBoxLayout()
         library_row.setSpacing(6)
         self.library_toggle = QPushButton("▾ Library")
@@ -1252,12 +1271,12 @@ class SoundVaultWindow(QMainWindow):
         self.add_bin_button.clicked.connect(self.create_sorting_bin)
         library_row.addWidget(self.library_toggle, 1)
         library_row.addWidget(self.add_bin_button)
-        side.addLayout(library_row)
+        nav_layout.addLayout(library_row)
         self.library_section = QWidget()
         self.library_section_layout = QVBoxLayout(self.library_section)
         self.library_section_layout.setContentsMargins(10, 0, 0, 4)
         self.library_section_layout.setSpacing(5)
-        side.addWidget(self.library_section)
+        nav_layout.addWidget(self.library_section)
         self.library_bin_buttons = {}
         self.refresh_library_sidebar()
         for label, view_name in [
@@ -1271,8 +1290,10 @@ class SoundVaultWindow(QMainWindow):
             btn.setObjectName("navButton")
             btn.clicked.connect(lambda _checked=False, name=view_name: self.show_view(name))
             self.nav_buttons[view_name] = btn
-            side.addWidget(btn)
-        side.addStretch(1)
+            nav_layout.addWidget(btn)
+        nav_layout.addStretch(1)
+        nav_scroll.setWidget(nav_body)
+        side.addWidget(nav_scroll, 1)
         self.archive_health_panel = ArchiveHealthPanel()
         side.addWidget(self.archive_health_panel)
         self.pairing_badge = PairingBadge()
@@ -1487,7 +1508,9 @@ class SoundVaultWindow(QMainWindow):
         display = QFrame()
         display.setObjectName("capsuleDisplay")
         display.setFixedHeight(56)
-        display.setMinimumWidth(280)
+        # Shrinkable: the now-playing title elides (Ignored hpolicy), so the capsule
+        # can give up width on small windows instead of forcing the whole row wider.
+        display.setMinimumWidth(140)
         display_layout = QVBoxLayout(display)
         display_layout.setContentsMargins(18, 8, 18, 8)
         display_layout.setSpacing(2)
@@ -1568,20 +1591,26 @@ class SoundVaultWindow(QMainWindow):
         columns_button.setMenu(self.column_menu)
         self.result_count_label = QLabel("0 displayed / 0 indexed")
         self.result_count_label.setObjectName("muted")
-        # Keep the controls readable instead of crunching them at small widths.
-        self.search_box.setMinimumWidth(210)
+        # Two rows so the controls collapse gracefully at small widths instead of
+        # forcing the whole window wide: search box on top (fills width), filters +
+        # column picker + count below (shrink to their minimums, count pinned right).
+        self.search_box.setMinimumWidth(150)
         self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         for _combo in (self.duration_filter, self.media_filter, self.status_filter, self.usage_filter):
-            _combo.setMinimumWidth(104)
+            _combo.setMinimumWidth(92)
         self.result_count_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         search_bar.addWidget(self.search_box, 1)
-        search_bar.addWidget(self.duration_filter)
-        search_bar.addWidget(self.media_filter)
-        search_bar.addWidget(self.status_filter)
-        search_bar.addWidget(self.usage_filter)
-        search_bar.addWidget(columns_button)
-        search_bar.addWidget(self.result_count_label)
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(8)
+        filter_bar.addWidget(self.duration_filter)
+        filter_bar.addWidget(self.media_filter)
+        filter_bar.addWidget(self.status_filter)
+        filter_bar.addWidget(self.usage_filter)
+        filter_bar.addWidget(columns_button)
+        filter_bar.addStretch(1)
+        filter_bar.addWidget(self.result_count_label)
         layout.addLayout(search_bar)
+        layout.addLayout(filter_bar)
         stats_grid = QGridLayout()
         self.stats_label = QLabel("index not built")
         self.stats_label.setObjectName("statCard")
@@ -1768,8 +1797,10 @@ class SoundVaultWindow(QMainWindow):
     def _build_preview_panel(self) -> QFrame:
         preview = QFrame()
         preview.setObjectName("preview")
-        preview.setMinimumWidth(320)
-        preview.setMaximumWidth(560)
+        # Anchor the panel to the artwork width so it never needs a horizontal
+        # scrollbar; everything inside stacks to this width.
+        preview.setMinimumWidth(250)
+        preview.setMaximumWidth(340)
         preview_layout = QVBoxLayout(preview)
         preview_layout.setContentsMargins(20, 22, 20, 22)
         preview_layout.setSpacing(10)
@@ -1781,6 +1812,8 @@ class SoundVaultWindow(QMainWindow):
         scroll.setObjectName("inspectorScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Never span horizontally — content wraps/stacks to the panel width.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_body = QWidget()
         scroll_layout = QVBoxLayout(scroll_body)
         scroll_layout.setContentsMargins(0, 0, 0, 0)
@@ -1820,17 +1853,21 @@ class SoundVaultWindow(QMainWindow):
         self.open_folder = QPushButton("Open folder")
         self.open_folder.setEnabled(False)
         self.open_folder.clicked.connect(self.open_selected_folder)
+        # Transcript + notes grow/shrink with the panel height (stretch factors
+        # below) instead of being pinned to a fixed height.
         transcript_group = QGroupBox("Transcript")
+        transcript_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         transcript_layout = QVBoxLayout(transcript_group)
         self.transcript_text = QTextEdit()
         self.transcript_text.setReadOnly(True)
-        self.transcript_text.setMaximumHeight(260)
+        self.transcript_text.setMinimumHeight(110)
         self.transcript_text.setPlaceholderText(self._DEFAULT_TRANSCRIPT_PLACEHOLDER)
         transcript_layout.addWidget(self.transcript_text)
         notes_group = QGroupBox("User notes")
+        notes_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         notes_layout = QVBoxLayout(notes_group)
         self.user_notes_edit = QTextEdit()
-        self.user_notes_edit.setMaximumHeight(150)
+        self.user_notes_edit.setMinimumHeight(70)
         self.user_notes_edit.setPlaceholderText(
             "Add your own notes — a label, why you saved it, where to use it… (saved + searchable)"
         )
@@ -1860,23 +1897,23 @@ class SoundVaultWindow(QMainWindow):
         video_actions.addWidget(self.open_video, 1)
         video_actions.addWidget(self.open_video_url, 1)
         video_layout.addLayout(video_actions)
-        action_row = QHBoxLayout()
-        action_row.setSpacing(6)
-        action_row.addWidget(self.copy_metadata, 1)
-        action_row.addWidget(self.open_tiktok_sound, 1)
-        action_row.addWidget(self.open_folder, 1)
-        # Inspector buttons fill + share the panel width so they track resizing.
+        # Stack the action buttons full-width so they stay readable at the narrow
+        # artwork-width panel (a 3-across row was what forced the horizontal scroll).
+        action_col = QVBoxLayout()
+        action_col.setSpacing(6)
+        action_col.addWidget(self.copy_metadata)
+        action_col.addWidget(self.open_tiktok_sound)
+        action_col.addWidget(self.open_folder)
         for _btn in (self.copy_metadata, self.open_tiktok_sound, self.open_folder, self.open_video, self.open_video_url):
             _btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             _btn.setMinimumHeight(32)
-        scroll_layout.addWidget(self.artwork_label)
+        scroll_layout.addWidget(self.artwork_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         scroll_layout.addWidget(self.preview_title)
         scroll_layout.addWidget(self.progress_slider)
         scroll_layout.addWidget(self.time_label)
-        scroll_layout.addLayout(action_row)
-        scroll_layout.addWidget(transcript_group)
-        scroll_layout.addWidget(notes_group)
-        scroll_layout.addStretch(1)
+        scroll_layout.addLayout(action_col)
+        scroll_layout.addWidget(transcript_group, 3)
+        scroll_layout.addWidget(notes_group, 2)
         for hidden in (self.preview_meta, self.preview_tags, self.playback_status, evidence_group, video_group):
             hidden.setVisible(False)
         scroll.setWidget(scroll_body)
