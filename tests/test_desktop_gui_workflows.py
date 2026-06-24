@@ -19,6 +19,22 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
+def _cell_text(window, row, col):
+    m = window.table.model()
+    return str(m.data(m.index(row, col), Qt.ItemDataRole.DisplayRole))
+
+
+def _cell_role(window, row, col, role):
+    m = window.table.model()
+    return m.data(m.index(row, col), role)
+
+
+def _sort_library(window, column, order):
+    window.library_sort_column = column
+    window.library_sort_order = order
+    window.refresh_table()
+
+
 def test_desktop_gui_qa_harness_exercises_core_editor_workflows(tmp_path, monkeypatch):
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
@@ -93,7 +109,7 @@ def test_desktop_gui_qa_harness_exercises_core_editor_workflows(tmp_path, monkey
     assert window.table.rowCount() == 1
     assert window.table.itemDelegateForColumn(0).__class__.__name__ == "FavoriteButtonDelegate"
     assert window.table.itemDelegateForColumn(1).__class__.__name__ == "PlayButtonDelegate"
-    assert bool(window.table.item(0, 1).data(desktop_module.PLAYABLE_ROLE))
+    assert bool(_cell_role(window, 0, 1, desktop_module.PLAYABLE_ROLE))
     window._set_media_filter("has_transcript")
     assert window.table.rowCount() == 1
     window.search_box.setFocus()
@@ -106,8 +122,8 @@ def test_desktop_gui_qa_harness_exercises_core_editor_workflows(tmp_path, monkey
     assert window.search_box.cursorPosition() == len("needle drop")
     window._set_usage_filter("over_100k")
     assert window.table.rowCount() == 1
-    window.table.sortItems(7, Qt.SortOrder.DescendingOrder)
-    assert window.table.item(0, 7).text() == "500000"
+    _sort_library(window, 7, Qt.SortOrder.DescendingOrder)
+    assert _cell_text(window, 0, 7) == "500000"
     window.table.selectRow(0)
     window.update_preview_from_selection()
     assert window.current_preview_record is not None
@@ -323,10 +339,10 @@ def test_library_popularity_sort_is_numeric_not_text(tmp_path, monkeypatch):
     window.vm.rebuild_index()
     window.refresh_table()
 
-    assert [window.table.item(row, 7).text() for row in range(3)] == ["997600", "9997", "9954"]
+    assert [_cell_text(window, row, 7) for row in range(3)] == ["997600", "9997", "9954"]
     window.handle_library_header_clicked(7)
     app.processEvents()  # header click defers refresh via QTimer.singleShot
-    assert [window.table.item(row, 7).text() for row in range(3)] == ["9954", "9997", "997600"]
+    assert [_cell_text(window, row, 7) for row in range(3)] == ["9954", "9997", "997600"]
     window.close()
 
 
@@ -458,7 +474,7 @@ def test_continuous_play_advances_through_visible_playable_rows(tmp_path, monkey
     fake_player = FakeAudioPlayer()
     window.audio_player = fake_player
     monkeypatch.setattr(window, "_ensure_audio_player", lambda: True)
-    assert [window.table.item(row, 2).text() for row in range(window.table.rowCount())] == [
+    assert [_cell_text(window, row, 2) for row in range(window.table.rowCount())] == [
         "Alpha Hook",
         "Silent Gap",
         "Beta Hook",
@@ -534,7 +550,7 @@ def test_random_transport_selects_and_plays_a_random_playable_row(tmp_path, monk
     window.update_preview_from_selection()
     monkeypatch.setattr(desktop_module.random, "choice", lambda rows: rows[-1])
     expected_row = window._playable_library_rows()[-1]
-    expected_title = window.table.item(expected_row, 2).text()
+    expected_title = _cell_text(window, expected_row, 2)
 
     window.play_random_sound()
 
@@ -570,7 +586,7 @@ def test_library_multi_select_can_create_manual_duplicate_review_group(tmp_path,
     model = window.table.selectionModel()
     selected_ids = []
     for row in range(window.table.rowCount()):
-        music_id = window.table.item(row, desktop_module.PLAY_COL).data(Qt.ItemDataRole.UserRole)
+        music_id = window.table.music_id_at(row)
         if music_id in {"1", "2"}:
             selected_ids.append(str(music_id))
             model.select(

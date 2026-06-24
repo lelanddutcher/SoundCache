@@ -46,8 +46,10 @@ def test_desktop_sorted_tables_store_row_identity_in_item_data():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
     assert "Qt.ItemDataRole.UserRole" in source
-    assert "item.setData(Qt.ItemDataRole.UserRole, record.music_id)" in source
-    assert "item.setData(Qt.ItemDataRole.UserRole, item.id)" in source
+    # library row identity now comes from the table model's data(UserRole)
+    assert "if role == Qt.ItemDataRole.UserRole:" in source
+    assert "return record.music_id" in source
+    assert "item.setData(Qt.ItemDataRole.UserRole, item.id)" in source  # inbox table (QTableWidget)
     assert "self.records_by_id" in source
     assert "self.inbox_rows_by_id" in source
 
@@ -159,11 +161,11 @@ def test_desktop_table_columns_include_dates_popularity_and_local_audio():
     assert '"packaged"' in source
     assert '"popularity"' in source
     assert '"local audio"' in source
-    assert "self.table = SoundTableWidget(0, 11)" in source
+    assert "self.table = SoundTableView()" in source
     assert '"★"' in source
-    assert "self._format_usage_count(record.usage_count)" in source
-    assert "item = self._readonly_item(value)" in source
-    assert "item.setData(Qt.ItemDataRole.DisplayRole, int(record.usage_count or 0))" in source
+    assert "library_model.usage_formatter = self._format_usage_count" in source
+    assert "set_rows(self.current_rows" in source
+    assert "return int(record.usage_count or 0)" in source
     assert "self.table.horizontalHeader().sectionClicked.connect(self.handle_library_header_clicked)" in source
     assert "self.library_sort_column = POPULARITY_COL" in source
     assert "def _sort_library_rows" in source
@@ -194,8 +196,8 @@ def test_desktop_has_favorites_bins_drag_drop_and_readable_menus():
     assert "selection-color: #ffffff" in source
     assert "mark_selected_library_as_duplicate" in source
     assert "Mark as Duplicate" in source
-    assert "setCurrentCell(item.row(), item.column())" in source
-    assert "if item.row() not in selected_rows" in source
+    assert "self.table.setCurrentIndex(index)" in source
+    assert "if index.row() not in selected_rows" in source
     assert "create_manual_duplicate_group" in Path("src/sound_vault/ui/view_model.py").read_text(encoding="utf-8")
 
 
@@ -341,10 +343,10 @@ def test_desktop_library_has_duration_filters_visible_counts_and_real_row_play_c
     assert "self.result_count_label" in source
     assert "displayed /" in source
     assert "class PlayButtonDelegate" in source
-    assert "self.table.itemDoubleClicked.connect(lambda _item: self.play_selected_sound())" in source
+    assert "self.table.doubleClicked.connect(lambda _index: self.play_selected_sound())" in source
     assert "self.play_delegate = PlayButtonDelegate(self.play_record_by_id, self.table)" in source
     assert "self.table.setItemDelegateForColumn(PLAY_COL, self.play_delegate)" in source
-    assert "item.setData(PLAYABLE_ROLE, has_playable_pointer)" in source
+    assert "if role == PLAYABLE_ROLE:" in source
     assert "def _record_has_playable_pointer" in source
     assert "NoEditTriggers" in source
     assert "load_sidecars=False" in source

@@ -11,7 +11,18 @@ import time
 import urllib.error
 import urllib.request
 
-from PySide6.QtCore import QByteArray, QEvent, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QByteArray,
+    QEvent,
+    QMimeData,
+    QModelIndex,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -52,6 +63,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionButton,
+    QTableView,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -116,38 +128,183 @@ CONTEXT_COL = 10
 DEFAULT_HIDDEN_LIBRARY_COLUMNS: tuple[int, ...] = (ADDED_COL, LOCAL_AUDIO_COL, CONTEXT_COL)
 
 
-class SoundTableWidget(QTableWidget):
-    # Set by the window: music_id -> local audio Path | None. Lets a drag OUT of
-    # the app carry the real audio file (for Finder / Premiere / etc.).
-    audio_path_resolver: "Callable[[str], Path | None] | None" = None
+_LIBRARY_HEADERS = (
+    "★", "play", "sound", "artist/source", "status", "added",
+    "packaged", "popularity", "videos", "local audio", "trend/context",
+)
 
-    def mimeData(self, items):  # noqa: N802 - Qt override
-        mime = super().mimeData(items)
-        music_ids = []
-        for item in items:
-            music_id = item.data(Qt.ItemDataRole.UserRole)
-            if music_id and str(music_id) not in music_ids:
-                music_ids.append(str(music_id))
-        if music_ids:
-            mime.setData("application/x-sound-vault-music-id", json.dumps(music_ids).encode("utf-8"))
-            # Export the actual audio files as URLs so dropping into Finder /
-            # Premiere / a project folder copies the sound, not a text clipping.
-            urls = []
-            if self.audio_path_resolver is not None:
-                seen = set()
-                for music_id in music_ids:
-                    path = self.audio_path_resolver(music_id)
-                    if path is not None and str(path) not in seen and Path(path).exists():
-                        seen.add(str(path))
-                        urls.append(QUrl.fromLocalFile(str(path)))
-            if urls:
-                mime.setUrls(urls)
-                # Text fallback = the file paths (useful in plain-text targets),
-                # not the bare music ids.
-                mime.setText("\n".join(u.toLocalFile() for u in urls))
-            else:
-                mime.setText("\n".join(music_ids))
+
+class LibraryTableModel(QAbstractTableModel):
+    """Lazy model over the current library rows.
+
+    data() reads straight from the SoundRecord list — no per-cell QTableWidgetItem
+    objects — so a search/filter/sort over thousands of rows is a model reset, not
+    22k QObject allocations (the old refresh_table beach-ball). Delegates read the
+    same custom roles (FAVORITE_ROLE / PLAYABLE_ROLE / UserRole) as before.
+    """
+
+    # music_id -> local audio Path | None; lets a drag OUT carry the real file.
+    audio_path_resolver: "Callable[[str], Path | None] | None" = None
+    usage_formatter: "Callable[[object], str] | None" = None
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._rows: list = []
+        self._favorites: set[str] = set()
+        self._playable: set[str] = set()
+
+    # --- population ---------------------------------------------------------
+    def set_rows(self, rows: list, *, favorites: set[str], playable: set[str]) -> None:
+        self.beginResetModel()
+        self._rows = rows
+        self._favorites = favorites
+        self._playable = playable
+        self.endResetModel()
+
+    def set_favorite(self, music_id: str, is_favorite: bool) -> None:
+        if is_favorite:
+            self._favorites.add(str(music_id))
+        else:
+            self._favorites.discard(str(music_id))
+        for row, record in enumerate(self._rows):
+            if record.music_id == music_id:
+                idx = self.index(row, FAVORITE_COL)
+                self.dataChanged.emit(idx, idx, [FAVORITE_ROLE])
+                break
+
+    def music_id_at(self, row: int) -> str | None:
+        if 0 <= row < len(self._rows):
+            return self._rows[row].music_id
+        return None
+
+    # --- Qt model API -------------------------------------------------------
+    def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(_LIBRARY_HEADERS)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            return _LIBRARY_HEADERS[section] if 0 <= section < len(_LIBRARY_HEADERS) else ""
+        return None
+
+    def flags(self, index):  # noqa: D102
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):  # noqa: D102
+        if not index.isValid():
+            return None
+        row, col = index.row(), index.column()
+        if not (0 <= row < len(self._rows)):
+            return None
+        record = self._rows[row]
+        if role == Qt.ItemDataRole.UserRole:
+            return record.music_id
+        if role == FAVORITE_ROLE:
+            return record.music_id in self._favorites
+        if role == PLAYABLE_ROLE:
+            return record.music_id in self._playable
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if col in (FAVORITE_COL, PLAY_COL, POPULARITY_COL, VIDEOS_COL, LOCAL_AUDIO_COL):
+                return int(Qt.AlignmentFlag.AlignCenter)
+            return None
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if col == POPULARITY_COL and self.usage_formatter is not None:
+                return self.usage_formatter(record.usage_count)
+            if col == FAVORITE_COL:
+                return "Toggle favorite"
+            return None
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if col in (FAVORITE_COL, PLAY_COL):
+            return ""  # painted by the delegates
+        if col == SOUND_COL:
+            return record.title or record.music_id
+        if col == 3:
+            return record.artist
+        if col == 4:
+            return record.status
+        if col == ADDED_COL:
+            return record.added_at
+        if col == 6:
+            return record.packaged_at
+        if col == POPULARITY_COL:
+            return int(record.usage_count or 0)
+        if col == VIDEOS_COL:
+            return str(record.associated_video_count)
+        if col == LOCAL_AUDIO_COL:
+            return "m4a" if record.music_id in self._playable else "—"
+        if col == CONTEXT_COL:
+            return ", ".join(record.tags[:3]) or record.status
+        return None
+
+    # --- drag-out (carry the real audio file) -------------------------------
+    def mimeTypes(self):  # noqa: N802
+        return ["application/x-sound-vault-music-id", "text/uri-list", "text/plain"]
+
+    def supportedDragActions(self):  # noqa: N802
+        return Qt.DropAction.CopyAction
+
+    def mimeData(self, indexes):  # noqa: N802 - Qt override
+        mime = QMimeData()
+        music_ids: list[str] = []
+        for index in indexes:
+            music_id = self.music_id_at(index.row())
+            if music_id and music_id not in music_ids:
+                music_ids.append(music_id)
+        if not music_ids:
+            return mime
+        mime.setData("application/x-sound-vault-music-id", json.dumps(music_ids).encode("utf-8"))
+        urls = []
+        if self.audio_path_resolver is not None:
+            seen: set[str] = set()
+            for music_id in music_ids:
+                path = self.audio_path_resolver(music_id)
+                if path is not None and str(path) not in seen and Path(path).exists():
+                    seen.add(str(path))
+                    urls.append(QUrl.fromLocalFile(str(path)))
+        if urls:
+            mime.setUrls(urls)
+            mime.setText("\n".join(u.toLocalFile() for u in urls))
+        else:
+            mime.setText("\n".join(music_ids))
         return mime
+
+
+class SoundTableView(QTableView):
+    """QTableView wrapper exposing a few QTableWidget-style helpers so the window's
+    selection/navigation handlers stay simple."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setModel(LibraryTableModel(self))
+
+    def library_model(self) -> "LibraryTableModel":
+        return self.model()
+
+    def rowCount(self) -> int:  # noqa: N802 - QTableWidget parity
+        model = self.model()
+        return model.rowCount() if model is not None else 0
+
+    def columnCount(self) -> int:  # noqa: N802 - QTableWidget parity
+        model = self.model()
+        return model.columnCount() if model is not None else 0
+
+    def currentRow(self) -> int:  # noqa: N802 - QTableWidget parity
+        return self.currentIndex().row()
+
+    def music_id_at(self, row: int) -> str | None:
+        model = self.model()
+        return model.music_id_at(row) if model is not None else None
+
+    def selectRow(self, row: int) -> None:  # noqa: N802
+        model = self.model()
+        if model is not None and 0 <= row < model.rowCount():
+            self.setCurrentIndex(model.index(row, SOUND_COL))
+            super().selectRow(row)
 
 
 class LibraryDropButton(QPushButton):
@@ -1636,39 +1793,26 @@ class SoundVaultWindow(QMainWindow):
         stats_grid.addWidget(self.worker_label, 0, 2)
         stats_grid.addWidget(self.catalog_label, 0, 3)
         layout.addLayout(stats_grid)
-        self.table = SoundTableWidget(0, 11)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "★",
-                "play",
-                "sound",
-                "artist/source",
-                "status",
-                "added",
-                "packaged",
-                "popularity",
-                "videos",
-                "local audio",
-                "trend/context",
-            ]
-        )
+        self.table = SoundTableView()
+        library_model = self.table.library_model()
+        library_model.audio_path_resolver = self._drag_audio_path
+        library_model.usage_formatter = self._format_usage_count
         self._prepare_table(self.table, stretch_column=SOUND_COL)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.setSortingEnabled(False)
+        self.table.setSortingEnabled(False)  # custom Python sort via header-click handler
         self.table.setItemDelegateForColumn(FAVORITE_COL, FavoriteButtonDelegate(self.toggle_favorite_by_id, self.table))
         self.play_delegate = PlayButtonDelegate(self.play_record_by_id, self.table)
         self.table.setItemDelegateForColumn(PLAY_COL, self.play_delegate)
         self.table.setDragEnabled(True)
         self.table.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.table.setDragDropOverwriteMode(False)
-        self.table.audio_path_resolver = self._drag_audio_path
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.horizontalHeader().setSortIndicator(self.library_sort_column, self.library_sort_order)
         self.configure_column_menu()
         self.restore_hidden_columns()
         self.restore_table_layout("library", self.table)
-        self.table.itemSelectionChanged.connect(self.update_preview_from_selection)
-        self.table.itemDoubleClicked.connect(lambda _item: self.play_selected_sound())
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self.update_preview_from_selection())
+        self.table.doubleClicked.connect(lambda _index: self.play_selected_sound())
         self.table.horizontalHeader().sectionClicked.connect(self.handle_library_header_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_library_context_menu)
@@ -2041,8 +2185,7 @@ class SoundVaultWindow(QMainWindow):
     def _playable_library_rows(self) -> list[int]:
         rows: list[int] = []
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 1)
-            music_id = item.data(Qt.ItemDataRole.UserRole) if item else ""
+            music_id = self.table.music_id_at(row) or ""
             record = self.records_by_id.get(str(music_id))
             if record is not None and self._record_has_playable_pointer(record):
                 rows.append(row)
@@ -2333,7 +2476,9 @@ class SoundVaultWindow(QMainWindow):
     def configure_column_menu(self) -> None:
         self.column_menu.clear()
         for column in range(self.table.columnCount()):
-            label = self.table.horizontalHeaderItem(column).text()
+            label = str(
+                self.table.model().headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or ""
+            )
             action = QAction(label, self)
             action.setCheckable(True)
             action.setChecked(not self.table.isColumnHidden(column))
@@ -2535,47 +2680,12 @@ class SoundVaultWindow(QMainWindow):
         query_note = " • query active" if self.search_box.text().strip() else ""
         suffix = f" • {active_filters}" if active_filters else ""
         self.result_count_label.setText(f"{len(self.current_rows):,} displayed / {total:,} indexed{suffix}{query_note}")
-        self.table.setSortingEnabled(False)
-        self.table.setUpdatesEnabled(False)
-        self.table.blockSignals(True)
-        self.table.setRowCount(len(self.current_rows))
+        # Model reset — O(1) per cell on demand instead of building 11×N
+        # QTableWidgetItems on every keystroke/filter/sort (the old beach-ball).
         favorites_set = set(self.vm.favorite_music_ids())
-        try:
-            for row_idx, record in enumerate(self.current_rows):
-                has_playable_pointer = self._record_has_playable_pointer(record)
-                has_audio = "m4a" if has_playable_pointer else "—"
-                flags = ", ".join(record.tags[:3]) or record.status
-                values = [
-                    "",
-                    "",
-                    record.title or record.music_id,
-                    record.artist,
-                    record.status,
-                    record.added_at,
-                    record.packaged_at,
-                    record.usage_count if record.usage_count is not None else 0,
-                    str(record.associated_video_count),
-                    has_audio,
-                    flags,
-                ]
-                for col_idx, value in enumerate(values):
-                    item = self._readonly_item(value)
-                    item.setData(Qt.ItemDataRole.UserRole, record.music_id)
-                    if col_idx == FAVORITE_COL:
-                        item.setData(FAVORITE_ROLE, record.music_id in favorites_set)
-                        item.setToolTip("Toggle favorite")
-                    if col_idx == PLAY_COL:
-                        item.setData(PLAYABLE_ROLE, has_playable_pointer)
-                    if col_idx == POPULARITY_COL:
-                        item.setData(Qt.ItemDataRole.DisplayRole, int(record.usage_count or 0))
-                        item.setToolTip(self._format_usage_count(record.usage_count))
-                    if col_idx in (FAVORITE_COL, PLAY_COL, POPULARITY_COL, VIDEOS_COL, LOCAL_AUDIO_COL):
-                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    self.table.setItem(row_idx, col_idx, item)
-            self.table.horizontalHeader().setSortIndicator(self.library_sort_column, self.library_sort_order)
-        finally:
-            self.table.blockSignals(False)
-            self.table.setUpdatesEnabled(True)
+        playable_set = {r.music_id for r in self.current_rows if self._record_has_playable_pointer(r)}
+        self.table.library_model().set_rows(self.current_rows, favorites=favorites_set, playable=playable_set)
+        self.table.horizontalHeader().setSortIndicator(self.library_sort_column, self.library_sort_order)
         if self.current_rows:
             self._restore_library_selection(selected_music_id, scroll_value)
         else:
@@ -2709,8 +2819,6 @@ class SoundVaultWindow(QMainWindow):
     def _selected_library_music_ids(self) -> tuple[str, ...]:
         selection_model = self.table.selectionModel()
         rows = selection_model.selectedRows() if selection_model is not None else []
-        if not rows and self.table.selectedItems():
-            rows = [self.table.model().index(item.row(), 0) for item in self.table.selectedItems()]
         music_ids = []
         for index in sorted(rows, key=lambda item: item.row()):
             music_id = self._library_music_id_for_row(index.row())
@@ -2721,8 +2829,7 @@ class SoundVaultWindow(QMainWindow):
     def _library_music_id_for_row(self, row: int) -> str | None:
         if row < 0:
             return None
-        id_item = self.table.item(row, PLAY_COL) or self.table.item(row, SOUND_COL)
-        value = id_item.data(Qt.ItemDataRole.UserRole) if id_item is not None else None
+        value = self.table.music_id_at(row)
         return str(value) if value else None
 
     @staticmethod
@@ -2740,8 +2847,7 @@ class SoundVaultWindow(QMainWindow):
         target_row = 0
         if selected_music_id:
             for row_idx in range(self.table.rowCount()):
-                item = self.table.item(row_idx, PLAY_COL)
-                if item and item.data(Qt.ItemDataRole.UserRole) == selected_music_id:
+                if self.table.music_id_at(row_idx) == selected_music_id:
                     target_row = row_idx
                     break
         self.table.clearSelection()
@@ -2789,11 +2895,10 @@ class SoundVaultWindow(QMainWindow):
         row = self.table.currentRow()
         if row < 0 or row not in selected_row_numbers:
             row = min(selected_row_numbers) if selected_row_numbers else 0
-        id_item = self.table.item(row, PLAY_COL) or self.table.item(row, SOUND_COL)
-        if id_item is None:
+        music_id = self.table.music_id_at(row)
+        if not music_id:
             self.clear_preview()
             return
-        music_id = id_item.data(Qt.ItemDataRole.UserRole)
         row_record = self.records_by_id.get(str(music_id))
         if row_record is None:
             self.clear_preview()
@@ -3111,23 +3216,17 @@ class SoundVaultWindow(QMainWindow):
         if self.active_library_filter == "favorites":
             self.schedule_refresh_table()
             return
-        for row in range(self.table.rowCount()):
-            play_item = self.table.item(row, PLAY_COL)
-            if play_item is not None and str(play_item.data(Qt.ItemDataRole.UserRole)) == str(music_id):
-                fav_item = self.table.item(row, FAVORITE_COL)
-                if fav_item is not None:
-                    fav_item.setData(FAVORITE_ROLE, is_favorite)
-                self.table.viewport().update()
-                break
+        # Repaint just the toggled row's star (model emits dataChanged for it).
+        self.table.library_model().set_favorite(str(music_id), is_favorite)
 
     def open_library_context_menu(self, point) -> None:
-        item = self.table.itemAt(point)
-        if item is not None:
-            selected_rows = {index.row() for index in self.table.selectionModel().selectedRows()}
-            if item.row() not in selected_rows:
+        index = self.table.indexAt(point)
+        if index.isValid():
+            selected_rows = {i.row() for i in self.table.selectionModel().selectedRows()}
+            if index.row() not in selected_rows:
                 self.table.clearSelection()
-                self.table.selectRow(item.row())
-            self.table.setCurrentCell(item.row(), item.column())
+                self.table.selectRow(index.row())
+            self.table.setCurrentIndex(index)
             self.update_preview_from_selection()
         music_ids = self._selected_library_music_ids()
         music_id = music_ids[0] if music_ids else None
@@ -3218,8 +3317,7 @@ class SoundVaultWindow(QMainWindow):
         if record is None:
             return
         for row_idx in range(self.table.rowCount()):
-            item = self.table.item(row_idx, 1)
-            if item and item.data(Qt.ItemDataRole.UserRole) == music_id:
+            if self.table.music_id_at(row_idx) == music_id:
                 self.table.selectRow(row_idx)
                 break
         self.current_preview_record = self.vm.preview_for(record.music_id)

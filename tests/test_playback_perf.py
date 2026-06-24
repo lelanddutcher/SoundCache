@@ -139,11 +139,15 @@ def test_toggle_favorite_updates_row_in_place(tmp_path, monkeypatch):
     w = _window(tmp_path, monkeypatch)
     try:
         assert w.table.rowCount() == 1
-        fav_item = w.table.item(0, desktop_module.FAVORITE_COL)
-        before = bool(fav_item.data(desktop_module.FAVORITE_ROLE))
+        model = w.table.model()
+
+        def fav_of_row0() -> bool:
+            return bool(model.data(model.index(0, desktop_module.FAVORITE_COL), desktop_module.FAVORITE_ROLE))
+
+        before = fav_of_row0()
         w.toggle_favorite_by_id("s1")
-        # same row object updated in place (no full rebuild), star flipped
+        # row updated in place via the model (no full rebuild), star flipped
         assert w.table.rowCount() == 1
-        assert bool(w.table.item(0, desktop_module.FAVORITE_COL).data(desktop_module.FAVORITE_ROLE)) != before
+        assert fav_of_row0() != before
     finally:
         w.close()
