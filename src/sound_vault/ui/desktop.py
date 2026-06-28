@@ -2607,9 +2607,36 @@ class SoundVaultWindow(QMainWindow):
         self.reset_library_filters()
         self.rebuild_index()
 
+    def _vault_available(self) -> bool:
+        """True if the vault root is reachable. Guarded so a stale/disconnected
+        network mount (which can raise OSError on stat) reads as 'unavailable'
+        rather than crashing."""
+        try:
+            return self.vault_root.exists() and self.vault_root.is_dir()
+        except OSError:
+            return False
+
     def rebuild_index(self) -> None:
         if self._index_future is not None and not self._index_future.done():
             self.statusBar().showMessage("Index rebuild already running", 2500)
+            return
+        # If the vault drive is offline, do NOT rebuild — that would wipe the local
+        # index cache and make it look like the library vanished. Keep showing the
+        # last-known library from the cache and tell the user the drive is offline.
+        if not self._vault_available():
+            write_event("gui.vault_unavailable", vault_root=str(self.vault_root))
+            self._set_index_status("VAULT OFFLINE", state="error")
+            self.worker_label.setText("Worker\nvault offline")
+            self.statusBar().showMessage(
+                "Vault drive unavailable — showing your last-known library. "
+                "Your sounds are safe; reconnect the drive and Rebuild index to refresh.",
+                12000,
+            )
+            try:
+                self.stats_label.setText(self.vm.stats_text())  # cached count (local SQLite)
+            except Exception:  # noqa: BLE001 - display-only
+                pass
+            self.refresh_table()  # render whatever the local cache still holds
             return
         write_event(
             "gui.index_rebuild_requested",

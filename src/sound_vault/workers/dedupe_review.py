@@ -173,8 +173,10 @@ def _write_report_payload(report_path: Path, payload: Any) -> None:
 
 class DuplicateDecisionStore:
     def __init__(self, path: Path) -> None:
+        # No eager mkdir: this path lives under the (possibly offline) vault mount,
+        # and constructing the store must never touch the filesystem — an
+        # unavailable vault would otherwise crash app startup. mkdir on write.
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def record_decision(
         self,
@@ -193,6 +195,7 @@ class DuplicateDecisionStore:
             "duplicate_music_ids": duplicate_music_ids or [],
             "notes": notes,
         }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         return row
