@@ -218,6 +218,10 @@ class PlaywrightCaptureDownloader:
                 "associated_video_count": meta.get("videoCount"),
                 "source_provider": "TikTok",
                 "webpage_url": str(meta.get("pageUrl") or "").strip(),
+                # Structured sound facts from the page rehydration JSON (video/photo
+                # captures only; absent on /music/ pages). Informational for now.
+                "sound_is_original": meta.get("original"),
+                "sound_duration": meta.get("soundDuration"),
             }
         )
         return info

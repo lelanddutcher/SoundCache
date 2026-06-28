@@ -179,3 +179,32 @@ def test_ingest_non_tiktok_uses_download_title(tmp_path):
     assert out.status == "ingested"
     assert out.music_id == "dQw4w9WgXcQ"
     assert out.folder.name.startswith("dQw4w9WgXcQ - Never Gonna Give You Up")
+
+
+def test_ingest_url_captures_from_music_page_for_resolved_video(tmp_path):
+    """A video resolved to its sound must capture from the /music/ page (clean,
+    full sound), not the original video URL (the trimmed clip)."""
+    seen = {}
+
+    class RecordingDownloader(FakeDownloader):
+        def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
+            seen["url"] = url
+            return super().download(url, dest_dir=dest_dir, basename=basename, source_id=source_id, **kwargs)
+
+    video_url = "https://www.tiktok.com/@u/video/7123456789012345678"
+    resolved = ResolvedSource(
+        input_url=video_url,
+        final_url=video_url,  # the video
+        platform="tiktok",
+        kind="music",
+        canonical_url="https://www.tiktok.com/music/espresso-999",  # the resolved sound
+        source_id="999",
+        slug="espresso",
+        title_guess="espresso",
+        share_music_id=None,
+        status="ok",
+    )
+    svc = make_service(tmp_path, RecordingDownloader(), resolve_map={video_url: resolved})
+    out = svc.ingest_url(video_url)
+    assert out.status == "ingested" and out.music_id == "999"
+    assert seen["url"] == "https://www.tiktok.com/music/espresso-999"  # NOT the video URL

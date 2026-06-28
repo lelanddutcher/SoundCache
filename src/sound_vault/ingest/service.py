@@ -174,9 +174,16 @@ class IngestService:
         # can't reuse a half-written download dir; the finally below removes it.
         self._work_dir.mkdir(parents=True, exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix=f"{music_id}_", dir=self._work_dir))
+        # For a TikTok sound (a direct /music/ share OR a video/photo we resolved to
+        # its sound) capture from the canonical /music/ page — that yields the clean,
+        # longest-available sound rather than the trimmed clip in the post.
+        if resolved.platform == "tiktok" and resolved.kind == "music" and resolved.canonical_url:
+            capture_target = resolved.canonical_url
+        else:
+            capture_target = resolved.final_url or url
         try:
             download = self.downloader.download(
-                resolved.final_url or url,
+                capture_target,
                 dest_dir=work,
                 basename=music_id,
                 source_id=music_id,

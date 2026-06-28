@@ -36,13 +36,47 @@ def _build_ssl_context() -> ssl.SSLContext | None:
 _SSL_CONTEXT = _build_ssl_context()
 
 _MUSIC_RE = re.compile(r"/music/(?P<slug>.*?)-(?P<music_id>\d+)(?:$|[/?#])")
-_TT_VIDEO_RE = re.compile(r"/video/(?P<video_id>\d+)")
+# Posts are /video/<id> (clips) or /photo/<id> (slideshows); both reference one sound.
+_TT_VIDEO_RE = re.compile(r"/(?:video|photo)/(?P<video_id>\d+)")
+_OEMBED_MUSIC_RE = re.compile(r"/music/(?P<slug>[^\"'?#/\s]+?)-(?P<music_id>\d+)")
 _YT_WATCH_RE = re.compile(r"[?&]v=(?P<id>[A-Za-z0-9_-]{6,})")
 _YT_SHORT_RE = re.compile(r"youtu\.be/(?P<id>[A-Za-z0-9_-]{6,})")
 _YT_SHORTS_RE = re.compile(r"/shorts/(?P<id>[A-Za-z0-9_-]{6,})")
 _IG_RE = re.compile(r"/(?:reel|reels|p|tv)/(?P<id>[A-Za-z0-9_-]+)")
 
 Resolver = Callable[[str], "tuple[str | None, str | None]"]
+# A MusicResolver turns a TikTok VIDEO/photo URL into its sound's canonical
+# /music/<slug>-<id> URL (or None). Injected so resolve() stays pure by default.
+MusicResolver = Callable[[str], "str | None"]
+
+
+def _tiktok_music_url(music_id: str, slug: str | None = None) -> str:
+    # A non-empty slug avoids the slug-less "/music/-<id>" form that can 404;
+    # TikTok matches by the trailing id regardless of slug.
+    return f"https://www.tiktok.com/music/{slug or 'sound'}-{music_id}"
+
+
+def tiktok_music_url_via_oembed(video_url: str) -> str | None:
+    """Resolve a TikTok video/photo URL to its sound's canonical /music/ URL via
+    the public oEmbed endpoint (no auth). oEmbed's ``html`` embeds the
+    ``/music/<slug>-<id>`` link. Best-effort: returns None on any failure."""
+    import json as _json
+
+    if not video_url or not is_safe_public_url(video_url):
+        return None
+    api = "https://www.tiktok.com/oembed?url=" + urllib.parse.quote(video_url, safe="")
+    try:
+        request = urllib.request.Request(
+            api, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+        )
+        with _OPENER.open(request, timeout=20) as response:  # nosec B310 - fixed oEmbed endpoint
+            data = _json.loads(response.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - resolution is best-effort, never fatal
+        return None
+    match = _OEMBED_MUSIC_RE.search(str((data or {}).get("html") or ""))
+    if not match:
+        return None
+    return _tiktok_music_url(match.group("music_id"), slug=match.group("slug"))
 
 
 @dataclass(frozen=True)
@@ -136,7 +170,9 @@ def _error(input_url: str, platform: str, final: str | None, message: str | None
     )
 
 
-def resolve(url: str, *, resolver: Resolver = resolve_url) -> ResolvedSource:
+def resolve(
+    url: str, *, resolver: Resolver = resolve_url, music_resolver: MusicResolver | None = None
+) -> ResolvedSource:
     raw = (url or "").strip()
     platform = classify_platform(raw)
     if not raw:
@@ -169,6 +205,36 @@ def resolve(url: str, *, resolver: Resolver = resolve_url) -> ResolvedSource:
                 share_music_id=share_music_id,
                 status="ok",
             )
+        # A dead/expired short link redirects to the TikTok home (path "/" or
+        # "/?_r=1") — don't silently report ok with no id; fail loudly.
+        if parsed.path.strip("/") == "":
+            return _error(raw, "tiktok", final, "short link expired or invalid (redirected to TikTok home)")
+
+        # It's a VIDEO/photo post. Resolve it to the underlying SOUND so we capture
+        # the clean, full /music/ entry instead of the trimmed clip. share_music_id
+        # (free, on some share URLs) wins; otherwise the injected resolver (oEmbed).
+        music_url = _tiktok_music_url(share_music_id) if share_music_id else None
+        if not music_url and music_resolver is not None:
+            try:
+                music_url = music_resolver(final)
+            except Exception:  # noqa: BLE001 - resolution is best-effort
+                music_url = None
+        if music_url:
+            mm = _MUSIC_RE.search(urllib.parse.urlparse(music_url).path.rstrip("/") + "/")
+            if mm:
+                slug = urllib.parse.unquote(mm.group("slug"))
+                return ResolvedSource(
+                    input_url=raw,
+                    final_url=final,
+                    platform="tiktok",
+                    kind="music",
+                    canonical_url=music_url,
+                    source_id=mm.group("music_id"),
+                    slug=slug,
+                    title_guess=slug.replace("-", " ").strip() or None,
+                    share_music_id=share_music_id,
+                    status="ok",
+                )
         video = _TT_VIDEO_RE.search(parsed.path)
         return ResolvedSource(
             input_url=raw,

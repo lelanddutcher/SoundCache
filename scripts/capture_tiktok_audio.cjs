@@ -58,6 +58,34 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
       if (suf === "k") n *= 1e3; else if (suf === "m") n *= 1e6; else if (suf === "b") n *= 1e9;
       return Math.round(n);
     };
+    // Also read the structured `music` object from the page rehydration JSON.
+    // Video/photo pages SSR it (gives the authoritative sound id + original flag +
+    // full duration); /music/ pages don't, so this is simply absent there. Additive
+    // + fully guarded — never breaks the DOM scrape above.
+    let musicJson = {};
+    try {
+      musicJson = await page.evaluate(() => {
+        try {
+          const node = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
+          if (!node) return {};
+          const data = JSON.parse(node.textContent || "{}");
+          const scope = data.__DEFAULT_SCOPE__ || {};
+          const item = ((scope["webapp.video-detail"] || {}).itemInfo || {}).itemStruct || {};
+          const m = item.music || {};
+          if (!m.id) return {};
+          return {
+            musicId: String(m.id),
+            original: typeof m.original === "boolean" ? m.original : null,
+            soundDuration: typeof m.duration === "number" ? m.duration : null,
+            album: m.album || "",
+            mTitle: m.title || "",
+            mAuthor: m.authorName || "",
+            playUrl: typeof m.playUrl === "string" ? m.playUrl : "",
+          };
+        } catch (e) { return {}; }
+      });
+    } catch (e) { musicJson = {}; }
+
     let coverBase = "";
     if (meta.coverUrl) {
       try {
@@ -69,12 +97,17 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
       } catch (e) { coverBase = ""; }
     }
     const metaOut = {
-      title: meta.title || "",
-      author: meta.author || "",
+      title: meta.title || musicJson.mTitle || "",
+      author: meta.author || musicJson.mAuthor || "",
       coverUrl: meta.coverUrl || "",
       coverPath: coverBase,
       usageCount: parseCount(meta.usage),
       pageUrl: meta.pageUrl || url,
+      // Structured sound facts from the rehydration JSON (when on a video/photo page).
+      structuredMusicId: musicJson.musicId || "",
+      original: typeof musicJson.original === "boolean" ? musicJson.original : null,
+      soundDuration: musicJson.soundDuration != null ? musicJson.soundDuration : null,
+      album: musicJson.album || "",
     };
     fs.writeFileSync(path.join(outFolder, `${musicId}_meta.json`), JSON.stringify(metaOut, null, 2));
     return true;
@@ -140,29 +173,73 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
         .filter((s) => s && !s.startsWith("blob:"))
     );
 
-    const ranked = Array.from(new Set([...domSources, ...mediaUrls]));
-    const preferred =
-      ranked.find((u) => /mime_type=audio_mpeg|mime_type=audio|\.m4a|\.mp3|\.aac/i.test(u)) ||
-      ranked.find((u) => /tiktokcdn|tiktokv/i.test(u) && !/playback\d*\.mp4|webapp|static/i.test(u)) ||
-      ranked[0];
+    // Pull the catalog playUrl from the page rehydration JSON (video pages SSR it);
+    // for a commercial track this is the full ~60s preview the clip-only path misses.
+    let jsonPlayUrl = "";
+    try {
+      jsonPlayUrl = await page.evaluate(() => {
+        try {
+          const node = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
+          const data = JSON.parse((node && node.textContent) || "{}");
+          const item = (((data.__DEFAULT_SCOPE__ || {})["webapp.video-detail"] || {}).itemInfo || {}).itemStruct || {};
+          return ((item.music || {}).playUrl) || "";
+        } catch (e) { return ""; }
+      });
+    } catch (e) { jsonPlayUrl = ""; }
 
-    if (!preferred) {
+    const ranked = Array.from(new Set([jsonPlayUrl, ...domSources, ...mediaUrls].filter(Boolean)));
+    // Probe audio-ish / catalog URLs first, but ultimately keep whichever yields the
+    // LONGEST audio (a full /music/ sound beats a trimmed clip).
+    const ordered = [
+      ...ranked.filter((u) => /mime_type=audio_mpeg|mime_type=audio|\.m4a|\.mp3|\.aac|\/obj\//i.test(u)),
+      ...ranked.filter((u) => /tiktokcdn|tiktokv/i.test(u) && !/playback\d*\.mp4|webapp|static/i.test(u)),
+      ...ranked,
+    ];
+    const candidates = Array.from(new Set(ordered)).slice(0, 5); // cap fetch/transcode cost
+
+    if (!candidates.length) {
       console.error("no media captured (page may require fresh auth)");
       await browser.close();
       process.exit(3);
     }
-    console.error("captured media url");
 
-    const mediaResp = await page.context().request.fetch(preferred);
-    const buffer = await mediaResp.body();
-    const rawPath = path.join(outFolder, `${musicId}_raw_download`);
-    fs.writeFileSync(rawPath, buffer);
+    const probeDuration = (p) => {
+      try {
+        const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nk=1:nw=1", p]);
+        const d = parseFloat(String((r.stdout || "")).trim());
+        return isFinite(d) ? d : 0; // ffprobe missing/parse-fail → 0, so first success wins
+      } catch (e) { return 0; }
+    };
 
     const audioPath = path.join(outFolder, `${musicId}_raw.m4a`);
-    spawnSync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", rawPath, "-vn", "-c:a", "aac", "-b:a", "192k", audioPath]);
-    if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1000) {
-      try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+    let best = { path: null, dur: -1 };
+    for (let i = 0; i < candidates.length; i++) {
+      try {
+        const resp = await page.context().request.fetch(candidates[i]);
+        if (!resp.ok()) continue;
+        const buf = await resp.body();
+        if (!buf || buf.length < 1000) continue;
+        const rawPath = path.join(outFolder, `${musicId}_raw_${i}`);
+        fs.writeFileSync(rawPath, buf);
+        const candPath = path.join(outFolder, `${musicId}_cand_${i}.m4a`);
+        spawnSync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", rawPath, "-vn", "-c:a", "aac", "-b:a", "192k", candPath]);
+        try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+        if (fs.existsSync(candPath) && fs.statSync(candPath).size > 1000) {
+          const dur = probeDuration(candPath);
+          if (dur > best.dur) {
+            if (best.path) { try { fs.unlinkSync(best.path); } catch (e) { /* ignore */ } }
+            best = { path: candPath, dur };
+          } else {
+            try { fs.unlinkSync(candPath); } catch (e) { /* ignore */ }
+          }
+        }
+      } catch (e) { /* try the next candidate */ }
+    }
+
+    if (best.path) {
+      fs.renameSync(best.path, audioPath);
       await scrapeAndWriteMeta(page, outFolder, musicId, url);
+      console.error(`captured audio (${best.dur > 0 ? best.dur.toFixed(1) + "s" : "len?"}) from ${candidates.length} candidate(s)`);
       console.log(audioPath);
     } else {
       console.error("ffmpeg produced no audio stream");

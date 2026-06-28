@@ -160,6 +160,17 @@ def build_ingest_service(
     )
     if transcriber is _AUTO:
         transcriber = build_transcriber()
+    # Resolve TikTok video/photo shares to their underlying sound (via oEmbed) so a
+    # submitted video link captures the clean /music/ sound, not the trimmed clip.
+    import functools
+
+    from sound_vault.ingest.resolve import resolve, tiktok_music_url_via_oembed
+
+    resolve_source = functools.partial(resolve, music_resolver=tiktok_music_url_via_oembed)
     return IngestService(
-        vault_root=vault_root, downloader=downloader, index_updater=index_updater, transcriber=transcriber
+        vault_root=vault_root,
+        downloader=downloader,
+        index_updater=index_updater,
+        transcriber=transcriber,
+        resolve_source=resolve_source,
     )
