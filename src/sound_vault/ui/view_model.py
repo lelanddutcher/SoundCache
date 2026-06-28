@@ -370,6 +370,65 @@ class LibraryViewModel:
     def add_shortcut_url(self, url: str, *, source: str, relay_id: str | None = None) -> ShortcutInboxItem:
         return self.inbox.add_url(url, source=source, relay_id=relay_id)
 
+    # Hosts a downloaded pack is allowed to reference (the platforms we ingest).
+    _PACK_ALLOWED_HOSTS = ("tiktok.com", "instagram.com", "youtube.com", "youtu.be")
+
+    def import_sound_pack(self, path: "Path | str") -> dict[str, Any]:
+        """Load a Sound Cache sound-pack JSON: queue each sound's URL into the inbox
+        (tagged with its pack) so "Download & import" fetches them with the user's
+        own session. Idempotent per sound (keyed by music id).
+
+        A pack is UNTRUSTED input (a new user downloads it), so every URL is
+        validated through the SSRF guard + a platform host allowlist before it is
+        queued — a malicious pack cannot smuggle file://, internal-IP, or other
+        hostile links into the ingest path. Returns a summary dict.
+        """
+        import json as _json
+        from urllib.parse import urlparse
+
+        from sound_vault.url_safety import is_safe_public_url
+
+        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("packs"), list):
+            raise ValueError("not a Sound Cache sound pack (missing 'packs')")
+
+        def _host_ok(url: str) -> bool:
+            try:
+                host = (urlparse(url).hostname or "").lower()
+            except ValueError:
+                return False
+            return any(host == h or host.endswith("." + h) for h in self._PACK_ALLOWED_HOSTS)
+
+        existing = self.inbox.all_items()
+        seen_urls = {i.url for i in existing}
+        seen_ids = {i.relay_id for i in existing if i.relay_id}
+        queued = skipped = rejected = 0
+        pack_names: list[str] = []
+        for pack in data["packs"]:
+            if not isinstance(pack, dict):
+                continue
+            name = str(pack.get("name") or pack.get("slug") or "Pack").strip()
+            slug = re.sub(r"[^a-z0-9]+", "-", str(pack.get("slug") or name).lower()).strip("-") or "pack"
+            pack_names.append(name)
+            for sound in pack.get("sounds") or []:
+                if not isinstance(sound, dict):
+                    continue
+                url = str(sound.get("url") or "").strip()
+                mid = str(sound.get("music_id") or "").strip()
+                if not url or not is_safe_public_url(url) or not _host_ok(url):
+                    rejected += 1
+                    continue
+                relay_id = f"pack:{mid or url}"
+                if url in seen_urls or relay_id in seen_ids:
+                    skipped += 1
+                    continue
+                self.inbox.add_url(url, source=f"pack:{slug}", relay_id=relay_id, note=name)
+                seen_urls.add(url)
+                seen_ids.add(relay_id)
+                queued += 1
+        write_event("pack.imported", queued=str(queued), skipped=str(skipped), rejected=str(rejected))
+        return {"packs": pack_names, "queued": queued, "skipped": skipped, "rejected": rejected}
+
     def set_user_notes(self, music_id: str, notes: str) -> bool:
         """Persist a sound's user notes to metadata.json (file-native truth) + the
         index (so notes are searchable). Returns False if the sound is unknown."""

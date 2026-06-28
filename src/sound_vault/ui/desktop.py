@@ -1833,6 +1833,9 @@ class SoundVaultWindow(QMainWindow):
         download_import.clicked.connect(self.download_and_import)
         poll_relay = QPushButton("Poll relay")
         poll_relay.clicked.connect(self.poll_relay_inbox)
+        import_pack = QPushButton("Import sound pack")
+        import_pack.setToolTip("Load a Sound Cache starter/sound-pack JSON into the inbox, then Download & import")
+        import_pack.clicked.connect(self.import_sound_pack)
         import_export = QPushButton("Import TikTok export")
         import_export.clicked.connect(self.import_tiktok_favorite_sounds_export)
         mark_imported = QPushButton("Mark selected imported")
@@ -1840,6 +1843,7 @@ class SoundVaultWindow(QMainWindow):
         header.addWidget(inbox_title)
         header.addStretch(1)
         header.addWidget(download_import)
+        header.addWidget(import_pack)
         header.addWidget(import_export)
         header.addWidget(poll_relay)
         header.addWidget(refresh_inbox)
@@ -4093,6 +4097,44 @@ class SoundVaultWindow(QMainWindow):
                 ]
             ),
         )
+
+    def import_sound_pack(self) -> None:
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Sound Cache sound pack",
+            str(self.vault_root),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not selected:
+            return
+        try:
+            summary = self.vm.import_sound_pack(Path(selected))
+        except Exception as exc:  # noqa: BLE001 - surface to the user
+            write_event("gui.pack_import_exception", **exception_fields(exc))
+            QMessageBox.warning(self, "Import failed", f"Could not import sound pack:\n{exc}")
+            return
+        self.refresh_inbox()
+        self.show_view("inbox")
+        queued, skipped, rejected = summary["queued"], summary["skipped"], summary["rejected"]
+        parts = [f"Queued {queued} sound(s)"]
+        if skipped:
+            parts.append(f"{skipped} already queued")
+        if rejected:
+            parts.append(f"{rejected} rejected (unsafe/unsupported URL)")
+        self.statusBar().showMessage(", ".join(parts) + ".", 8000)
+        if not queued:
+            QMessageBox.information(
+                self, "Nothing to queue", "No new sounds were added (already queued, or no valid links in the file)."
+            )
+            return
+        resp = QMessageBox.question(
+            self,
+            "Sound pack queued",
+            f"Queued {queued} sound(s) from: {', '.join(summary['packs'])}.\n\nDownload + import them now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp == QMessageBox.StandardButton.Yes:
+            self.download_and_import()
 
 
 STYLESHEET = """
