@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import getpass
 import json
 import os
 import platform
 import random
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -17,12 +19,14 @@ from PySide6.QtCore import (
     QEvent,
     QMimeData,
     QModelIndex,
+    QObject,
     Qt,
     QThread,
     QTimer,
     QUrl,
     Signal,
 )
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -4098,6 +4102,35 @@ class SoundVaultWindow(QMainWindow):
             ),
         )
 
+    def handle_soundcache_url(self, url: str) -> None:
+        """Handle a `soundcache://ingest?…` deep link from the website's
+        'Get this sound' button: queue the sound + offer to fetch it now."""
+        from sound_vault.ingest.deeplink import parse_soundcache_url
+
+        link = parse_soundcache_url(url)
+        write_event("gui.deeplink_received", ok=str(bool(link)))
+        if link is None:
+            return
+        # Bring the app to the foreground (the click happened in the browser).
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.vm.inbox.add_url(
+            link.music_url, source="web:hits", relay_id=f"web:{link.sound_id}", note=link.title
+        )
+        self.show_view("inbox")
+        self.refresh_inbox()
+        label = link.title or link.music_url
+        self.statusBar().showMessage(f"Queued “{label}” from the website.", 6000)
+        resp = QMessageBox.question(
+            self,
+            "Sound queued",
+            f"Queued “{label}” from soundcache.io.\n\nDownload + import it now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp == QMessageBox.StandardButton.Yes:
+            self.download_and_import()
+
     def import_sound_pack(self) -> None:
         selected, _filter = QFileDialog.getOpenFileName(
             self,
@@ -4707,8 +4740,111 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 """
 
 
-def run_desktop(vault_root: Path | None = None) -> int:
-    app = QApplication.instance() or QApplication([])
+class _DeepLinkBus(QObject):
+    """Funnels `soundcache://` URLs (from macOS open-URL events or a forwarding
+    second instance) to a single slot, buffering any that arrive before a
+    listener is connected (cold-start scheme launches deliver very early)."""
+
+    url = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._buffer: list[str] = []
+        self._live = False
+
+    def push(self, url: str) -> None:
+        if not url:
+            return
+        if self._live:
+            self.url.emit(url)
+        else:
+            self._buffer.append(url)
+
+    def go_live(self) -> None:
+        self._live = True
+        for url in self._buffer:
+            self.url.emit(url)
+        self._buffer.clear()
+
+
+class _FileOpenFilter(QObject):
+    """macOS delivers custom-scheme opens as a QFileOpenEvent (Apple Event)."""
+
+    def __init__(self, bus: _DeepLinkBus) -> None:
+        super().__init__()
+        self._bus = bus
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt signature)
+        if event.type() == QEvent.Type.FileOpen:
+            url = event.url().toString() if event.url().isValid() else event.file()
+            if url:
+                self._bus.push(url)
+                return True
+        return False
+
+
+def _single_instance_name() -> str:
+    try:
+        return f"sound-cache-{getpass.getuser()}"
+    except Exception:  # noqa: BLE001 - getuser can raise on odd environments
+        return "sound-cache"
+
+
+def run_desktop(vault_root: Path | None = None, pending_urls: list[str] | None = None) -> int:
+    pending_urls = [u for u in (pending_urls or []) if u]
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    bus = _DeepLinkBus()
+    open_filter = _FileOpenFilter(bus)
+    app.installEventFilter(open_filter)
+
+    server_name = _single_instance_name()
+    probe = QLocalSocket()
+    probe.connectToServer(server_name)
+    if probe.waitForConnected(250):
+        # A primary instance already owns the window — forward our URL(s) to it and exit
+        # so the click lands in the running app instead of opening a second window.
+        captured = list(pending_urls)
+        bus.url.connect(captured.append)
+        bus.go_live()
+        if not captured:
+            # Fresh process spawned by macOS for the scheme — its URL arrives via a
+            # FileOpen event; spin briefly to catch it before forwarding.
+            QTimer.singleShot(500, app.quit)
+            app.exec()
+        payload = "\n".join(u for u in captured if u)
+        if payload:
+            probe.write((payload + "\n").encode("utf-8"))
+            probe.flush()
+            probe.waitForBytesWritten(1000)
+        probe.disconnectFromServer()
+        return 0
+    probe.abort()
+
+    # We are the primary instance: own the single-instance server.
+    QLocalServer.removeServer(server_name)
+    server = QLocalServer()
+    server.listen(server_name)
+
     window = SoundVaultWindow(vault_root=vault_root)
+
+    def _on_forwarded() -> None:
+        conn = server.nextPendingConnection()
+        if conn is not None and conn.waitForReadyRead(1000):
+            data = bytes(conn.readAll()).decode("utf-8", "ignore")
+            for line in data.splitlines():
+                if line.strip():
+                    window.handle_soundcache_url(line.strip())
+
+    server.newConnection.connect(_on_forwarded)
+    bus.url.connect(window.handle_soundcache_url)
+    # Keep refs alive for the process lifetime.
+    window._deeplink_server = server  # type: ignore[attr-defined]
+    window._deeplink_bus = bus  # type: ignore[attr-defined]
+    window._deeplink_filter = open_filter  # type: ignore[attr-defined]
+
     window.show()
+    for url in pending_urls:
+        QTimer.singleShot(0, lambda u=url: window.handle_soundcache_url(u))
+    bus.go_live()  # flush any FileOpen events buffered during cold start
     return app.exec()

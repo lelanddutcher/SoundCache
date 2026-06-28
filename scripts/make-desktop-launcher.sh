@@ -24,6 +24,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSBackgroundOnly</key><false/>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>io.soundcache.deeplink</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>soundcache</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
@@ -34,9 +42,10 @@ cat > "$APP/Contents/MacOS/launch" <<'SH'
 # node (the TikTok sound capture) and ffmpeg (yt-dlp's audio post-processor)
 # wouldn't resolve and ingestion would silently fail. Prepend the usual
 # Homebrew/MacPorts/local bins, then run the latest code from the editable
-# install (no rebuild needed).
+# install (no rebuild needed). Forward any args (e.g. a soundcache:// deep link
+# passed on the command line) through to the app.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"
-exec "$HOME/venvs/sound-vault/bin/sound-vault"
+exec "$HOME/venvs/sound-vault/bin/sound-vault" "$@"
 SH
 chmod +x "$APP/Contents/MacOS/launch"
 
