@@ -79,11 +79,23 @@ def default_index_path() -> Path:
     return user_data_dir() / "index.sqlite3"
 
 
+def _vault_digest(vault_root: Path) -> str:
+    normalized = str(vault_root.expanduser())
+    return hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+
+
 def index_path_for_vault(vault_root: Path) -> Path:
     """Return a SQLite cache path scoped to the selected vault root."""
-    normalized = str(vault_root.expanduser())
-    digest = hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
-    return user_data_dir() / "indexes" / f"{digest}.sqlite3"
+    return user_data_dir() / "indexes" / f"{_vault_digest(vault_root)}.sqlite3"
+
+
+def inbox_path_for_vault(vault_root: Path) -> Path:
+    """Return the shortcut-inbox queue path scoped to the vault root.
+
+    Lives in LOCAL app-data (not under the vault mount) so polling/queuing is
+    reliable even when the network-mounted vault is offline; keyed to the vault so
+    distinct vaults don't share a queue."""
+    return user_data_dir() / "inbox" / f"{_vault_digest(vault_root)}.jsonl"
 
 
 class AppSettings:

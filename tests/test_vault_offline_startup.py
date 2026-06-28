@@ -11,6 +11,20 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+def test_inbox_queue_lives_off_the_vault_and_is_per_vault(tmp_path):
+    # The poll queue must NOT live under the (network-mounted) vault — a destructive
+    # poll that then failed to write (offline vault) would lose items. It lives in
+    # local app-data, keyed per vault.
+    from sound_vault.settings import inbox_path_for_vault
+
+    vault_a = tmp_path / "vault-a"
+    vault_b = tmp_path / "vault-b"
+    inbox_a = inbox_path_for_vault(vault_a)
+    inbox_b = inbox_path_for_vault(vault_b)
+    assert vault_a not in inbox_a.parents  # not under the vault mount
+    assert inbox_a != inbox_b  # distinct vaults -> distinct queues
+
+
 def test_duplicate_decision_store_does_not_mkdir_on_init(tmp_path):
     # Constructing stores must never touch the filesystem — the path lives under
     # the (possibly offline) vault, and an eager mkdir there crashed app startup.

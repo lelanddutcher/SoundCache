@@ -16,6 +16,7 @@ from sound_vault.importers.tiktok_archive import (
 )
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
 from sound_vault.relay.client import RelayClient, RelayInboxItem, _default_get_json
+from sound_vault.settings import inbox_path_for_vault
 from sound_vault.vault.metadata_io import atomic_write_json
 from sound_vault.vault.indexer import (
     CatalogStats,
@@ -56,7 +57,17 @@ class LibraryViewModel:
         self.index_path = index_path
         self.load_sidecars = load_sidecars
         self.sidecar_mode = sidecar_mode
-        self.inbox_path = inbox_path or self.vault_root / "inbox" / "urls" / "shortcut-inbox.jsonl"
+        # The inbox queue lives in LOCAL app-data, NOT under the (network-mounted)
+        # vault. The relay poll is destructive (it deletes items as it returns
+        # them), so if the local write failed because the vault was offline, the
+        # pulled items would be lost forever. Keeping the queue local makes
+        # polling/queuing reliable regardless of the vault mount; ingestion (which
+        # does need the vault) happens separately when the drive is available.
+        if inbox_path is not None:
+            self.inbox_path = inbox_path
+        else:
+            self.inbox_path = inbox_path_for_vault(self.vault_root)
+            self._migrate_legacy_vault_inbox()
         self.db = IndexDatabase(index_path)
         self.inbox = ShortcutInboxStore(self.inbox_path)
         self.collections = LibraryCollectionsStore(self.vault_root)
@@ -66,6 +77,20 @@ class LibraryViewModel:
         self._catalog_stats = CatalogStats(0, 0, 0, 0, 0)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sound-vault-index")
         self._lock = Lock()
+
+    def _migrate_legacy_vault_inbox(self) -> None:
+        """One-time, best-effort: copy a pre-existing on-vault inbox to the new
+        local location so a queue in flight isn't orphaned. Skipped silently if
+        the vault is offline/unreadable (then we just start with a fresh local
+        inbox — no data is lost since undelivered relay items are re-pollable)."""
+        legacy = self.vault_root / "inbox" / "urls" / "shortcut-inbox.jsonl"
+        try:
+            if self.inbox_path.exists() or not legacy.exists():
+                return
+            self.inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legacy, self.inbox_path)
+        except OSError:
+            pass
 
     def close(self) -> None:
         """Shut down the index executor — call before discarding this view model

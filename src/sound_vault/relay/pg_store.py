@@ -16,6 +16,7 @@ import time
 import psycopg
 
 from sound_vault.relay.inbox import (
+    DEFAULT_INBOX_ITEM_TTL_SECONDS,
     DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS,
     InboxItem,
     _hash_pair_code,
@@ -35,7 +36,7 @@ class PostgresInboxStore:
         dsn: str,
         *,
         now=time.time,
-        item_ttl_seconds: int = 24 * 60 * 60,  # 24h: relay is a pass-through, not storage
+        item_ttl_seconds: int = DEFAULT_INBOX_ITEM_TTL_SECONDS,  # hold until the desktop polls
         pair_code_ttl_seconds: int = DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS,
     ) -> None:
         self._dsn = dsn

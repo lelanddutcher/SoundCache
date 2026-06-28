@@ -61,3 +61,29 @@ def test_pair_code_acceptance_expires_independently_of_items():
     now["value"] = 1011.0
 
     assert store.can_accept_pair_code("RIVER-7421") is False
+
+
+def test_inbox_item_survives_past_24h_until_polled():
+    # Regression: items used to expire after 24h, so a sound saved earlier in the
+    # week was silently purged before the user opened the desktop to ingest it.
+    # They now persist ~30 days, until the desktop actually polls them.
+    clock = {"t": 1000.0}
+    store = InboxStore(now=lambda: clock["t"])
+    store.register_device(device_id="dev_1", device_secret="secret")
+    store.register_pair_code("RIVER-7421", device_id="dev_1")
+    store.submit_link(pair_code="RIVER-7421", url="https://www.tiktok.com/t/abc/", source="ios_shortcut")
+
+    clock["t"] += 25 * 60 * 60  # +25h — would have expired under the old 24h TTL
+    delivered = store.poll(device_id="dev_1", device_secret="secret", pair_code="RIVER-7421")
+    assert [d.url for d in delivered] == ["https://www.tiktok.com/t/abc/"]
+
+
+def test_inbox_item_still_expires_eventually():
+    clock = {"t": 1000.0}
+    store = InboxStore(now=lambda: clock["t"])
+    store.register_device(device_id="dev_1", device_secret="secret")
+    store.register_pair_code("RIVER-7421", device_id="dev_1")
+    store.submit_link(pair_code="RIVER-7421", url="https://www.tiktok.com/t/abc/", source="ios_shortcut")
+
+    clock["t"] += 31 * 24 * 60 * 60  # +31 days — past the 30d retention
+    assert store.poll(device_id="dev_1", device_secret="secret", pair_code="RIVER-7421") == []

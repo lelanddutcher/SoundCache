@@ -8,6 +8,10 @@ import sqlite3
 import time
 
 DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
+# Hold an undelivered inbox item until the desktop actually polls it. The old 24h
+# was far too short for the real workflow (save sounds over the week, open the app
+# occasionally) — anything not pulled within a day was silently purged.
+DEFAULT_INBOX_ITEM_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
 
 def _hash_pair_code(pair_code: str) -> str:
@@ -44,7 +48,7 @@ class InboxStore:
         self,
         *,
         now=time.time,
-        item_ttl_seconds: int = 24 * 60 * 60,  # 24h: relay is a pass-through, not storage
+        item_ttl_seconds: int = DEFAULT_INBOX_ITEM_TTL_SECONDS,  # hold until the desktop polls
         pair_code_ttl_seconds: int = DEFAULT_PAIR_CODE_SUBMISSION_TTL_SECONDS,
         db_path: Path | None = None,
     ) -> None:

@@ -12,7 +12,7 @@ from typing import Callable
 from sound_vault.ingest.factory import build_ingest_service
 from sound_vault.ingest.service import IngestOutcome, IngestService
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
-from sound_vault.settings import AppSettings, default_index_path
+from sound_vault.settings import AppSettings, default_index_path, inbox_path_for_vault
 
 OnCycle = Callable[[list[tuple[ShortcutInboxItem, IngestOutcome]]], None]
 
@@ -67,7 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     vault_root = args.vault or settings.vault_root()
     index_path = args.index or default_index_path()
     service = build_ingest_service(vault_root=vault_root, index_path=index_path)
-    store = ShortcutInboxStore(vault_root / "inbox" / "urls" / "shortcut-inbox.jsonl")
+    # Local app-data inbox (NOT under the vault mount): matches the desktop so the
+    # poll queue is reliable even when the vault drive is offline.
+    store = ShortcutInboxStore(inbox_path_for_vault(Path(vault_root)))
 
     relay_client = None
     if args.poll_relay:
