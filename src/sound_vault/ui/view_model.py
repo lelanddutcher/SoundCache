@@ -22,6 +22,7 @@ from sound_vault.vault.indexer import (
     CatalogStats,
     SoundRecord,
     build_index,
+    build_record,
     hydrate_record,
     inspect_catalog_stats,
     resolve_vault_root,
@@ -843,7 +844,13 @@ class LibraryViewModel:
                 self._catalog_stats = inspect_catalog_stats(self.vault_root)
         return result
 
-    def import_pending(self, *, reporter: Any = None, should_stop: "Callable[[], bool] | None" = None) -> list[Any]:
+    def import_pending(
+        self,
+        *,
+        reporter: Any = None,
+        should_stop: "Callable[[], bool] | None" = None,
+        on_item: "Callable[[Any], None] | None" = None,
+    ) -> list[Any]:
         """Drain pending inbox links: resolve -> download -> package -> cache upsert.
 
         Returns the per-item ingest outcomes. Newly ingested sounds are refreshed
@@ -852,27 +859,35 @@ class LibraryViewModel:
         """
         from sound_vault.ingest.factory import build_ingest_service
 
-        # ASR is decoupled from the interactive import: the GUI runs a bounded
-        # background transcription pass afterwards, so don't block each import on a
-        # CPU-bound whisper run here (transcriber=None skips the inline attempt).
+        # ASR is decoupled from the interactive import: the GUI pipelines a separate
+        # transcription pass per downloaded item (transcriber=None skips the inline
+        # attempt so a CPU-bound whisper run never blocks the next download).
         service = build_ingest_service(vault_root=self.vault_root, db=self.db, transcriber=None)
-        results = service.drain_inbox(self.inbox, should_stop=should_stop)
-        with self._lock:
-            for _item, outcome in results:
-                if outcome.status == "ingested" and outcome.music_id:
+
+        def _per_item(outcome: Any) -> None:
+            # Refresh the freshly-ingested record into the in-memory map (so previews
+            # work without a full rebuild) + report telemetry. Runs per item so a live
+            # progress/transcription hook sees an up-to-date map. The caller's on_item
+            # runs OUTSIDE the lock to avoid any re-entrant deadlock, and report_save
+            # (a network call) is likewise kept off the lock.
+            if outcome.status == "ingested" and outcome.music_id:
+                with self._lock:
                     record = self.db.get(outcome.music_id)
                     if record is not None:
                         self._records_by_id[outcome.music_id] = record
-                    if reporter is not None:
-                        platform = ""
-                        if record is not None and isinstance(record.raw, dict):
-                            platform = str(record.raw.get("platform") or "")
-                        reporter.report_save(
-                            sound_id=outcome.music_id,
-                            platform=platform,
-                            title=record.title if record else "",
-                            artist=record.artist if record else "",
-                        )
+                if reporter is not None and record is not None:
+                    platform = str(record.raw.get("platform") or "") if isinstance(record.raw, dict) else ""
+                    reporter.report_save(
+                        sound_id=outcome.music_id,
+                        platform=platform,
+                        title=record.title,
+                        artist=record.artist,
+                    )
+            if on_item is not None:
+                on_item(outcome)
+
+        results = service.drain_inbox(self.inbox, should_stop=should_stop, on_item=_per_item)
+        with self._lock:
             # A transient FS/mount hiccup here must not fail a completed import.
             try:
                 self._catalog_stats = inspect_catalog_stats(self.vault_root)
@@ -950,7 +965,9 @@ class LibraryViewModel:
             if should_stop is not None and should_stop():
                 break
             try:
-                result = transcribe_sound_folder(Path(folder), audio_path=Path(audio), transcriber=transcriber)
+                result = transcribe_sound_folder(
+                    Path(folder), audio_path=Path(audio), transcriber=transcriber, should_stop=should_stop
+                )
                 if result.get("status") in ("ok", "empty"):
                     done += 1
                 else:
@@ -963,3 +980,62 @@ class LibraryViewModel:
             if progress is not None:
                 progress(index + 1, total, music_id)
         return done
+
+    def transcribe_one(
+        self,
+        music_id: str,
+        folder: "Path | str",
+        audio: "Path | str",
+        *,
+        transcriber: "Callable[[Path], dict[str, Any]]",
+        should_stop: "Callable[[], bool] | None" = None,
+    ) -> bool:
+        """Transcribe a single just-downloaded sound and refresh its index row so the
+        transcript surfaces incrementally — no full vault rebuild. Idempotent (skips
+        if already transcribed) and best-effort. Returns True if transcript text was
+        produced. Safe to call from a dedicated transcription thread: IndexDatabase
+        opens a fresh connection per call (WAL), so the upsert can't collide with the
+        import thread's own writes."""
+        from sound_vault.workers.transcription import transcribe_sound_folder
+
+        if should_stop is not None and should_stop():
+            return False
+        try:
+            result = transcribe_sound_folder(
+                Path(folder), audio_path=Path(audio), transcriber=transcriber, should_stop=should_stop
+            )
+        except Exception as exc:  # noqa: BLE001 - per-item best-effort, but never silent
+            write_event("transcribe.error", music_id=str(music_id), **exception_fields(exc))
+            return False
+        status = result.get("status")
+        if status not in ("ok", "empty"):
+            write_event(
+                "transcribe.skip", music_id=str(music_id),
+                status=str(status), reason=str(result.get("reason") or ""),
+            )
+            return False
+        self._reindex_one(Path(folder))
+        return status == "ok"
+
+    def _reindex_one(self, folder: Path) -> None:
+        """Rebuild + upsert one sound's index row from its on-disk metadata (used
+        after an incremental transcription so the new transcript is queryable without
+        a full vault rebuild)."""
+        import json
+
+        meta_path = Path(folder) / "metadata.json"
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        record = build_record(self.vault_root, metadata)
+        if record is None:
+            return
+        self.db.upsert(record)
+        with self._lock:
+            self._records_by_id[record.music_id] = record
+
+    def inbox_progress(self) -> dict[str, int]:
+        """Status tally for the global import progress bar (file-backed, restart-safe):
+        ``{total, pending, imported, failed}``."""
+        return self.inbox.counts()

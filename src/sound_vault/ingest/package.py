@@ -20,6 +20,8 @@ import sys
 import unicodedata
 from typing import Any, Callable
 
+from sound_vault.vault.metadata_io import atomic_write_json
+
 # tagger(src, dst, tags) writes a tagged copy of src at dst
 Tagger = Callable[[Path, Path, dict], None]
 
@@ -243,7 +245,9 @@ def package_sound(
     }
 
     metadata_path = folder / "metadata.json"
-    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Atomic write: the concurrent transcription worker reads this file right after
+    # ingest, so a torn (half-written) read would lose the sound.
+    atomic_write_json(metadata_path, metadata)
 
     if append_catalog:
         _locked_append(vault_root / "catalog" / "sounds.jsonl", json.dumps(metadata, ensure_ascii=False) + "\n")

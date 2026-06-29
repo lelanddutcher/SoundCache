@@ -19,6 +19,7 @@ from sound_vault.ingest.download import AudioDownloader
 from sound_vault.ingest.package import PackagedSound, Tagger, ffmpeg_embed_tags, package_sound
 from sound_vault.ingest.resolve import ResolvedSource, resolve
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
+from sound_vault.vault.metadata_io import atomic_write_json
 
 ResolveSource = Callable[[str], ResolvedSource]
 IndexUpdater = Callable[[PackagedSound], None]
@@ -351,7 +352,7 @@ class IngestService:
         # Persist the metadata-gap fills first (transcription re-reads this file).
         if filled:
             metadata["packaged_at"] = self._now()
-            meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+            atomic_write_json(meta_path, metadata)
 
         # Transcript is its own gap: transcribe existing audio in place if missing.
         audio = self._existing_audio(folder)
@@ -389,11 +390,17 @@ class IngestService:
         *,
         max_attempts: int = 3,
         should_stop: "Callable[[], bool] | None" = None,
+        on_item: "Callable[[IngestOutcome], None] | None" = None,
     ) -> list[tuple[ShortcutInboxItem, IngestOutcome]]:
         """Ingest every pending item. ``should_stop`` (e.g. the import worker's
         ``QThread.isInterruptionRequested``) is polled between items and forwarded
         into the active download so a quit during a long bulk import stops promptly
-        and the interrupted item is left pending (no failure attempt burned)."""
+        and the interrupted item is left pending (no failure attempt burned).
+
+        ``on_item(outcome)`` fires after each *processed* item (not the interrupted-
+        mid-download case) so the caller can drive a live progress bar AND pipeline
+        downstream work — e.g. queue a just-downloaded sound for transcription the
+        moment it lands, instead of waiting for the whole batch to finish."""
         from sound_vault.diagnostics import exception_fields, write_event
 
         outcomes: list[tuple[ShortcutInboxItem, IngestOutcome]] = []
@@ -416,4 +423,6 @@ class IngestService:
             else:
                 store.record_failure(item.id, outcome.reason or "ingest failed", max_attempts=max_attempts)
             outcomes.append((item, outcome))
+            if on_item is not None:
+                on_item(outcome)
         return outcomes

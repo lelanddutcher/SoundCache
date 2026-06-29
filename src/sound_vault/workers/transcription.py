@@ -167,7 +167,7 @@ def faster_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callabl
     cfg = config or LocalASRConfig()
     state: dict[str, Any] = {}
 
-    def _transcribe(audio_path: Path) -> dict[str, Any]:
+    def _transcribe(audio_path: Path, should_stop: "Callable[[], bool] | None" = None) -> dict[str, Any]:
         model = state.get("model")
         if model is None:
             from faster_whisper import WhisperModel
@@ -179,8 +179,23 @@ def faster_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callabl
                 download_root=cfg.model_cache_dir or None,
             )
             state["model"] = model
+        # Honor a quit before the (uninterruptible) VAD preprocessing even starts.
+        if should_stop is not None and should_stop():
+            return {"text": "", "language": "", "model": cfg.model, "engine": "faster-whisper"}
+        # model.transcribe(vad_filter=True) runs synchronous VAD preprocessing and
+        # then returns a lazy generator — the per-segment compute happens as we
+        # consume it. The initial preprocessing can't be interrupted, but checking
+        # should_stop between segments makes the bulk of a long transcription
+        # promptly cancellable on quit, so a mid-transcribe quit doesn't leave this
+        # worker thread running past app teardown (the QThread-destroyed-while-running
+        # crash the download path also guards against).
         segments, info = model.transcribe(str(audio_path), vad_filter=True)
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        parts: list[str] = []
+        for seg in segments:
+            if should_stop is not None and should_stop():
+                break
+            parts.append(seg.text.strip())
+        text = " ".join(part for part in parts if part).strip()
         return {
             "text": text,
             "language": getattr(info, "language", "") or "",
@@ -209,12 +224,14 @@ def transcribe_sound_folder(
     audio_path: Path | None,
     transcriber: "Callable[[Path], dict[str, Any]]",
     overwrite: bool = False,
+    should_stop: "Callable[[], bool] | None" = None,
 ) -> dict[str, Any]:
     """Transcribe one packaged sound's audio and write the result into its
     metadata.json (speech_transcript_v2 + paths.transcript) and a sidecar.
 
     Best-effort + idempotent: skips if a transcript already exists (unless
-    overwrite) or there's no audio. Returns {status, has_text}.
+    overwrite) or there's no audio. ``should_stop`` is forwarded into the engine so
+    a quit cancels a long transcription promptly. Returns {status, has_text}.
     """
     folder = Path(folder)
     meta_path = folder / "metadata.json"
@@ -229,7 +246,15 @@ def transcribe_sound_folder(
     if audio_path is None or not Path(audio_path).exists():
         return {"status": "skipped", "reason": "no audio"}
 
-    result = transcriber(Path(audio_path))
+    # Forward should_stop only when set, so transcribers (cloud, test fakes) that
+    # take just the audio path keep their exact prior call shape.
+    if should_stop is not None:
+        try:
+            result = transcriber(Path(audio_path), should_stop=should_stop)
+        except TypeError:
+            result = transcriber(Path(audio_path))
+    else:
+        result = transcriber(Path(audio_path))
     text = str(result.get("text") or "").strip()
     language = str(result.get("language") or "")
     model = str(result.get("model") or "")

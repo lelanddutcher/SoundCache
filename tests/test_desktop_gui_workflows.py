@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -777,6 +778,7 @@ def test_close_event_requests_interruption_before_waiting(tmp_path, monkeypatch)
 
     window._import_worker = _FakeWorker("import")
     window._transcribe_worker = _FakeWorker("transcribe")
+    window._transcribe_queue_worker = _FakeWorker("queue")
 
     window.closeEvent(QCloseEvent())
 
@@ -784,4 +786,155 @@ def test_close_event_requests_interruption_before_waiting(tmp_path, monkeypatch)
     last_interrupt = max(i for i, e in enumerate(events) if e.startswith("interrupt:"))
     first_wait = min(i for i, e in enumerate(events) if e.startswith("wait:"))
     assert last_interrupt < first_wait
+    # The persistent transcription queue worker must also be stopped cleanly, or a
+    # mid-transcribe quit would re-introduce the QThread-destroyed-while-running crash.
     assert "interrupt:import" in events and "interrupt:transcribe" in events
+    assert "interrupt:queue" in events
+
+
+def test_transcription_queue_worker_drains_and_emits(tmp_path, monkeypatch):
+    """The persistent consumer transcribes each enqueued sound and emits `transcribed`.
+    This is the concurrent-with-downloads ASR pipeline."""
+    import sound_vault.ingest.factory as factory
+    from sound_vault.ui.desktop import _TranscriptionQueueWorker
+
+    # build_transcriber is None under SOUND_VAULT_DISABLE_TRANSCRIBE; hand the worker a
+    # dummy non-None transcriber so it actually calls vm.transcribe_one.
+    monkeypatch.setattr(factory, "build_transcriber", lambda *a, **k: (lambda *aa, **kk: {"text": "x"}))
+
+    app = _app()
+    calls: list[str] = []
+
+    class FakeVM:
+        def transcribe_one(self, music_id, folder, audio, *, transcriber, should_stop=None):
+            calls.append(music_id)
+            return True
+
+    worker = _TranscriptionQueueWorker(FakeVM())
+    transcribed: list[str] = []
+    worker.transcribed.connect(transcribed.append)
+    worker.start()
+    for mid in ("a", "b", "c"):
+        worker.enqueue(mid, "/folder", "/audio")
+
+    deadline = time.monotonic() + 5
+    while len(calls) < 3 and time.monotonic() < deadline:
+        app.processEvents()
+        worker.wait(20)
+    worker.requestInterruption()
+    worker.wait(2000)
+    app.processEvents()
+
+    assert calls == ["a", "b", "c"]
+    assert set(transcribed) == {"a", "b", "c"}
+    assert not worker.isRunning()
+
+
+def test_on_item_ingested_enqueues_to_queue_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    vault = tmp_path / "vault"
+    (vault / "catalog").mkdir(parents=True)
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    app.processEvents()
+
+    enq: list[tuple] = []
+
+    class FakeQueueWorker:
+        def isRunning(self):
+            return True
+
+        def enqueue(self, music_id, folder, audio):
+            enq.append((music_id, folder, audio))
+
+    window._transcribe_queue_worker = FakeQueueWorker()
+    window._on_item_ingested("42", "/f", "/a")
+    assert enq == [("42", "/f", "/a")]
+
+
+def test_import_progress_bar_shows_counts_and_hides_when_idle(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    vault = tmp_path / "vault"
+    (vault / "catalog").mkdir(parents=True)
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    app.processEvents()
+
+    # Active import with 700 of 1500 processed → bar visible with formatted counts.
+    monkeypatch.setattr(
+        window.vm, "inbox_progress",
+        lambda: {"total": 1500, "pending": 800, "imported": 690, "failed": 10},
+    )
+    window._import_worker = type("W", (), {"isRunning": lambda self: True})()
+    window._tick_import_progress()
+    # isHidden() reflects the explicit visibility flag without needing the top-level
+    # window to be show()n (which offscreen tests skip).
+    assert not window._import_progress_container.isHidden()
+    assert window.import_progress_bar.maximum() == 1500
+    assert window.import_progress_bar.value() == 700
+    assert "700 / 1,500" in window.import_progress_label.text()
+
+    # Import done + queue drained → bar hides and its timer stands down.
+    window._import_worker = None
+    window._import_progress_timer.start()
+    monkeypatch.setattr(
+        window.vm, "inbox_progress",
+        lambda: {"total": 1500, "pending": 0, "imported": 1490, "failed": 10},
+    )
+    window._tick_import_progress()
+    assert window._import_progress_container.isHidden()
+    assert not window._import_progress_timer.isActive()
+
+
+def test_transcript_refresh_survives_tab_switch(tmp_path, monkeypatch):
+    """If a transcript lands while the user is on another tab, the refresh must NOT be
+    lost — the dirty flag is kept until they return to the library and it flushes."""
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    vault = tmp_path / "vault"
+    (vault / "catalog").mkdir(parents=True)
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    app.processEvents()
+
+    refreshed: list[bool] = []
+    monkeypatch.setattr(window, "refresh_table", lambda: refreshed.append(True))
+
+    # A transcript completes while the library tab is NOT showing.
+    window.show_view("inbox")
+    window._library_needs_transcript_refresh = True
+    window._flush_transcript_refresh()  # debounce timer fires while hidden
+    assert window._library_needs_transcript_refresh is True  # flag preserved
+    assert refreshed == []
+
+    # Returning to the library flushes it.
+    window.show_view("library")
+    assert window._library_needs_transcript_refresh is False
+    assert refreshed == [True]
+
+
+def test_eta_rolling_estimate_and_duration_format():
+    from sound_vault.ui.desktop import SoundVaultWindow
+
+    fmt = SoundVaultWindow._format_duration
+    assert fmt(5) == "5s"
+    assert fmt(60) == "1m"
+    assert fmt(65) == "1m"          # small trailing seconds dropped for readability
+    assert fmt(95) == "1m 35s"
+    assert fmt(3700) == "1h 1m"
+
+    # Rolling-rate ETA: 10 items in 10s → 1/s → 50 remaining ≈ 50s.
+    app = _app()
+    vault_unused = SoundVaultWindow.__new__(SoundVaultWindow)  # math-only; avoid full init
+    from collections import deque
+
+    vault_unused._import_rate_samples = deque([(100.0, 0), (110.0, 10)])
+    assert vault_unused._estimate_eta(50) == "50s"
+    assert vault_unused._estimate_eta(0) == ""        # nothing remaining
+    vault_unused._import_rate_samples = deque([(100.0, 5)])  # one sample → not enough
+    assert vault_unused._estimate_eta(50) == ""

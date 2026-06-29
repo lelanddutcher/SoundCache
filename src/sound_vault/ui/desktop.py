@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 import getpass
 import json
 import os
 import platform
+import queue
 import random
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -59,6 +62,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QMenu,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -1168,12 +1172,26 @@ class _ImportWorker(QThread):
     """Runs relay-poll + inbox download/ingest off the UI thread (downloads are slow)."""
 
     importFinished = Signal(object, object)  # (outcomes, error|None)
+    itemIngested = Signal(str, str, str)  # music_id, folder, audio — fired as each lands
 
     def __init__(self, vm, *, base_url, pair_code, device_id, device_secret, reporter=None, parent=None) -> None:
         super().__init__(parent)
         self._vm = vm
         self._creds = (base_url, pair_code, device_id, device_secret)
         self._reporter = reporter
+
+    def _emit_item(self, outcome) -> None:
+        # Pipeline hook: as soon as a sound finishes downloading, hand its id + paths
+        # to the UI so it can queue transcription immediately (ASR runs concurrently
+        # with the throttled download loop) instead of waiting for the whole batch.
+        if (
+            getattr(outcome, "status", "") == "ingested"
+            and getattr(outcome, "music_id", "")
+            and getattr(outcome, "audio_path", None)
+        ):
+            self.itemIngested.emit(
+                str(outcome.music_id), str(outcome.folder or ""), str(outcome.audio_path or "")
+            )
 
     def run(self) -> None:
         try:
@@ -1186,7 +1204,7 @@ class _ImportWorker(QThread):
                     device_secret=device_secret,
                 )
             outcomes = self._vm.import_pending(
-                reporter=self._reporter, should_stop=self.isInterruptionRequested
+                reporter=self._reporter, should_stop=self.isInterruptionRequested, on_item=self._emit_item
             )
             self.importFinished.emit(outcomes, None)
         except Exception as exc:  # noqa: BLE001 - surface failure to the UI thread
@@ -1217,6 +1235,75 @@ class _TranscriptionWorker(QThread):
             self.finished_ok.emit(count, None)
         except Exception as exc:  # noqa: BLE001 - surface to UI thread
             self.finished_ok.emit(0, exc)
+
+
+class _TranscriptionQueueWorker(QThread):
+    """Persistent ASR consumer: transcribes each sound the moment it finishes
+    downloading, so transcription runs concurrently with the (deliberately throttled,
+    slower) download loop instead of waiting for the whole batch. The download thread
+    is I/O + subprocess bound; this one is CPU bound — they don't contend.
+
+    Stays alive across imports and idles (cheap 0.4s poll) when its queue is empty.
+    Cooperative-cancel: while idle the get() timeout keeps the loop checking
+    isInterruptionRequested; while transcribing, should_stop is forwarded into the
+    whisper segment loop so the bulk of a long transcription is cancellable between
+    segments (the one uninterruptible window is the initial VAD preprocessing of the
+    current item). Net effect: a quit returns well within closeEvent's wait budget —
+    no QThread left running at teardown."""
+
+    transcribed = Signal(str)  # music_id that gained a transcript
+    progress = Signal(int, int)  # done, enqueued
+
+    def __init__(self, vm, parent=None) -> None:
+        super().__init__(parent)
+        self._vm = vm
+        self._queue: "queue.Queue[tuple[str, str, str] | None]" = queue.Queue()
+        # _enqueued is bumped on the UI thread (enqueue), _done on this worker thread;
+        # a tiny lock keeps the (done, enqueued) pair a consistent snapshot for the
+        # progress label.
+        self._counter_lock = threading.Lock()
+        self._enqueued = 0
+        self._done = 0
+
+    def enqueue(self, music_id: str, folder: str, audio: str) -> None:
+        with self._counter_lock:
+            self._enqueued += 1
+        self._queue.put((str(music_id), str(folder), str(audio)))
+
+    def run(self) -> None:
+        transcriber = None
+        built = False
+        try:
+            while not self.isInterruptionRequested():
+                try:
+                    item = self._queue.get(timeout=0.4)
+                except queue.Empty:
+                    continue
+                if item is None or self.isInterruptionRequested():
+                    break
+                music_id, folder, audio = item
+                if not built:
+                    from sound_vault.ingest.factory import build_transcriber
+
+                    transcriber = build_transcriber()  # built once; None if ASR unavailable
+                    built = True
+                if transcriber is not None:
+                    try:
+                        ok = self._vm.transcribe_one(
+                            music_id, folder, audio,
+                            transcriber=transcriber, should_stop=self.isInterruptionRequested,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - per-item best-effort, never fatal
+                        write_event("gui.queue_transcribe_error", music_id=str(music_id), **exception_fields(exc))
+                        ok = False
+                    if ok:
+                        self.transcribed.emit(music_id)
+                with self._counter_lock:
+                    done, enqueued = self._done + 1, self._enqueued
+                    self._done = done
+                self.progress.emit(done, enqueued)
+        except Exception as exc:  # noqa: BLE001 - a dying run() must surface, not vanish
+            write_event("gui.queue_transcribe_worker_fatal", **exception_fields(exc))
 
 
 class _PollWorker(QThread):
@@ -1454,6 +1541,17 @@ class SoundVaultWindow(QMainWindow):
         self._worker_timer = QTimer(self)
         self._worker_timer.setInterval(250)
         self._worker_timer.timeout.connect(self._finish_async_worker_job)
+        # Concurrent transcription pipeline + global import progress bar.
+        self._transcribe_queue_worker = None
+        self._library_needs_transcript_refresh = False
+        self._transcript_refresh_timer = QTimer(self)
+        self._transcript_refresh_timer.setInterval(2500)
+        self._transcript_refresh_timer.setSingleShot(True)
+        self._transcript_refresh_timer.timeout.connect(self._flush_transcript_refresh)
+        self._import_progress_timer = QTimer(self)
+        self._import_progress_timer.setInterval(1000)
+        self._import_progress_timer.timeout.connect(self._tick_import_progress)
+        self._import_rate_samples: "deque[tuple[float, int]]" = deque(maxlen=40)
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(80)
         self._search_timer.setSingleShot(True)
@@ -1491,6 +1589,7 @@ class SoundVaultWindow(QMainWindow):
         self._preview_token = 0
         self.previewHydrated.connect(self._apply_hydrated_preview)
         self._build_ui()
+        self._setup_import_progress()
         self._build_menu_bar()
         self.setup_keyboard_shortcuts()
         self.restore_library_search_state()
@@ -2717,17 +2816,24 @@ class SoundVaultWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         self._flush_user_notes()
         self._stop_external_audio()
-        for timer_name in ("_relay_poll_timer", "_index_timer", "_worker_timer"):
+        for timer_name in (
+            "_relay_poll_timer", "_index_timer", "_worker_timer",
+            "_import_progress_timer", "_transcript_refresh_timer",
+        ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 timer.stop()
         # Cooperatively cancel the background workers BEFORE waiting. Each run loop
         # polls QThread.isInterruptionRequested between items and forwards it into
-        # the active capture subprocess (killed mid-flight), so a quit during a long
-        # bulk import returns in well under a second instead of timing out. Waiting
-        # without first requesting interruption is what let a still-running QThread
-        # be destroyed at teardown and crash Qt with SIGABRT.
-        workers = [getattr(self, name, None) for name in ("_poll_worker", "_import_worker", "_transcribe_worker")]
+        # the active capture subprocess / whisper segment loop (both killable
+        # mid-flight), so a quit during a long bulk import or transcription returns in
+        # well under a second instead of timing out. Waiting without first requesting
+        # interruption is what let a still-running QThread be destroyed at teardown and
+        # crash Qt with SIGABRT.
+        workers = [
+            getattr(self, name, None)
+            for name in ("_poll_worker", "_import_worker", "_transcribe_worker", "_transcribe_queue_worker")
+        ]
         for worker in workers:
             if worker is not None and worker.isRunning():
                 worker.requestInterruption()
@@ -2799,6 +2905,10 @@ class SoundVaultWindow(QMainWindow):
             self.refresh_dedupe_review()
         elif name == "worker":
             self.refresh_worker_status()
+        elif name == "library" and getattr(self, "_library_needs_transcript_refresh", False):
+            # Surface transcripts that finished while the library tab was hidden.
+            self._library_needs_transcript_refresh = False
+            self.refresh_table()
 
     def choose_vault(self) -> None:
         self.open_vault()
@@ -3985,8 +4095,14 @@ class SoundVaultWindow(QMainWindow):
             parent=self,
         )
         self._import_worker.importFinished.connect(self._on_import_finished)
+        # Pipeline: queue each downloaded sound for transcription the moment it lands,
+        # so ASR runs concurrently with the (throttled) download loop.
+        self._import_worker.itemIngested.connect(self._on_item_ingested)
+        self._ensure_transcribe_queue_worker()
         self._import_worker.start()
         self.statusBar().showMessage("Downloading + importing shared sounds…")
+        self._import_progress_timer.start()
+        self._tick_import_progress()
 
     def _on_import_finished(self, outcomes, error) -> None:
         self._import_worker = None
@@ -4002,15 +4118,9 @@ class SoundVaultWindow(QMainWindow):
         imported = sum(1 for o in outcomes if getattr(o, "status", "") == "ingested")
         duplicates = sum(1 for o in outcomes if getattr(o, "status", "") == "duplicate")
         failures = [o for o in outcomes if getattr(o, "status", "") == "failed"]
-        # Transcribe exactly the sounds just imported, but derived from the
-        # state-aware filter (audio present, no transcript) so we never re-run
-        # whisper on an instrumental or an already-transcribed sound. Bounded to
-        # this batch — never a vault-wide sweep over the legacy backlog.
-        ingested_ids = [
-            o.music_id for o in outcomes
-            if getattr(o, "status", "") == "ingested" and getattr(o, "music_id", None)
-        ]
-        self._start_transcription(self.vm.transcription_targets(ingested_ids), reason="post-import")
+        # Transcription is no longer a post-import batch: each sound was queued for
+        # ASR (via itemIngested) the moment it downloaded, so it runs concurrently and
+        # the queue worker is likely still draining its backlog now. Nothing to start.
         parts = [f"Imported {imported} sound(s)"]
         if duplicates:
             parts.append(f"{duplicates} duplicate(s)")
@@ -4098,6 +4208,133 @@ class SoundVaultWindow(QMainWindow):
         if count:
             self.rebuild_index()  # surface the new transcripts in the library + inspector
             self.statusBar().showMessage(f"Transcribed {count} sound(s).", 6000)
+
+    # ---- concurrent transcription pipeline ----
+
+    def _ensure_transcribe_queue_worker(self):
+        """Lazily start the persistent transcription consumer (reused across imports).
+        Returns None when ASR is disabled — the pipeline then quietly skips transcription."""
+        if _env_flag("SOUND_VAULT_DISABLE_TRANSCRIBE"):
+            return None
+        worker = getattr(self, "_transcribe_queue_worker", None)
+        if worker is not None and worker.isRunning():
+            return worker
+        if worker is not None:
+            # A previous worker exited (e.g. a fatal in run()); reap it before
+            # replacing so its thread is fully torn down (no orphaned QThread).
+            worker.wait(100)
+        worker = _TranscriptionQueueWorker(self.vm, parent=self)
+        worker.transcribed.connect(self._on_queue_transcribed)
+        worker.progress.connect(self._on_queue_progress)
+        worker.start()
+        self._transcribe_queue_worker = worker
+        return worker
+
+    def _on_item_ingested(self, music_id: str, folder: str, audio: str) -> None:
+        """A sound just finished downloading — queue it for transcription right away."""
+        worker = getattr(self, "_transcribe_queue_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.enqueue(music_id, folder, audio)
+
+    def _on_queue_progress(self, done: int, enqueued: int) -> None:
+        if done >= enqueued:
+            self.worker_label.setText("Worker\nidle")
+        else:
+            self.worker_label.setText(f"Worker\ntranscribing {done}/{enqueued}…")
+
+    def _on_queue_transcribed(self, music_id: str) -> None:
+        # Coalesce a burst of new transcripts into one library refresh (~2.5s window)
+        # so a long background drain doesn't churn the table on every item.
+        self._library_needs_transcript_refresh = True
+        if not self._transcript_refresh_timer.isActive():
+            self._transcript_refresh_timer.start()
+
+    def _flush_transcript_refresh(self) -> None:
+        if not getattr(self, "_library_needs_transcript_refresh", False):
+            return
+        # transcribe_one already upserted each row to the index; only repaint when the
+        # library is the visible view (avoids needless work mid-drain on other tabs).
+        # Keep the flag SET while hidden so switching back to the library still flushes
+        # the transcripts that landed in the background (see show_view).
+        if self.stack.currentWidget() is self.library_view:
+            self._library_needs_transcript_refresh = False
+            self.refresh_table()
+
+    # ---- global import progress bar + ETA ----
+
+    def _setup_import_progress(self) -> None:
+        """A permanent progress widget pinned to the status bar: 'Importing X / Y · ~ETA'.
+        Driven off the file-backed inbox counts so it reflects true remaining work and
+        survives restarts. Hidden until an import is active."""
+        container = QWidget()
+        container.setObjectName("importProgress")
+        row = QHBoxLayout(container)
+        row.setContentsMargins(8, 0, 8, 0)
+        row.setSpacing(10)
+        self.import_progress_label = QLabel("")
+        self.import_progress_label.setObjectName("importProgressLabel")
+        self.import_progress_bar = QProgressBar()
+        self.import_progress_bar.setObjectName("importProgressBar")
+        self.import_progress_bar.setTextVisible(False)
+        self.import_progress_bar.setFixedWidth(220)
+        self.import_progress_bar.setFixedHeight(12)
+        row.addWidget(self.import_progress_label)
+        row.addWidget(self.import_progress_bar)
+        self._import_progress_container = container
+        container.setVisible(False)
+        self.statusBar().addPermanentWidget(container, 0)
+
+    def _tick_import_progress(self) -> None:
+        try:
+            counts = self.vm.inbox_progress()
+        except OSError:
+            return  # transient FS/mount hiccup — try again next tick
+        total = counts.get("total", 0)
+        # "other" (any non-standard status) counts as processed so the bar always
+        # reaches 100% — imported + failed + other + pending == total.
+        processed = counts.get("imported", 0) + counts.get("failed", 0) + counts.get("other", 0)
+        pending = counts.get("pending", 0)
+        importing = getattr(self, "_import_worker", None) is not None and self._import_worker.isRunning()
+        if total <= 0 or (not importing and pending <= 0):
+            # Nothing in flight — stand down.
+            self._import_progress_container.setVisible(False)
+            self._import_progress_timer.stop()
+            self._import_rate_samples.clear()
+            return
+        self._import_progress_container.setVisible(True)
+        self.import_progress_bar.setMaximum(max(total, 1))
+        self.import_progress_bar.setValue(min(processed, total))
+        self._import_rate_samples.append((time.monotonic(), processed))
+        label = f"Importing {processed:,} / {total:,}"
+        eta = self._estimate_eta(pending)
+        if eta:
+            label += f"  ·  ~{eta} left"
+        self.import_progress_label.setText(label)
+
+    def _estimate_eta(self, remaining: int) -> str:
+        """Rolling-window ETA: rate over the recent samples (adapts as throughput
+        changes), not a naive whole-run average. Empty string until it's meaningful."""
+        samples = self._import_rate_samples
+        if remaining <= 0 or len(samples) < 2:
+            return ""
+        t0, p0 = samples[0]
+        t1, p1 = samples[-1]
+        dt = t1 - t0
+        dp = p1 - p0
+        if dt <= 0 or dp <= 0:
+            return ""
+        return self._format_duration(remaining / (dp / dt))
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = int(max(0, seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, sec = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m" if sec < 10 else f"{minutes}m {sec}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m"
 
     def refresh_review_queues(self) -> None:
         rows = self.vm.review_queue_rows()
@@ -4808,6 +5045,27 @@ QMainWindow, QWidget {
     letter-spacing: 0.6px;
     text-transform: uppercase;
     background: transparent;
+}
+
+/* Global import progress (status-bar permanent widget) */
+#importProgress { background: transparent; }
+#importProgressLabel {
+    color: #c5b3e6;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    background: transparent;
+}
+#importProgressBar {
+    background: #150a33;
+    border: 1px solid #2a1758;
+    border-radius: 6px;
+}
+#importProgressBar::chunk {
+    border-radius: 6px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #66ecff, stop:0.55 #b793ff, stop:1 #ff6ad5);
 }
 
 /* Right inspector */
