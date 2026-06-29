@@ -114,6 +114,33 @@ def test_cors_not_wildcard():
     assert "allow_origin_regex" in text
 
 
+def test_poll_rejects_overlong_pair_code():
+    client = _client()
+    r = client.get(
+        "/v1/inbox/poll",
+        params={"pair_code": "A" * 5000},
+        headers={"X-Device-Id": "d", "X-Device-Secret": "s"},
+    )
+    assert r.status_code == 422  # bounded before any hashing/logging work
+
+
+def test_events_save_rejects_junk_sound_id():
+    client = _client()
+    for bad in ["a" * 100, "id with spaces", "drop;table", ""]:
+        r = client.post("/v1/events/save", json={"sound_id": bad})
+        assert r.status_code == 422, bad
+    # a plausible id is accepted
+    ok = client.post("/v1/events/save", json={"sound_id": "7209633324539693830"})
+    assert ok.status_code == 200
+
+
+def test_leaderboard_limit_is_clamped():
+    client = _client()
+    assert client.get("/v1/leaderboard", params={"limit": 10_000_000}).status_code == 422
+    assert client.get("/v1/leaderboard", params={"limit": 0}).status_code == 422
+    assert client.get("/v1/leaderboard", params={"limit": 50}).status_code == 200
+
+
 def test_cors_regex_allows_www_and_apex_but_not_lookalikes():
     """The hits page leaderboard fetch failed ('can't reach the hive mind') because
     www.soundcache.io wasn't an allowed CORS origin. Both apex and www must pass; any

@@ -389,7 +389,19 @@ class LibraryViewModel:
 
         from sound_vault.url_safety import is_safe_public_url
 
-        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        # Untrusted file: cap the size before reading it whole into memory + parsing
+        # on the UI thread (real TikTok exports are ~25 MB; reject 100MB+ bombs).
+        _MAX_PACK_BYTES = 64 * 1024 * 1024
+        path_obj = Path(path)
+        try:
+            size = path_obj.stat().st_size
+        except OSError as exc:
+            raise ValueError(f"could not read import file: {exc}") from exc
+        if size > _MAX_PACK_BYTES:
+            raise ValueError(
+                f"import file too large ({size / 1_048_576:.0f} MB, limit {_MAX_PACK_BYTES // 1_048_576} MB)"
+            )
+        data = _json.loads(path_obj.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("not a Sound Cache sound pack (missing 'packs')")
 

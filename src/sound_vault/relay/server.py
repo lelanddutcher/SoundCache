@@ -5,7 +5,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -190,10 +190,21 @@ class SubmitLinkRequest(BaseModel):
 
 
 class SaveEventRequest(BaseModel):
-    sound_id: str = Field(max_length=256)
+    sound_id: str = Field(max_length=64)
     platform: str = Field(default="", max_length=32)
     title: str = Field(default="", max_length=512)
     artist: str = Field(default="", max_length=256)
+
+    @field_validator("sound_id")
+    @classmethod
+    def _plausible_sound_id(cls, v: str) -> str:
+        # Real platform ids are short alphanumerics (TikTok numeric, YouTube/IG
+        # alnum). Reject junk so the public leaderboard can't be polluted with
+        # arbitrary strings, and cap length to bound abuse.
+        sid = v.strip()
+        if not sid or len(sid) > 64 or not all(ch.isalnum() or ch in "-_" for ch in sid):
+            raise ValueError("sound_id must be a short alphanumeric id")
+        return sid
 
 
 @app.get("/v1/health")
@@ -233,12 +244,19 @@ def submit_link(request: SubmitLinkRequest, http_request: Request) -> dict[str, 
 
 
 @app.get("/v1/inbox/poll")
-def poll(pair_code: str, request: Request, x_device_id: str = Header(default=""), x_device_secret: str = Header(default="")) -> dict[str, list[dict[str, str]]]:
+def poll(
+    request: Request,
+    pair_code: str = Query(max_length=64),
+    x_device_id: str = Header(default=""),
+    x_device_secret: str = Header(default=""),
+) -> dict[str, list[dict[str, str]]]:
     enforce_rate_limit(request, bucket="inbox_poll")
     if not x_device_id or not x_device_secret:
         raise HTTPException(status_code=401, detail="missing device credentials")
     items = inbox.poll(device_id=x_device_id, device_secret=x_device_secret, pair_code=pair_code)
-    log_relay_event("poll", pair_code=pair_code, device_id=x_device_id, device_secret=x_device_secret)
+    # Never pass the device secret into the log call — even though log_relay_event
+    # redacts "*secret*" keys, the raw value would sit in this frame for a debugger.
+    log_relay_event("poll", pair_code=pair_code, device_id=x_device_id)
     return {"items": [{"id": item.id, "url": item.url, "source": item.source, "note": item.note} for item in items]}
 
 
@@ -248,6 +266,10 @@ def record_save_event(request: SaveEventRequest, http_request: Request) -> dict[
     sound_id = request.sound_id.strip()
     if not sound_id:
         raise HTTPException(status_code=422, detail="sound_id is required")
+    # Save events are anonymous by design (no device secret — privacy), so cap how
+    # fast any single sound_id can be incremented regardless of source IP. Bounds
+    # leaderboard poisoning without breaking the anonymized model.
+    enforce_rate_limit(http_request, bucket="events_save_sound", subject=sound_id, by_host=False)
     leaderboard_store.record_save(
         sound_id=sound_id, platform=request.platform, title=request.title, artist=request.artist
     )
@@ -256,7 +278,11 @@ def record_save_event(request: SaveEventRequest, http_request: Request) -> dict[
 
 
 @app.get("/v1/leaderboard")
-def get_leaderboard(request: Request, limit: int = 50, window: str = "all") -> dict[str, object]:
+def get_leaderboard(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    window: str = Query(default="all", max_length=16),
+) -> dict[str, object]:
     enforce_rate_limit(request, bucket="leaderboard")
     entries = leaderboard_store.leaderboard(limit=limit, window=window)
     return {

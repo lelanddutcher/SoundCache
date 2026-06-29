@@ -350,7 +350,14 @@ class AppSettings:
         return data if isinstance(data, dict) else {}
 
     def _write(self) -> None:
+        # 0o700 dir + 0o600 file: settings.json holds relay device secrets, so other
+        # local users must not be able to list/traverse the config dir to find it.
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            try:
+                os.chmod(self.path.parent, 0o700)
+            except OSError:
+                pass
         tmp_path = self.path.with_name(f".{self.path.name}.tmp")
         tmp_path.write_text(json.dumps(self._data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(tmp_path, self.path)
