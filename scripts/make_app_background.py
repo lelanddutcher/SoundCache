@@ -75,7 +75,7 @@ def _sparkles(img: QImage, count: int, *, seed: int, max_alpha: int, max_r: floa
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     for _ in range(count):
         x, y = rng.uniform(0, w), rng.uniform(0, h)
-        alpha = rng.randint(28, max_alpha)
+        alpha = rng.randint(55, max_alpha)
         roll = rng.random()
         if roll < 0.30:  # plus twinkle (stroked cross)
             color = QColor(rng.choice(PLUS_COLORS))
@@ -119,12 +119,12 @@ def main() -> int:
         (w * 0.86, h * 0.16, w * 0.32, QColor(102, 236, 255, 20)),
         (w * 0.55, h * 0.04, w * 0.30, QColor(183, 147, 255, 20)),
     ])
-    _sparkles(deck, 130, seed=7, max_alpha=210, max_r=8.5)
+    _sparkles(deck, 190, seed=7, max_alpha=255, max_r=10.5)
     deck.save(str(OUT / "deck-bg.png"))
 
     sw, sh = 760, 1400
     side = _night(sw, sh, [(0.0, "#1d1046"), (0.06, "#170c39"), (1.0, "#0a0518")])
-    _sparkles(side, 40, seed=13, max_alpha=150, max_r=6.0)
+    _sparkles(side, 58, seed=13, max_alpha=200, max_r=7.0)
     side.save(str(OUT / "sidebar-bg.png"))
 
     for f in ("deck-bg.png", "sidebar-bg.png"):

@@ -2644,6 +2644,9 @@ class SoundVaultWindow(QMainWindow):
         table.setSortingEnabled(True)
         table.verticalHeader().setVisible(False)
         table.setAlternatingRowColors(True)
+        # Let the deck's sparkle backdrop show through the table (the QSS paints the
+        # rows transparent/translucent; the viewport must not auto-fill an opaque base).
+        table.viewport().setAutoFillBackground(False)
         header = table.horizontalHeader()
         header.setSectionsMovable(True)
         header.setStretchLastSection(False)
@@ -4766,8 +4769,10 @@ QMainWindow, QWidget {
 
 /* Right inspector */
 #preview {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #1a0d40, stop:0.04 #150a33, stop:1 #0a0518);
+    background-color: #0a0518;
+    background-image: url("__DECK_BG__");
+    background-repeat: no-repeat;
+    background-position: top right;
     border-left: 1px solid #2a1758;
 }
 #artwork {
@@ -4994,22 +4999,23 @@ QComboBox QAbstractItemView::item:hover {
 }
 #searchBox:focus { border: 1px solid #66ecff; border-top: 1px solid #66ecff; }
 
-/* Table — data stays crisp + legible */
-QTableWidget {
-    background: #0c0720;
-    alternate-background-color: #110828;
+/* Table — data stays crisp + legible; transparent so the deck's sparkle sky
+   shows through (translucent zebra keeps the rows readable). */
+QTableView, QTableWidget {
+    background: transparent;
+    alternate-background-color: rgba(20, 11, 48, 0.42);
     border: 1px solid #2a1758;
-    gridline-color: #1a0c33;
+    gridline-color: #221140;
     selection-background-color: #b793ff;
     selection-color: #ffffff;
     color: #d9cef0;
     font-family: "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
 }
-QTableWidget::item { padding: 4px 8px; border: none; }
-QTableWidget::item:hover { background: rgba(183, 147, 255, 0.10); }
-QTableWidget::item:selected {
+QTableView::item, QTableWidget::item { padding: 4px 8px; border: none; background: transparent; }
+QTableView::item:hover, QTableWidget::item:hover { background: rgba(183, 147, 255, 0.12); }
+QTableView::item:selected, QTableWidget::item:selected {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 rgba(102,236,255,0.22), stop:1 rgba(255,106,213,0.16));
+        stop:0 rgba(102,236,255,0.28), stop:1 rgba(255,106,213,0.20));
     color: #ffffff;
 }
 QHeaderView::section {
