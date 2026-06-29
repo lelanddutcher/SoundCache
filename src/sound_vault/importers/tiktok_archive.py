@@ -386,15 +386,41 @@ def _iter_url_values(value: Any) -> list[str]:
 def _favorite_sound_list(parsed: Any) -> list[Any]:
     if not isinstance(parsed, dict):
         raise ValueError("TikTok favorite sounds export must parse to an object")
-    candidates = [
+    # Known shapes, newest first:
+    #  - current web JSON: {"Likes and Favorites": {"Favorite Sounds": {"FavoriteSoundList": [...]}}}
+    #  - older:            {"Activity": {"Favorite Sounds": {"FavoriteSoundList": [...]}}}
+    #  - flattened:        {"Favorite Sounds": {"FavoriteSoundList": [...]}} or {"FavoriteSoundList": [...]}
+    # Fall back to a recursive scan so future TikTok re-nesting still imports natively.
+    direct_candidates = [
+        parsed.get("Likes and Favorites", {}).get("Favorite Sounds") if isinstance(parsed.get("Likes and Favorites"), dict) else None,
+        parsed.get("Activity", {}).get("Favorite Sounds") if isinstance(parsed.get("Activity"), dict) else None,
         parsed.get("Favorite Sounds"),
         parsed.get("FavoriteSounds"),
         parsed,
     ]
-    for candidate in candidates:
+    for candidate in direct_candidates:
         if isinstance(candidate, dict) and isinstance(candidate.get("FavoriteSoundList"), list):
             return list(candidate["FavoriteSoundList"])
+
+    found = _find_favorite_sound_list(parsed)
+    if found is not None:
+        return list(found)
     raise ValueError("TikTok favorite sounds export is missing FavoriteSoundList")
+
+
+def _find_favorite_sound_list(node: Any, _depth: int = 0) -> list | None:
+    """Depth-first search for a ``FavoriteSoundList`` array anywhere in the export."""
+    if _depth > 8 or not isinstance(node, dict):
+        return None
+    value = node.get("FavoriteSoundList")
+    if isinstance(value, list):
+        return value
+    for child in node.values():
+        if isinstance(child, dict):
+            hit = _find_favorite_sound_list(child, _depth + 1)
+            if hit is not None:
+                return hit
+    return None
 
 
 def _build_summary(

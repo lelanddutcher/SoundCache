@@ -2790,17 +2790,30 @@ class SoundVaultWindow(QMainWindow):
     def choose_vault(self) -> None:
         self.open_vault()
 
+    def _vault_dialog_start_dir(self) -> str:
+        """A FAST local directory to open file pickers in. Never point the native
+        macOS picker at a network mount (e.g. /Volumes/…) — enumerating a slow or
+        stale share there beach-balls the whole app before the dialog even shows."""
+        from sound_vault.settings import default_vault_root
+
+        root = self.vault_root
+        if str(root).startswith("/Volumes/"):
+            return str(default_vault_root().parent)  # local ~/Documents
+        try:
+            return str(root if root.exists() else default_vault_root().parent)
+        except OSError:
+            return str(Path.home())
+
     def open_vault(self) -> None:
         selected = QFileDialog.getExistingDirectory(
-            self, "Open a Sound Cache vault", str(self.vault_root)
+            self, "Open a Sound Cache vault", self._vault_dialog_start_dir()
         )
         if selected:
             self._switch_to_vault(Path(selected))
 
     def new_vault(self) -> None:
-        start = str(self.vault_root.parent if self.vault_root.parent.exists() else Path.home())
         selected = QFileDialog.getExistingDirectory(
-            self, "Choose or create an empty folder for the new vault", start
+            self, "Choose or create an empty folder for the new vault", self._vault_dialog_start_dir()
         )
         if not selected:
             return
@@ -2836,6 +2849,12 @@ class SoundVaultWindow(QMainWindow):
         old_vm = getattr(self, "vm", None)
         if old_vm is not None:
             old_vm.close()
+        # The previous vault's index rebuild may still be running on its (now
+        # shut-down) executor. Drop our handle so (a) rebuild_index() doesn't
+        # early-return "already running" and skip the new vault, and (b) the stale
+        # completion callback for the old vault is ignored against the new model.
+        self._index_future = None
+        self._index_timer.stop()
         self.vm = LibraryViewModel(
             vault_root=self.vault_root,
             index_path=index_path_for_vault(self.vault_root),
@@ -2847,7 +2866,9 @@ class SoundVaultWindow(QMainWindow):
             self._rebuild_recent_menu()
         self.refresh_library_sidebar()
         self.reset_library_filters()
-        self.rebuild_index()
+        # Defer the rebuild a tick so the switch + repaint complete first (keeps the
+        # window responsive instead of appearing to hang on a large vault).
+        QTimer.singleShot(0, self.rebuild_index)
         write_event("gui.vault_switched", vault_root=str(self.vault_root))
 
     # ----- application menu bar -------------------------------------------------

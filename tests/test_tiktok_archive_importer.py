@@ -111,6 +111,36 @@ def test_tiktok_archive_importer_supports_valid_json_and_root_favorite_sound_lis
     assert records[0].tiktok_music_id == "998877"
 
 
+def test_tiktok_archive_importer_supports_current_nested_web_export(tmp_path):
+    # The current TikTok web export nests favorites under
+    # "Likes and Favorites" -> "Favorite Sounds" -> "FavoriteSoundList".
+    source = tmp_path / "user_data_tiktok.json"
+    source.write_text(
+        json.dumps(
+            {
+                "Direct Message": {"Direct Messages": {"ChatHistory": {}}},
+                "Likes and Favorites": {
+                    "Favorite Sounds": {
+                        "FavoriteSoundList": [
+                            {"Date": "2026-05-02 15:58:30", "Link": "https://m.tiktok.com/h5/share/music/6817565543474661378.html"},
+                            {"Date": "2026-05-01 10:00:00", "Link": "https://m.tiktok.com/h5/share/music/7274985708375378731.html"},
+                        ]
+                    },
+                    "Favorite Videos": {"FavoriteVideoList": []},
+                },
+                "Your Activity": {"Watch History": {"VideoList": []}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    records, malformed_rows = load_favorite_sound_rows(source)
+
+    assert malformed_rows == 0
+    assert [r.tiktok_music_id for r in records] == ["6817565543474661378", "7274985708375378731"]
+    assert records[0].saved_at == "2026-05-02 15:58:30"
+
+
 def test_tiktok_archive_music_id_extraction_handles_observed_url_shapes():
     assert extract_music_id("https://m.tiktok.com/h5/share/music/6817565543474661378.html") == "6817565543474661378"
     assert extract_music_id("https://www.tiktok.com/music/-6817565543474661378") == "6817565543474661378"
