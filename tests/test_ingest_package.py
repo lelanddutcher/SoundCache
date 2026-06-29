@@ -82,6 +82,62 @@ def test_package_sanitizes_illegal_chars(tmp_path):
         assert bad not in name
 
 
+def test_sanitize_normalizes_to_nfc():
+    import unicodedata
+
+    from sound_vault.ingest.package import sanitize_filename_component
+
+    nfd = unicodedata.normalize("NFD", "Café")  # decomposed (what macOS hands back)
+    out = sanitize_filename_component(nfd)
+    assert out == "Café"
+    assert unicodedata.normalize("NFC", out) == out  # portable canonical form
+
+
+def test_sanitize_byte_cap_keeps_valid_utf8_under_limit():
+    from sound_vault.ingest.package import sanitize_filename_component
+
+    out = sanitize_filename_component("🔥" * 100, max_len=100, max_bytes=40)
+    assert len(out.encode("utf-8")) <= 40
+    # Truncated on a whole-codepoint boundary (re-decodes cleanly, no replacement char).
+    assert out.encode("utf-8").decode("utf-8") == out
+    assert "�" not in out
+
+
+def test_portable_folder_name_stays_under_name_max_and_keeps_id_prefix():
+    from sound_vault.ingest.package import portable_folder_name
+
+    name = portable_folder_name("7209633324539693830", "🔥" * 80, "🎵" * 80)
+    assert len(name.encode("utf-8")) <= 200  # safely under the 255-byte NAME_MAX
+    assert name.startswith("7209633324539693830 - ")  # indexer globs on this prefix
+
+
+def test_build_human_filename_byte_capped():
+    name = build_human_filename("🔥" * 80, "🎵" * 80, "7209633324539693830", "ingested")
+    assert len(name.encode("utf-8")) <= 255
+    assert name.endswith(".m4a")
+
+
+def test_is_portable_filename_flags_copy_breakers():
+    from sound_vault.ingest.package import is_portable_filename
+
+    assert is_portable_filename("7209633324539693830 - sound - (~￣³￣)~")  # valid UTF-8 kaomoji
+    assert is_portable_filename("🔥 keep emoji")
+    assert not is_portable_filename("has​zero​width")  # Cf format chars (ZWSP)
+    assert not is_portable_filename("ends with ￴")  # Unicode non-character
+    assert not is_portable_filename("a" * 300)  # > 255 bytes
+
+
+def test_zwj_emoji_sequences_are_preserved():
+    """The Zero Width Joiner (U+200D, Cf) is load-bearing for emoji ZWJ sequences and
+    must NOT be stripped — dropping it splits 👩🏽‍🍳 into 👩🏽 + 🍳."""
+    from sound_vault.ingest.package import is_portable_filename, sanitize_filename_component
+
+    for emoji in ("👩🏽‍🍳", "🐈‍⬛", "❤️‍🔥", "🧚🏽‍♀️"):
+        assert "‍" in emoji  # sanity: these are real ZWJ sequences
+        assert sanitize_filename_component(emoji) == emoji  # untouched
+        assert is_portable_filename(emoji)  # not flagged for repair
+
+
 def test_package_handles_unicode_noncharacters_without_eilseq(tmp_path):
     from sound_vault.ingest.package import sanitize_filename_component
 

@@ -48,20 +48,60 @@ def _strip_notes(text: str) -> str:
     return text.strip()
 
 
-def sanitize_filename_component(value: str, max_len: int = 80) -> str:
-    out: list[str] = []
-    for ch in value or "":
-        if ch in '/\\:*?"<>|':
-            continue
-        # Drop control / format / surrogate / private-use / unassigned codepoints.
-        # This includes Unicode non-characters like U+FFF4 that the filesystem
-        # rejects with EILSEQ ("Illegal byte sequence"). Emoji (So) are kept.
-        if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
-            continue
-        cp = ord(ch)
-        if 0xFDD0 <= cp <= 0xFDEF or (cp & 0xFFFF) >= 0xFFFE:
-            continue  # explicit non-characters in every plane
-        out.append(ch)
+# NAME_MAX is 255 *bytes* on ext4 / XFS / NFS / SMB / FAT (not chars), so a name
+# well under any char cap can still overflow once it carries multibyte text (emoji,
+# CJK, kaomoji). Cap each path component well under that so the vault stays copyable
+# to those filesystems; the music_id prefix (the real identifier) always survives.
+_COMPONENT_MAX_BYTES = 200
+_DROPPED_CHARS = '/\\:*?"<>|'
+
+
+def _truncate_to_bytes(text: str, max_bytes: int) -> str:
+    """Trim whole characters off the end until the UTF-8 encoding fits max_bytes
+    (never splits a codepoint, which would itself produce an invalid name)."""
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    out = text
+    while out and len(out.encode("utf-8")) > max_bytes:
+        out = out[:-1]
+    return out.rstrip()
+
+
+def _is_droppable_char(ch: str) -> bool:
+    if ch in _DROPPED_CHARS:
+        return True
+    # Keep the Zero Width Joiner (U+200D): it's category Cf, but it's load-bearing for
+    # emoji ZWJ sequences (👩🏽‍🍳, 🐈‍⬛, ❤️‍🔥, 🧚🏽‍♀️) and is valid UTF-8 on every
+    # mainstream filesystem. Dropping it would silently split the user's emoji into
+    # their component glyphs — a data-mangling "fix", not a portability one.
+    if ch == "‍":
+        return False
+    # Control / format / surrogate / private-use / unassigned — these include
+    # Unicode non-characters like U+FFF4 that the filesystem rejects with EILSEQ,
+    # and invisibles like ZWSP/BOM/bidi controls that confuse other tools.
+    if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
+        return True
+    cp = ord(ch)
+    return 0xFDD0 <= cp <= 0xFDEF or (cp & 0xFFFF) >= 0xFFFE  # explicit non-chars in every plane
+
+
+def is_portable_filename(name: str, *, max_bytes: int = 255) -> bool:
+    """True if ``name`` is safe as a single path component on a foreign filesystem
+    (NFS/ext4/SMB/FAT): NFC-normalized, no dropped/illegal codepoints, and within the
+    byte-based NAME_MAX. Used to decide which legacy folders/files need repair."""
+    if not name or len(name.encode("utf-8")) > max_bytes:
+        return False
+    if unicodedata.normalize("NFC", name) != name:
+        return False
+    return not any(_is_droppable_char(ch) for ch in name)
+
+
+def sanitize_filename_component(value: str, max_len: int = 80, *, max_bytes: int | None = None) -> str:
+    # Normalize to NFC first. macOS hands filenames back NFD (decomposed); copying
+    # those to NFS/ext4 and then looking them up via an NFC path fails (ENOENT). NFC
+    # is the portable canonical form and is preserved on APFS.
+    value = unicodedata.normalize("NFC", value or "")
+    out = [ch for ch in value if not _is_droppable_char(ch)]  # emoji (So) are kept
     value = re.sub(r"\s+", " ", "".join(out)).strip()
     if len(value) > max_len:
         value = value[:max_len].rsplit(" ", 1)[0]
@@ -69,7 +109,24 @@ def sanitize_filename_component(value: str, max_len: int = 80) -> str:
     # mkdir/open will still raise EILSEQ on an exotic byte sequence.
     fs = sys.getfilesystemencoding() or "utf-8"
     value = value.encode(fs, "ignore").decode(fs, "ignore").strip()
+    if max_bytes is not None:
+        value = _truncate_to_bytes(value, max_bytes)
     return value or "untitled"
+
+
+def portable_folder_name(music_id: str, title: str, artist: str, *, max_bytes: int = _COMPONENT_MAX_BYTES) -> str:
+    """Build the ``<music_id> - <title> - <artist>`` folder name, byte-capped so the
+    whole component stays under NAME_MAX on any filesystem. The id + separators are
+    reserved first (so the indexer's ``<music_id> -*`` glob always matches); the
+    remaining byte budget is split between title and artist."""
+    music_id = str(music_id)
+    reserved = len(music_id.encode("utf-8")) + 2 * len(" - ".encode("utf-8"))
+    budget = max(16, max_bytes - reserved)
+    title_budget = max(8, budget * 2 // 3)
+    author_budget = max(8, budget - title_budget)
+    title_slug = sanitize_filename_component(_strip_notes(title) or "Unknown", 60, max_bytes=title_budget)
+    author_slug = sanitize_filename_component((artist or "Unknown").strip(), 40, max_bytes=author_budget)
+    return f"{music_id} - {title_slug} - {author_slug}"
 
 
 _PLATFORM_TAGS = {"tiktok": "TT", "instagram": "IG", "youtube": "YT"}
@@ -82,10 +139,12 @@ def _platform_tag(platform: str) -> str:
 def build_human_filename(
     title: str, artist: str, music_id: str, status: str, ext: str = "m4a", *, platform_tag: str = "TT"
 ) -> str:
-    title_clean = sanitize_filename_component(_strip_notes(title) or "Unknown", 60)
-    author_clean = sanitize_filename_component((artist or "Unknown").strip(), 40)
+    title_clean = sanitize_filename_component(_strip_notes(title) or "Unknown", 60, max_bytes=110)
+    author_clean = sanitize_filename_component((artist or "Unknown").strip(), 40, max_bytes=60)
     base = f"{title_clean} - {author_clean} [{platform_tag}-{music_id}] [{status}]"
-    return sanitize_filename_component(base, 140) + f".{ext}"
+    # Byte-cap the whole filename too (leaving room for the extension) so it stays a
+    # valid single component on NFS/ext4/SMB/FAT.
+    return sanitize_filename_component(base, 140, max_bytes=_COMPONENT_MAX_BYTES - 8) + f".{ext}"
 
 
 def ffmpeg_embed_tags(src: Path, dst: Path, tags: dict) -> None:
@@ -168,9 +227,7 @@ def package_sound(
     if not source_confidence:
         source_confidence = "yt_dlp" if info.get("title") else "url_only"
 
-    title_slug = sanitize_filename_component(_strip_notes(title) or "Unknown", 40)
-    author_slug = sanitize_filename_component((artist or "Unknown").strip(), 30)
-    folder_name = f"{music_id} - {title_slug} - {author_slug}"
+    folder_name = portable_folder_name(music_id, title, artist)
     rel_folder = f"sounds/{folder_name}"
     folder = vault_root / "sounds" / folder_name
     folder.mkdir(parents=True, exist_ok=True)

@@ -918,6 +918,31 @@ def test_transcript_refresh_survives_tab_switch(tmp_path, monkeypatch):
     assert refreshed == [True]
 
 
+def test_repair_portability_noop_when_all_names_clean(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    vault = tmp_path / "vault"
+    (vault / "sounds" / "123 - clean - artist").mkdir(parents=True)
+    (vault / "sounds" / "123 - clean - artist" / "metadata.json").write_text(
+        json.dumps({"tiktok_music_id": "123", "tiktok_visible_title": "clean", "tiktok_author_or_copyright": "artist"}),
+        encoding="utf-8",
+    )
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    app.processEvents()
+
+    shown: list[str] = []
+    monkeypatch.setattr(desktop_module.QMessageBox, "information", lambda *a, **k: shown.append(a[-1] if a else ""))
+    rebuilt: list[bool] = []
+    monkeypatch.setattr(window, "rebuild_index", lambda: rebuilt.append(True))
+
+    window.repair_folder_portability()
+
+    assert shown and "nothing to repair" in shown[0].lower()
+    assert rebuilt == []  # no rename → no reindex
+
+
 def test_eta_rolling_estimate_and_duration_format():
     from sound_vault.ui.desktop import SoundVaultWindow
 

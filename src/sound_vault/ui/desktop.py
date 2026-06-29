@@ -3061,6 +3061,7 @@ class SoundVaultWindow(QMainWindow):
         self._add_action(vault_menu, "Rebuild Index", self.rebuild_index)
         self._add_action(vault_menu, "Vault Info…", self.show_vault_info)
         vault_menu.addSeparator()
+        self._add_action(vault_menu, "Repair Names for Portability…", self.repair_folder_portability)
         self._add_action(vault_menu, "Setup Wizard…", self.run_onboarding)
 
         help_menu = bar.addMenu("&Help")
@@ -3068,6 +3069,75 @@ class SoundVaultWindow(QMainWindow):
         self._add_action(help_menu, "Open App Data Folder", self.open_data_folder)
         self._add_action(help_menu, "Open soundcache.io", lambda: self._open_url("https://soundcache.io"))
         self._add_action(help_menu, "About Sound Cache", self.show_about, role=QAction.MenuRole.AboutRole)
+
+    def repair_folder_portability(self) -> None:
+        """Make every sound folder/audio name safe to copy to NFS/ext4/SMB/FAT.
+
+        Runs a read-only scan first and only renames after the user confirms (this
+        rewrites their on-disk vault). The music-id prefix is always preserved, so
+        the indexer still finds every sound by its glob even before the reindex."""
+        from sound_vault.workers.folder_portability import repair_folder_portability as _repair
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            preview = _repair(self.vault_root, dry_run=True)
+        except OSError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Repair Names for Portability", f"Could not scan the vault:\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if preview.folders_renamed == 0 and preview.audio_renamed == 0:
+            QMessageBox.information(
+                self, "Repair Names for Portability",
+                f"Scanned {preview.scanned} sound folder(s). All names are already "
+                "filesystem-portable — nothing to repair. ✅",
+            )
+            return
+
+        detail = "\n".join(
+            f"• {r.old_folder}\n    → {r.new_folder}" for r in preview.repairs[:12] if r.folder_changed
+        )
+        if len(preview.repairs) > 12:
+            detail += f"\n…and {len(preview.repairs) - 12} more"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Repair Names for Portability")
+        box.setText(
+            f"{preview.folders_renamed} folder name(s) and {preview.audio_renamed} audio file(s) "
+            "contain characters that work on this Mac but can break when the vault is copied "
+            "to a network drive (NFS/SMB) or another filesystem.\n\n"
+            "Rename them to portable equivalents? The music-id prefix is preserved, so your "
+            "sounds stay intact and findable."
+        )
+        if detail:
+            box.setDetailedText(detail)
+        apply_btn = box.addButton("Rename", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not apply_btn:
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = _repair(self.vault_root, dry_run=False)
+        except OSError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Repair Names for Portability", f"Repair failed partway:\n{exc}")
+            self.rebuild_index()
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        write_event(
+            "gui.folder_portability_repaired",
+            folders=str(result.folders_renamed), audio=str(result.audio_renamed),
+        )
+        self.rebuild_index()  # stored paths changed; refresh the index from disk
+        self.statusBar().showMessage(
+            f"Renamed {result.folders_renamed} folder(s) + {result.audio_renamed} audio file(s) "
+            "for portability.", 8000,
+        )
 
     def _rebuild_recent_menu(self) -> None:
         menu = getattr(self, "recent_menu", None)
