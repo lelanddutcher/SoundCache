@@ -132,3 +132,38 @@ def test_external_progress_anchors_to_seek_offset(tmp_path, monkeypatch):
         assert window.progress_slider.value() >= 30_000
     finally:
         window.close()
+
+
+# --- duration probe fallback (scrubber works without metadata duration) -----
+
+
+def test_probe_audio_duration_uses_ffprobe_and_caches(tmp_path, monkeypatch):
+    import subprocess as _subprocess
+    from types import SimpleNamespace
+
+    window = _window(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(desktop_module.shutil, "which", lambda name: "/bin/ffprobe" if name == "ffprobe" else None)
+        runs = []
+
+        def fake_run(cmd, **kwargs):
+            runs.append(cmd)
+            return SimpleNamespace(stdout="12.345\n", returncode=0)
+
+        monkeypatch.setattr(desktop_module.subprocess, "run", fake_run)
+        target = tmp_path / "clip.m4a"
+        assert window._probe_audio_duration_ms(target) == 12_345
+        # Cached: a second call must not re-run ffprobe.
+        assert window._probe_audio_duration_ms(target) == 12_345
+        assert len(runs) == 1
+    finally:
+        window.close()
+
+
+def test_probe_audio_duration_zero_when_ffprobe_missing(tmp_path, monkeypatch):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(desktop_module.shutil, "which", lambda name: None)
+        assert window._probe_audio_duration_ms(tmp_path / "clip.m4a") == 0
+    finally:
+        window.close()

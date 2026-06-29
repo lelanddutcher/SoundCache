@@ -1573,6 +1573,10 @@ class SoundVaultWindow(QMainWindow):
         # can honour a start offset (ffplay yes, afplay no).
         self._external_audio_base_offset_ms: int = 0
         self._external_seek_supported: bool = False
+        # Probed audio durations keyed by file path — so the scrubber has a real
+        # range (and a correct "/ total" time) even when the sound's metadata never
+        # captured duration_seconds. Cached so re-playing a sound is instant.
+        self._duration_probe_cache: dict[str, int] = {}
         self.playing_music_id: str | None = None
         self._external_audio_timer = QTimer(self)
         self._external_audio_timer.setInterval(300)
@@ -2590,7 +2594,13 @@ class SoundVaultWindow(QMainWindow):
         self._external_audio_started_at = time.monotonic()
         self._external_audio_base_offset_ms = start_ms
         self._external_seek_supported = seek_supported
-        self._external_audio_duration_ms = self._duration_ms_for_record(self.current_preview_record)
+        record = self.current_preview_record
+        duration_ms = self._duration_ms_for_record(record) if record is not None else 0
+        if duration_ms <= 0:
+            # No duration in metadata (common for bulk imports) — probe the file so
+            # the scrubber is usable and the timestamp shows the real total.
+            duration_ms = self._probe_audio_duration_ms(target)
+        self._external_audio_duration_ms = duration_ms
         if self._external_audio_duration_ms > 0:
             self.progress_slider.setRange(0, self._external_audio_duration_ms)
             self.progress_slider.setValue(min(start_ms, self._external_audio_duration_ms))
@@ -4023,6 +4033,29 @@ class SoundVaultWindow(QMainWindow):
             return 0
         return max(0, int(record.duration_seconds * 1000))
 
+    def _probe_audio_duration_ms(self, target: Path) -> int:
+        """Read the true duration of an audio file via ffprobe (bundled with the same
+        ffmpeg that provides ffplay), cached per path. Lets the scrubber work even when
+        the sound's metadata never recorded a duration. Returns 0 if unavailable."""
+        key = str(target)
+        cached = self._duration_probe_cache.get(key)
+        if cached is not None:
+            return cached
+        probed = 0
+        ensure_media_tools_on_path()  # a Finder/launchd launch gets a stripped PATH
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is not None:
+            try:
+                out = subprocess.run(
+                    [ffprobe, "-v", "quiet", "-of", "csv=p=0", "-show_entries", "format=duration", key],
+                    capture_output=True, text=True, timeout=5, check=False,
+                ).stdout.strip()
+                probed = max(0, int(float(out) * 1000)) if out else 0
+            except (OSError, ValueError, subprocess.SubprocessError):
+                probed = 0
+        self._duration_probe_cache[key] = probed
+        return probed
+
     @staticmethod
     def _format_seconds(value: float) -> str:
         seconds = max(0, int(round(value)))
@@ -4170,7 +4203,10 @@ class SoundVaultWindow(QMainWindow):
         self._import_worker.itemIngested.connect(self._on_item_ingested)
         self._ensure_transcribe_queue_worker()
         self._import_worker.start()
-        self.statusBar().showMessage("Downloading + importing shared sounds…")
+        # The bottom-left progress widget shows live status now; a persistent
+        # showMessage here would obscure it (status-bar messages hide left widgets).
+        self.import_progress_label.setText("Starting import…")
+        self._import_progress_container.setVisible(True)
         self._import_progress_timer.start()
         self._tick_import_progress()
 
@@ -4333,13 +4369,14 @@ class SoundVaultWindow(QMainWindow):
     # ---- global import progress bar + ETA ----
 
     def _setup_import_progress(self) -> None:
-        """A permanent progress widget pinned to the status bar: 'Importing X / Y · ~ETA'.
-        Driven off the file-backed inbox counts so it reflects true remaining work and
-        survives restarts. Hidden until an import is active."""
+        """The global import progress: 'Importing X / Y · ~ETA' + a bar, anchored at the
+        bottom-LEFT alongside the other status-bar output (addWidget = left side, not the
+        far-right permanent slot). Driven off the file-backed inbox counts so it reflects
+        true remaining work and survives restarts. Hidden until an import is active."""
         container = QWidget()
         container.setObjectName("importProgress")
         row = QHBoxLayout(container)
-        row.setContentsMargins(8, 0, 8, 0)
+        row.setContentsMargins(2, 0, 8, 0)
         row.setSpacing(10)
         self.import_progress_label = QLabel("")
         self.import_progress_label.setObjectName("importProgressLabel")
@@ -4350,9 +4387,12 @@ class SoundVaultWindow(QMainWindow):
         self.import_progress_bar.setFixedHeight(12)
         row.addWidget(self.import_progress_label)
         row.addWidget(self.import_progress_bar)
+        row.addStretch(1)
         self._import_progress_container = container
         container.setVisible(False)
-        self.statusBar().addPermanentWidget(container, 0)
+        # Left side (next to where showMessage() statuses appear), not the far-right
+        # permanent slot, so the import status sits with the other bottom-left output.
+        self.statusBar().addWidget(container, 1)
 
     def _tick_import_progress(self) -> None:
         try:
