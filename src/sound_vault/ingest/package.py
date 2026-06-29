@@ -16,6 +16,8 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import unicodedata
 from typing import Any, Callable
 
 # tagger(src, dst, tags) writes a tagged copy of src at dst
@@ -45,11 +47,26 @@ def _strip_notes(text: str) -> str:
 
 
 def sanitize_filename_component(value: str, max_len: int = 80) -> str:
-    value = re.sub(r'[/:*?"<>|]', "", value or "")
-    value = re.sub(r"[\x00-\x1f\x7f]", "", value)
-    value = re.sub(r"\s+", " ", value).strip()
+    out: list[str] = []
+    for ch in value or "":
+        if ch in '/\\:*?"<>|':
+            continue
+        # Drop control / format / surrogate / private-use / unassigned codepoints.
+        # This includes Unicode non-characters like U+FFF4 that the filesystem
+        # rejects with EILSEQ ("Illegal byte sequence"). Emoji (So) are kept.
+        if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
+            continue
+        cp = ord(ch)
+        if 0xFDD0 <= cp <= 0xFDEF or (cp & 0xFFFF) >= 0xFFFE:
+            continue  # explicit non-characters in every plane
+        out.append(ch)
+    value = re.sub(r"\s+", " ", "".join(out)).strip()
     if len(value) > max_len:
         value = value[:max_len].rsplit(" ", 1)[0]
+    # Safety net: the result MUST round-trip through the filesystem encoding, or
+    # mkdir/open will still raise EILSEQ on an exotic byte sequence.
+    fs = sys.getfilesystemencoding() or "utf-8"
+    value = value.encode(fs, "ignore").decode(fs, "ignore").strip()
     return value or "untitled"
 
 

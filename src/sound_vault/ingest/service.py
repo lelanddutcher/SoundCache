@@ -383,9 +383,15 @@ class IngestService:
     def drain_inbox(
         self, store: ShortcutInboxStore, *, max_attempts: int = 3
     ) -> list[tuple[ShortcutInboxItem, IngestOutcome]]:
+        from sound_vault.diagnostics import exception_fields, write_event
+
         outcomes: list[tuple[ShortcutInboxItem, IngestOutcome]] = []
         for item in store.pending():
-            outcome = self.ingest_url(item.url, source=item.source, note=getattr(item, "note", "") or "")
+            try:
+                outcome = self.ingest_url(item.url, source=item.source, note=getattr(item, "note", "") or "")
+            except Exception as exc:  # noqa: BLE001 - one bad item must never abort the batch
+                write_event("ingest.url_exception", url=item.url, **exception_fields(exc))
+                outcome = IngestOutcome(status="failed", url=item.url, reason=f"{type(exc).__name__}: {exc}")
             if outcome.status in ("ingested", "duplicate"):
                 store.mark_imported(item.id)
             else:

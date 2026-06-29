@@ -82,6 +82,25 @@ def test_package_sanitizes_illegal_chars(tmp_path):
         assert bad not in name
 
 
+def test_package_handles_unicode_noncharacters_without_eilseq(tmp_path):
+    from sound_vault.ingest.package import sanitize_filename_component
+
+    # U+FFF4 (unassigned non-character) + a zero-width char caused EILSEQ on mkdir.
+    assert sanitize_filename_component("￴") == "untitled"
+    assert sanitize_filename_component("zero​width") == "zerowidth"
+    assert sanitize_filename_component("🔥 keep emoji") == "🔥 keep emoji"  # emoji preserved
+    pkg = package_sound(
+        vault_root=tmp_path,
+        music_id="7013196724253280258",
+        title="sound",
+        artist="￴",  # the exact artist that broke the user's import
+        audio_path=None,
+        now_iso="t",
+    )
+    assert pkg.folder.exists()  # mkdir succeeded (no Illegal byte sequence)
+    assert "￴" not in pkg.folder.name
+
+
 def test_packaged_sound_is_indexable(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
