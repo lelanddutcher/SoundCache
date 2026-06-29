@@ -111,6 +111,31 @@ class AppSettings:
         self._data["vault_root"] = str(vault_root.expanduser())
         self._write()
 
+    def vault_root_is_set(self) -> bool:
+        """True once a vault has been explicitly chosen (vs. the implicit default).
+        Used to tell a brand-new install apart from a returning user."""
+        return bool(self._data.get("vault_root"))
+
+    def recent_vaults(self) -> list[str]:
+        values = self._data.get("recent_vaults")
+        if not isinstance(values, list):
+            return []
+        return [str(v) for v in values if isinstance(v, str) and v.strip()]
+
+    def add_recent_vault(self, vault_root: Path, *, limit: int = 8) -> None:
+        path = str(Path(vault_root).expanduser())
+        recents = [p for p in self.recent_vaults() if p != path]
+        recents.insert(0, path)
+        self._data["recent_vaults"] = recents[:limit]
+        self._write()
+
+    def onboarding_complete(self) -> bool:
+        return bool(self._data.get("onboarding_complete"))
+
+    def set_onboarding_complete(self, complete: bool = True) -> None:
+        self._data["onboarding_complete"] = bool(complete)
+        self._write()
+
     def relay_base_url(self) -> str:
         return str(self._data.get("relay_base_url") or DEFAULT_RELAY_BASE_URL)
 

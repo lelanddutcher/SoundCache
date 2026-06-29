@@ -15,4 +15,6 @@ def _isolate_app_data(tmp_path_factory):
     # setdefault so an explicit override in the environment still wins.
     os.environ.setdefault("SOUND_VAULT_DATA_DIR", str(base / "data"))
     os.environ.setdefault("SOUND_VAULT_CONFIG_DIR", str(base / "config"))
+    # Never pop the first-run setup wizard during headless GUI construction tests.
+    os.environ.setdefault("SOUND_VAULT_DISABLE_ONBOARDING", "1")
     yield

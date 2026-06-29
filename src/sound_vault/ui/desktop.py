@@ -1239,6 +1239,175 @@ class _PollWorker(QThread):
             self.pollFinished.emit(None, exc)
 
 
+class OnboardingDialog(QDialog):
+    """First-run setup wizard: welcome → choose a vault location → connect TikTok
+    (optional) → done. The chosen vault is read back via chosen_vault()."""
+
+    def __init__(self, *, default_vault: Path, connect_tiktok, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Set up Sound Cache")
+        self.setMinimumSize(580, 420)
+        self._connect_tiktok = connect_tiktok
+        self._chosen_vault = Path(default_vault)
+
+        outer = QVBoxLayout(self)
+        outer.setSpacing(14)
+        self.stack = QStackedWidget()
+        outer.addWidget(self.stack, 1)
+        self.stack.addWidget(self._welcome_page())
+        self.stack.addWidget(self._vault_page(default_vault))
+        self.stack.addWidget(self._tiktok_page())
+        self.stack.addWidget(self._done_page())
+
+        row = QHBoxLayout()
+        self.back_btn = QPushButton("Back")
+        self.back_btn.clicked.connect(self._go_back)
+        self.skip_btn = QPushButton("Skip setup")
+        self.skip_btn.clicked.connect(self.reject)
+        self.next_btn = QPushButton("Next →")
+        self.next_btn.setObjectName("primaryButton")
+        self.next_btn.clicked.connect(self._go_next)
+        row.addWidget(self.back_btn)
+        row.addWidget(self.skip_btn)
+        row.addStretch(1)
+        row.addWidget(self.next_btn)
+        outer.addLayout(row)
+
+        self.stack.currentChanged.connect(self._sync_buttons)
+        self._sync_buttons()
+
+    def _title(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("previewTitle")
+        return lbl
+
+    def _body(self, html: str) -> QLabel:
+        lbl = QLabel(html)
+        lbl.setWordWrap(True)
+        lbl.setObjectName("onboardBody")
+        return lbl
+
+    def _welcome_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(10)
+        lay.addWidget(self._title("Welcome to Sound Cache 🎧"))
+        lay.addWidget(self._body(
+            "Sound Cache is a <b>local-first vault</b> for the sounds you save — the real "
+            "audio, organized in a folder you own.<br><br>"
+            "No login. No cloud. Just files on your machine.<br><br>"
+            "This quick setup picks where your vault lives and (optionally) connects TikTok "
+            "so Sound Cache can fetch real audio."))
+        lay.addStretch(1)
+        return page
+
+    def _vault_page(self, default_vault: Path) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(10)
+        lay.addWidget(self._title("Where should your vault live?"))
+        lay.addWidget(self._body(
+            "Pick a folder for your sounds. Everything Sound Cache saves goes here — "
+            "back it up, sync it, or move it later; it's just files.<br><br>"
+            "Tip: an external or network drive works great for a large library."))
+        row_w = QWidget()
+        row = QHBoxLayout(row_w)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.vault_edit = QLineEdit(str(default_vault))
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_vault)
+        row.addWidget(self.vault_edit, 1)
+        row.addWidget(browse)
+        lay.addWidget(row_w)
+        self.vault_hint = QLabel("")
+        self.vault_hint.setObjectName("muted")
+        self.vault_hint.setWordWrap(True)
+        lay.addWidget(self.vault_hint)
+        lay.addStretch(1)
+        self.vault_edit.textChanged.connect(self._update_vault_hint)
+        self._update_vault_hint()
+        return page
+
+    def _tiktok_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(10)
+        lay.addWidget(self._title("Connect TikTok (optional)"))
+        lay.addWidget(self._body(
+            "To save the <b>real audio</b> of a TikTok sound, Sound Cache borrows your "
+            "logged-in TikTok session — you sign in on TikTok's own page, and only the "
+            "session is stored, only on this Mac.<br><br>"
+            "You can skip this and do it later from <b>Vault → Connect TikTok</b>. Sound packs "
+            "and pasted links still queue without it — they just need a session to fetch audio."))
+        connect_btn = QPushButton("Connect TikTok now…")
+        connect_btn.setObjectName("primaryButton")
+        connect_btn.clicked.connect(lambda: self._connect_tiktok())
+        lay.addWidget(connect_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        lay.addStretch(1)
+        return page
+
+    def _done_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(10)
+        lay.addWidget(self._title("You're all set ✦"))
+        lay.addWidget(self._body(
+            "Add sounds any way you like:<br><br>"
+            "• <b>Paste a link</b> at soundcache.io/get, or share from the iOS shortcut.<br>"
+            "• <b>Import a sound pack</b> — File → Import Sound Pack…<br>"
+            "• <b>Import a TikTok data export</b> — File → Import TikTok Export…<br><br>"
+            "Your library lives in the folder you chose. Hit Finish to open it."))
+        lay.addStretch(1)
+        return page
+
+    def _browse_vault(self) -> None:
+        start = self.vault_edit.text().strip() or str(Path.home())
+        selected = QFileDialog.getExistingDirectory(self, "Choose a folder for your vault", start)
+        if selected:
+            self.vault_edit.setText(selected)
+
+    def _update_vault_hint(self) -> None:
+        text = self.vault_edit.text().strip()
+        if not text:
+            self.vault_hint.setText("Choose a folder for your sounds.")
+            return
+        path = Path(text).expanduser()
+        try:
+            has_vault = (path / "catalog").exists() or (path.exists() and any(path.glob("sounds/*")))
+        except OSError:
+            has_vault = False
+        if has_vault:
+            self.vault_hint.setText("Opens the existing vault in this folder.")
+        elif path.exists():
+            self.vault_hint.setText("Creates a new vault in this folder.")
+        else:
+            self.vault_hint.setText("This folder will be created.")
+
+    def _sync_buttons(self) -> None:
+        idx = self.stack.currentIndex()
+        self.back_btn.setEnabled(idx > 0)
+        self.next_btn.setText("Finish" if idx == self.stack.count() - 1 else "Next →")
+
+    def _go_back(self) -> None:
+        self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
+
+    def _go_next(self) -> None:
+        idx = self.stack.currentIndex()
+        if idx == 1:  # leaving the vault page — validate + record the choice
+            text = self.vault_edit.text().strip()
+            if not text:
+                QMessageBox.warning(self, "Pick a folder", "Choose where your vault should live.")
+                return
+            self._chosen_vault = Path(text).expanduser()
+        if idx == self.stack.count() - 1:
+            self.accept()
+            return
+        self.stack.setCurrentIndex(idx + 1)
+
+    def chosen_vault(self) -> Path:
+        return self._chosen_vault
+
+
 class SoundVaultWindow(QMainWindow):
     previewHydrated = Signal(int, str, object)
 
@@ -1318,6 +1487,7 @@ class SoundVaultWindow(QMainWindow):
         self._preview_token = 0
         self.previewHydrated.connect(self._apply_hydrated_preview)
         self._build_ui()
+        self._build_menu_bar()
         self.setup_keyboard_shortcuts()
         self.restore_library_search_state()
         self.update_pairing_status()
@@ -1330,6 +1500,7 @@ class SoundVaultWindow(QMainWindow):
         else:
             self.rebuild_index()
         self._start_relay_auto_poll()
+        self._maybe_run_onboarding()
         self._maybe_prompt_tiktok_connect()
 
     def _maybe_prompt_tiktok_connect(self) -> None:
@@ -2594,12 +2765,49 @@ class SoundVaultWindow(QMainWindow):
             self.refresh_worker_status()
 
     def choose_vault(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Choose Sound Cache", str(self.vault_root))
+        self.open_vault()
+
+    def open_vault(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Open a Sound Cache vault", str(self.vault_root)
+        )
+        if selected:
+            self._switch_to_vault(Path(selected))
+
+    def new_vault(self) -> None:
+        start = str(self.vault_root.parent if self.vault_root.parent.exists() else Path.home())
+        selected = QFileDialog.getExistingDirectory(
+            self, "Choose or create an empty folder for the new vault", start
+        )
         if not selected:
             return
-        self.vault_root = resolve_vault_root(Path(selected))
+        target = Path(selected)
+        # If the chosen folder already holds a vault, treat it as opening that one.
+        if (target / "catalog").exists() or any(target.glob("sounds/*")):
+            resp = QMessageBox.question(
+                self, "Folder already has sounds",
+                f"“{target.name}” already contains a Sound Cache vault.\n\nOpen it instead?",
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel,
+            )
+            if resp != QMessageBox.StandardButton.Open:
+                return
+        self._switch_to_vault(target)
+
+    def open_recent_vault(self, path: str) -> None:
+        target = Path(path)
+        if not target.exists():
+            QMessageBox.warning(self, "Vault not found", f"That vault no longer exists:\n{path}")
+            return
+        self._switch_to_vault(target)
+
+    def _switch_to_vault(self, path: Path) -> None:
+        """Point the app at a vault directory: persist it, rebind the view model
+        (tearing down the old executor), refresh the UI, and rebuild the index."""
+        self.vault_root = resolve_vault_root(Path(path))
         self.settings.set_vault_root(self.vault_root)
-        self.vault_label.setText(str(self.vault_root))
+        self.settings.add_recent_vault(self.vault_root)
+        if hasattr(self, "vault_label"):
+            self.vault_label.setText(str(self.vault_root))
         # Tear down the previous view model's executor before rebinding so its
         # worker thread doesn't leak across vault switches.
         old_vm = getattr(self, "vm", None)
@@ -2611,9 +2819,178 @@ class SoundVaultWindow(QMainWindow):
             load_sidecars=False,
             sidecar_mode="summary",
         )
+        self.setWindowTitle(f"Sound Cache — {self.vault_root.name}")
+        if hasattr(self, "recent_menu"):
+            self._rebuild_recent_menu()
         self.refresh_library_sidebar()
         self.reset_library_filters()
         self.rebuild_index()
+        write_event("gui.vault_switched", vault_root=str(self.vault_root))
+
+    # ----- application menu bar -------------------------------------------------
+    def _add_action(self, menu, label: str, slot, shortcut: str | None = None, *, role=None):
+        action = QAction(label, self)
+        action.triggered.connect(lambda _checked=False: slot())
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+        if role is not None:
+            action.setMenuRole(role)
+        menu.addAction(action)
+        return action
+
+    def _build_menu_bar(self) -> None:
+        bar = self.menuBar()
+        bar.clear()
+
+        file_menu = bar.addMenu("&File")
+        self._add_action(file_menu, "New Vault…", self.new_vault, "Ctrl+Shift+N")
+        self._add_action(file_menu, "Open Vault…", self.open_vault, "Ctrl+O")
+        self.recent_menu = file_menu.addMenu("Open Recent")
+        self._rebuild_recent_menu()
+        file_menu.addSeparator()
+        self._add_action(file_menu, "Import Sound Pack…", self.import_sound_pack)
+        self._add_action(file_menu, "Import TikTok Export…", self.import_tiktok_favorite_sounds_export)
+        file_menu.addSeparator()
+        self._add_action(file_menu, "Reveal Vault in Finder", self.reveal_vault_in_finder, "Ctrl+Shift+R")
+        self._add_action(file_menu, "Open App Data Folder", self.open_data_folder)
+        file_menu.addSeparator()
+        self._add_action(file_menu, "Settings…", lambda: self.show_view("settings"), "Ctrl+,",
+                         role=QAction.MenuRole.PreferencesRole)
+        self._add_action(file_menu, "Quit Sound Cache", self.close, "Ctrl+Q", role=QAction.MenuRole.QuitRole)
+
+        edit_menu = bar.addMenu("&Edit")
+        self._add_action(edit_menu, "Undo", lambda: self._edit_route("undo"), "Ctrl+Z")
+        self._add_action(edit_menu, "Redo", lambda: self._edit_route("redo"), "Ctrl+Shift+Z")
+        edit_menu.addSeparator()
+        self._add_action(edit_menu, "Cut", lambda: self._edit_route("cut"), "Ctrl+X")
+        self._add_action(edit_menu, "Copy", lambda: self._edit_route("copy"), "Ctrl+C")
+        self._add_action(edit_menu, "Paste", lambda: self._edit_route("paste"), "Ctrl+V")
+        self._add_action(edit_menu, "Select All", lambda: self._edit_route("selectAll"), "Ctrl+A")
+        edit_menu.addSeparator()
+        self._add_action(edit_menu, "Find / Search", self.focus_search, "Ctrl+F")
+
+        view_menu = bar.addMenu("&View")
+        self._add_action(view_menu, "Library", lambda: self.show_view("library"), "Ctrl+1")
+        self._add_action(view_menu, "Shortcut Inbox", lambda: self.show_view("inbox"), "Ctrl+2")
+        self._add_action(view_menu, "Review Queues", lambda: self.show_view("review"), "Ctrl+3")
+        self._add_action(view_menu, "Duplicate Review", lambda: self.show_view("dedupe"), "Ctrl+4")
+        self._add_action(view_menu, "Worker Status", lambda: self.show_view("worker"), "Ctrl+5")
+        view_menu.addSeparator()
+        filter_menu = view_menu.addMenu("Filter Library")
+        for label, value in (
+            ("All sounds", "all"),
+            ("★ Favorites", "favorites"),
+            ("Not transcribed yet", "smart:needs_transcript"),
+            ("Missing audio", "smart:missing_audio"),
+            ("100K+ uses", "smart:high_popularity"),
+            ("Has example videos", "smart:has_videos"),
+        ):
+            self._add_action(filter_menu, label, lambda v=value: self.apply_library_filter(v))
+        view_menu.addSeparator()
+        self._add_action(view_menu, "Rebuild Index", self.rebuild_index, "Ctrl+R")
+
+        vault_menu = bar.addMenu("&Vault")
+        self._add_action(vault_menu, "Connect TikTok…", self.open_tiktok_connect)
+        self._add_action(vault_menu, "Rebuild Index", self.rebuild_index)
+        self._add_action(vault_menu, "Vault Info…", self.show_vault_info)
+        vault_menu.addSeparator()
+        self._add_action(vault_menu, "Setup Wizard…", self.run_onboarding)
+
+        help_menu = bar.addMenu("&Help")
+        self._add_action(help_menu, "Welcome / Setup Wizard…", self.run_onboarding)
+        self._add_action(help_menu, "Open App Data Folder", self.open_data_folder)
+        self._add_action(help_menu, "Open soundcache.io", lambda: self._open_url("https://soundcache.io"))
+        self._add_action(help_menu, "About Sound Cache", self.show_about, role=QAction.MenuRole.AboutRole)
+
+    def _rebuild_recent_menu(self) -> None:
+        menu = getattr(self, "recent_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        recents = [p for p in self.settings.recent_vaults() if p != str(self.vault_root)]
+        if not recents:
+            empty = menu.addAction("No recent vaults")
+            empty.setEnabled(False)
+            return
+        for path in recents:
+            self._add_action(menu, path, lambda p=path: self.open_recent_vault(p))
+
+    def _edit_route(self, method: str) -> None:
+        """Route standard Edit actions to the focused widget (text fields, notes,
+        table) — the same widgets handle these natively, so the menu just exposes them."""
+        widget = QApplication.focusWidget()
+        handler = getattr(widget, method, None)
+        if callable(handler):
+            handler()
+
+    def reveal_vault_in_finder(self) -> None:
+        if not self._vault_available():
+            QMessageBox.warning(self, "Vault offline", "The vault folder isn't reachable right now.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.vault_root)))
+
+    def open_data_folder(self) -> None:
+        from sound_vault.settings import user_data_dir
+
+        data_dir = user_data_dir()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir)))
+
+    def _open_url(self, url: str) -> None:
+        QDesktopServices.openUrl(QUrl(url))
+
+    def show_vault_info(self) -> None:
+        try:
+            stats = self.vm.stats_text()
+        except Exception:  # noqa: BLE001 - display-only
+            stats = "unavailable"
+        QMessageBox.information(
+            self,
+            "Vault info",
+            "\n".join(
+                [
+                    f"Vault: {self.vault_root}",
+                    f"Reachable: {'yes' if self._vault_available() else 'no (offline)'}",
+                    f"Index: {index_path_for_vault(self.vault_root)}",
+                    f"Inbox queue: {inbox_path_for_vault(self.vault_root)}",
+                    "",
+                    stats,
+                ]
+            ),
+        )
+
+    def show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About Sound Cache",
+            "<b>Sound Cache</b><br>A local-first vault for the sounds you save.<br><br>"
+            "No login, no cloud — just a folder that's yours.<br>"
+            "<a href='https://soundcache.io'>soundcache.io</a>",
+        )
+
+    def run_onboarding(self) -> None:
+        dialog = OnboardingDialog(
+            default_vault=self.vault_root,
+            connect_tiktok=self.open_tiktok_connect,
+            parent=self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            chosen = dialog.chosen_vault()
+            if chosen and chosen != self.vault_root:
+                self._switch_to_vault(chosen)
+        self.settings.set_onboarding_complete(True)
+
+    def _maybe_run_onboarding(self) -> None:
+        """Show the setup wizard once on a brand-new install (no vault configured).
+        Returning users (who already have a vault set) skip straight in."""
+        if _env_flag("SOUND_VAULT_DISABLE_ONBOARDING"):
+            return
+        if self.settings.onboarding_complete():
+            return
+        if self.settings.vault_root_is_set():
+            self.settings.set_onboarding_complete(True)  # existing user — don't nag
+            return
+        QTimer.singleShot(300, self.run_onboarding)
 
     def _vault_available(self) -> bool:
         """True if the vault root is reachable. Guarded so a stale/disconnected

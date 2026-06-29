@@ -217,7 +217,8 @@ def test_desktop_debounces_search_and_preview_metadata_is_selectable():
 def test_desktop_normalizes_vault_picker_and_resets_filters_on_new_vault():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
-    assert "resolve_vault_root(Path(selected))" in source
+    assert "resolve_vault_root(Path(path))" in source  # normalized in _switch_to_vault
+    assert "def _switch_to_vault" in source
     assert "self.reset_library_filters()" in source
     assert "def reset_library_filters" in source
 
