@@ -961,6 +961,64 @@ def test_backlog_transcription_enqueues_untranscribed_sounds(tmp_path, monkeypat
     assert len(enq) == 2
 
 
+def test_queue_worker_enqueue_dedups():
+    from sound_vault.ui.desktop import _TranscriptionQueueWorker
+
+    w = _TranscriptionQueueWorker(object())
+    assert w.enqueue("1", "/f", "/a") is True
+    assert w.enqueue("1", "/f", "/a") is False  # same id already queued this session
+    assert w.enqueue("2", "/f", "/a") is True
+
+
+def test_transcription_enrichment_cycle_dedups_across_runs(tmp_path, monkeypatch):
+    """The recurring cycle re-checks for missing transcripts but must not re-queue
+    sounds already in flight (the worker dedups)."""
+    from pathlib import Path
+
+    from sound_vault.ingest.package import package_sound
+
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    monkeypatch.delenv("SOUND_VAULT_DISABLE_TRANSCRIBE", raising=False)
+    vault = tmp_path / "vault"
+    (vault / "catalog").mkdir(parents=True)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for i in range(2):
+        src = raw / f"{i}.m4a"
+        src.write_bytes(b"\x00audio")
+        package_sound(
+            vault_root=vault, music_id=str(i), title=f"t{i}", artist="a", audio_path=src,
+            tagger=lambda s, d, t: Path(d).write_bytes(Path(s).read_bytes()), now_iso="t",
+        )
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    app.processEvents()
+    window.vm.rebuild_index()
+
+    class DedupWorker:
+        def __init__(self):
+            self.seen: set[str] = set()
+            self.attempts = 0
+
+        def enqueue(self, mid, folder, audio):
+            self.attempts += 1
+            if mid in self.seen:
+                return False
+            self.seen.add(mid)
+            return True
+
+    worker = DedupWorker()
+    monkeypatch.setattr(window, "_ensure_transcribe_queue_worker", lambda: worker)
+
+    first = window._enqueue_pending_transcriptions(announce=False)
+    second = window._run_transcription_cycle() or window._enqueue_pending_transcriptions(announce=False)
+    assert first == 2  # first pass queues both pending sounds
+    # The cycle re-checked (still pending on disk) but the worker deduped → 0 new.
+    assert window._enqueue_pending_transcriptions(announce=False) == 0
+
+
 def test_repair_portability_noop_when_all_names_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))

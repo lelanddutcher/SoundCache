@@ -1264,11 +1264,21 @@ class _TranscriptionQueueWorker(QThread):
         self._counter_lock = threading.Lock()
         self._enqueued = 0
         self._done = 0
+        # Dedup so the live import pipeline, the initial sweep, AND the recurring
+        # enrichment cycle can all enqueue freely without piling up the same id.
+        self._seen: set[str] = set()
 
-    def enqueue(self, music_id: str, folder: str, audio: str) -> None:
+    def enqueue(self, music_id: str, folder: str, audio: str) -> bool:
+        """Queue a sound for transcription. Returns False if this id is already
+        queued/processed this session (so callers can count only the NEW work)."""
+        mid = str(music_id)
         with self._counter_lock:
+            if mid in self._seen:
+                return False
+            self._seen.add(mid)
             self._enqueued += 1
-        self._queue.put((str(music_id), str(folder), str(audio)))
+        self._queue.put((mid, str(folder), str(audio)))
+        return True
 
     def run(self) -> None:
         transcriber = None
@@ -1563,6 +1573,11 @@ class SoundVaultWindow(QMainWindow):
         self._import_progress_timer.setInterval(1000)
         self._import_progress_timer.timeout.connect(self._tick_import_progress)
         self._import_rate_samples: "deque[tuple[float, int]]" = deque(maxlen=40)
+        # Recurring transcription-enrichment cycle: re-check for sounds missing a
+        # transcript and queue them (started after the first index build).
+        self._transcription_cycle_timer = QTimer(self)
+        self._transcription_cycle_timer.setInterval(180_000)  # every 3 min
+        self._transcription_cycle_timer.timeout.connect(self._run_transcription_cycle)
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(80)
         self._search_timer.setSingleShot(True)
@@ -2848,7 +2863,7 @@ class SoundVaultWindow(QMainWindow):
         self._stop_external_audio()
         for timer_name in (
             "_relay_poll_timer", "_index_timer", "_worker_timer",
-            "_import_progress_timer", "_transcript_refresh_timer",
+            "_import_progress_timer", "_transcript_refresh_timer", "_transcription_cycle_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
@@ -4439,33 +4454,46 @@ class SoundVaultWindow(QMainWindow):
         if worker is not None and worker.isRunning():
             worker.enqueue(music_id, folder, audio)
 
-    def _start_backlog_transcription(self, *, force: bool = False) -> None:
-        """Feed every already-downloaded sound that still lacks a transcript into the
-        queue worker, so the backlog drains in the background (concurrently with any
-        import). Auto-runs once per session after the index is ready; the Vault menu
-        action re-runs it on demand. Idempotent — transcribe_one skips sounds that
-        already have a transcript."""
-        if not force and getattr(self, "_backlog_transcription_started", False):
-            return
+    def _enqueue_pending_transcriptions(self, *, announce: bool) -> int:
+        """Scan for sounds with audio but no transcript and queue the NEW ones onto the
+        transcription worker (which dedups, so this is safe to call repeatedly — it's
+        the heart of the enrichment cycle). Returns how many new sounds were queued."""
         if _env_flag("SOUND_VAULT_DISABLE_TRANSCRIBE"):
-            return
+            return 0
         worker = self._ensure_transcribe_queue_worker()
         if worker is None:
-            if force:
+            if announce:
                 self.statusBar().showMessage("Transcription engine unavailable (faster-whisper not installed).", 6000)
+            return 0
+        queued = 0
+        for music_id, folder, audio in self.vm.transcription_targets():
+            if worker.enqueue(str(music_id), str(folder), str(audio)):
+                queued += 1
+        if queued:
+            write_event("gui.transcription_enrichment_queued", count=str(queued))
+            self.statusBar().showMessage(
+                f"Transcribing {queued:,} sound(s) in the background — this can take a while.", 6000
+            )
+        elif announce:
+            self.statusBar().showMessage("All sounds already transcribed. ✅", 5000)
+        return queued
+
+    def _start_backlog_transcription(self, *, force: bool = False) -> None:
+        """One-time sweep after the index is ready (and the Vault menu trigger). The
+        recurring check-and-fix is the enrichment cycle (_run_transcription_cycle)."""
+        if not force and getattr(self, "_backlog_transcription_started", False):
             return
-        targets = self.vm.transcription_targets()  # all pending across the vault
         self._backlog_transcription_started = True
-        if not targets:
-            if force:
-                self.statusBar().showMessage("All sounds already transcribed. ✅", 5000)
-            return
-        for music_id, folder, audio in targets:
-            worker.enqueue(str(music_id), str(folder), str(audio))
-        write_event("gui.backlog_transcription_started", count=str(len(targets)))
-        self.statusBar().showMessage(
-            f"Transcribing {len(targets):,} sound(s) in the background — this can take a while.", 6000
-        )
+        self._enqueue_pending_transcriptions(announce=True)
+        # Keep checking on a cycle so anything that lands later (new imports, items
+        # missed by the live pipeline, prior-session failures) gets fixed hands-free.
+        if not _env_flag("SOUND_VAULT_DISABLE_TRANSCRIBE") and not self._transcription_cycle_timer.isActive():
+            self._transcription_cycle_timer.start()
+
+    def _run_transcription_cycle(self) -> None:
+        """Enrichment cycle tick: quietly queue any sound still missing a transcript.
+        Cheap when there's nothing to do; only surfaces a message when it finds work."""
+        self._enqueue_pending_transcriptions(announce=False)
 
     def _on_queue_progress(self, done: int, enqueued: int) -> None:
         if done >= enqueued:
