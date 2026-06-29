@@ -73,3 +73,34 @@ def test_import_sound_pack_rejects_non_pack_json(tmp_path):
     bad.write_text(json.dumps({"not": "a pack"}), encoding="utf-8")
     with pytest.raises(ValueError):
         vm.import_sound_pack(bad)
+
+
+def test_import_sound_pack_auto_detects_tiktok_data_export(tmp_path):
+    # A TikTok data export (no "packs") should be auto-detected and its favorites
+    # queued — so "Import sound pack" works even with the wrong-looking file.
+    vm = _vm(tmp_path)
+    export = tmp_path / "user_data_tiktok.json"
+    export.write_text(
+        json.dumps(
+            {
+                "Likes and Favorites": {
+                    "Favorite Sounds": {
+                        "FavoriteSoundList": [
+                            {"Date": "2026-05-02", "Link": "https://m.tiktok.com/h5/share/music/6817565543474661378.html"},
+                            {"Date": "2026-05-01", "Link": "https://m.tiktok.com/h5/share/music/7274985708375378731.html"},
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary = vm.import_sound_pack(export)
+    assert summary["packs"] == ["TikTok favorites"]
+    assert summary["queued"] == 2 and summary["rejected"] == 0
+    pending = vm.inbox.pending()
+    assert {i.url for i in pending} == {
+        "https://www.tiktok.com/music/sound-6817565543474661378",
+        "https://www.tiktok.com/music/sound-7274985708375378731",
+    }
+    assert all(i.source == "tiktok_favorites" for i in pending)

@@ -374,14 +374,14 @@ class LibraryViewModel:
     _PACK_ALLOWED_HOSTS = ("tiktok.com", "instagram.com", "youtube.com", "youtu.be")
 
     def import_sound_pack(self, path: "Path | str") -> dict[str, Any]:
-        """Load a Sound Cache sound-pack JSON: queue each sound's URL into the inbox
-        (tagged with its pack) so "Download & import" fetches them with the user's
-        own session. Idempotent per sound (keyed by music id).
+        """Queue sounds into the inbox so "Download & import" fetches them with the
+        user's own session. Accepts EITHER a Sound Cache sound-pack JSON (``packs``)
+        OR a TikTok data export (its ``FavoriteSoundList``) — auto-detected, so the
+        user doesn't have to pick the right button. Idempotent per sound (by id).
 
-        A pack is UNTRUSTED input (a new user downloads it), so every URL is
-        validated through the SSRF guard + a platform host allowlist before it is
-        queued — a malicious pack cannot smuggle file://, internal-IP, or other
-        hostile links into the ingest path. Returns a summary dict.
+        The input is UNTRUSTED, so every URL is validated through the SSRF guard +
+        a platform host allowlist before queuing — no file:// / internal-IP /
+        off-platform links reach the ingest path. Returns a summary dict.
         """
         import json as _json
         from urllib.parse import urlparse
@@ -389,7 +389,7 @@ class LibraryViewModel:
         from sound_vault.url_safety import is_safe_public_url
 
         data = _json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or not isinstance(data.get("packs"), list):
+        if not isinstance(data, dict):
             raise ValueError("not a Sound Cache sound pack (missing 'packs')")
 
         def _host_ok(url: str) -> bool:
@@ -402,32 +402,61 @@ class LibraryViewModel:
         existing = self.inbox.all_items()
         seen_urls = {i.url for i in existing}
         seen_ids = {i.relay_id for i in existing if i.relay_id}
-        queued = skipped = rejected = 0
+        counts = {"queued": 0, "skipped": 0, "rejected": 0}
+
+        def _queue(url: str, mid: str, source: str, note: str) -> None:
+            url = (url or "").strip()
+            if not url or not is_safe_public_url(url) or not _host_ok(url):
+                counts["rejected"] += 1
+                return
+            relay_id = f"{source}:{mid or url}"
+            if url in seen_urls or relay_id in seen_ids:
+                counts["skipped"] += 1
+                return
+            self.inbox.add_url(url, source=source, relay_id=relay_id, note=note)
+            seen_urls.add(url)
+            seen_ids.add(relay_id)
+            counts["queued"] += 1
+
         pack_names: list[str] = []
-        for pack in data["packs"]:
-            if not isinstance(pack, dict):
-                continue
-            name = str(pack.get("name") or pack.get("slug") or "Pack").strip()
-            slug = re.sub(r"[^a-z0-9]+", "-", str(pack.get("slug") or name).lower()).strip("-") or "pack"
-            pack_names.append(name)
-            for sound in pack.get("sounds") or []:
-                if not isinstance(sound, dict):
+        if isinstance(data.get("packs"), list):
+            for pack in data["packs"]:
+                if not isinstance(pack, dict):
                     continue
-                url = str(sound.get("url") or "").strip()
-                mid = str(sound.get("music_id") or "").strip()
-                if not url or not is_safe_public_url(url) or not _host_ok(url):
-                    rejected += 1
+                name = str(pack.get("name") or pack.get("slug") or "Pack").strip()
+                slug = re.sub(r"[^a-z0-9]+", "-", str(pack.get("slug") or name).lower()).strip("-") or "pack"
+                pack_names.append(name)
+                for sound in pack.get("sounds") or []:
+                    if isinstance(sound, dict):
+                        _queue(str(sound.get("url") or ""), str(sound.get("music_id") or ""), f"pack:{slug}", name)
+        else:
+            favorites = self._tiktok_favorite_links(data)
+            if favorites is None:
+                raise ValueError("not a Sound Cache sound pack (missing 'packs')")
+            from sound_vault.importers.tiktok_archive import extract_music_id
+
+            pack_names.append("TikTok favorites")
+            for row in favorites:
+                link = str((row or {}).get("Link") or (row or {}).get("link") or "")
+                mid = extract_music_id(link)
+                if not mid:
+                    counts["rejected"] += 1
                     continue
-                relay_id = f"pack:{mid or url}"
-                if url in seen_urls or relay_id in seen_ids:
-                    skipped += 1
-                    continue
-                self.inbox.add_url(url, source=f"pack:{slug}", relay_id=relay_id, note=name)
-                seen_urls.add(url)
-                seen_ids.add(relay_id)
-                queued += 1
-        write_event("pack.imported", queued=str(queued), skipped=str(skipped), rejected=str(rejected))
-        return {"packs": pack_names, "queued": queued, "skipped": skipped, "rejected": rejected}
+                _queue(f"https://www.tiktok.com/music/sound-{mid}", mid, "tiktok_favorites", "TikTok favorites")
+
+        write_event("pack.imported", source="tiktok" if pack_names == ["TikTok favorites"] else "pack", **{k: str(v) for k, v in counts.items()})
+        return {"packs": pack_names, **counts}
+
+    @staticmethod
+    def _tiktok_favorite_links(data: dict) -> list | None:
+        """Return a TikTok data export's FavoriteSoundList (any nesting), or None
+        if this isn't a TikTok export — so import_sound_pack can auto-detect it."""
+        from sound_vault.importers.tiktok_archive import _favorite_sound_list
+
+        try:
+            return _favorite_sound_list(data)
+        except ValueError:
+            return None
 
     def set_user_notes(self, music_id: str, notes: str) -> bool:
         """Persist a sound's user notes to metadata.json (file-native truth) + the

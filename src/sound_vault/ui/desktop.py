@@ -2029,7 +2029,7 @@ class SoundVaultWindow(QMainWindow):
         poll_relay = QPushButton("Poll relay")
         poll_relay.clicked.connect(self.poll_relay_inbox)
         import_pack = QPushButton("Import sound pack")
-        import_pack.setToolTip("Load a Sound Cache starter/sound-pack JSON into the inbox, then Download & import")
+        import_pack.setToolTip("Import a Sound Cache sound-pack JSON or a TikTok data export (favorites) into the inbox, then Download & import")
         import_pack.clicked.connect(self.import_sound_pack)
         import_export = QPushButton("Import TikTok export")
         import_export.clicked.connect(self.import_tiktok_favorite_sounds_export)
@@ -4555,8 +4555,8 @@ class SoundVaultWindow(QMainWindow):
     def import_sound_pack(self) -> None:
         selected, _filter = QFileDialog.getOpenFileName(
             self,
-            "Import Sound Cache sound pack",
-            str(self.vault_root),
+            "Import sound pack or TikTok data export",
+            self._vault_dialog_start_dir(),
             "JSON files (*.json);;All files (*)",
         )
         if not selected:
