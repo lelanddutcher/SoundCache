@@ -149,13 +149,26 @@ class IngestService:
         return self._folder_for(music_id) is not None
 
     @staticmethod
+    def _is_placeholder_slug(slug_title: str) -> bool:
+        """True when the slug-derived title is a synthesized placeholder (from a
+        URL we built like /music/sound-<id> for packs / favorites / deep links),
+        not a real sound name — so we don't let "sound" become the title."""
+        s = slug_title.strip().lower()
+        return s in ("", "sound") or s.startswith("sound ")
+
+    @staticmethod
     def _title_artist(resolved: ResolvedSource, info: dict) -> tuple[str, str]:
         download_title = str(info.get("title") or "").strip()
         artist = str(info.get("uploader") or info.get("artist") or "").strip()
+        slug_title = (resolved.title_guess or "").strip()
+        if IngestService._is_placeholder_slug(slug_title):
+            slug_title = ""  # placeholder — defer to the real captured/oEmbed title
         if resolved.platform == "tiktok" and resolved.kind == "music":
-            title = (resolved.title_guess or "").strip() or download_title or "Unknown"
+            # A real slug (from a direct /music/<name>-<id> share) is a good title;
+            # otherwise use what the capture/oEmbed actually scraped.
+            title = slug_title or download_title or "Unknown"
         else:
-            title = download_title or (resolved.title_guess or "").strip() or "Unknown"
+            title = download_title or slug_title or "Unknown"
         return title, artist
 
     def ingest_url(self, url: str, *, source: str = "ios_shortcut", note: str = "") -> IngestOutcome:
@@ -296,7 +309,9 @@ class IngestService:
             filled.append("artist")
 
         title = str(enriched.get("title") or "").strip()
-        if title and str(metadata.get("tiktok_visible_title") or "").strip() in ("", "Unknown"):
+        # "sound" is the placeholder slug from synthesized /music/sound-<id> URLs —
+        # treat it as a gap so already-imported favorites get their real title.
+        if title and str(metadata.get("tiktok_visible_title") or "").strip().lower() in ("", "unknown", "sound"):
             metadata["tiktok_visible_title"] = title
             filled.append("title")
 

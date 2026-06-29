@@ -81,6 +81,41 @@ class ShortcutInboxStore:
             self._write_all([*existing, item])
             return item
 
+    def add_urls_bulk(self, entries: list[dict]) -> int:
+        """Queue many URLs in a SINGLE read+write — avoids the O(n²) cost (and UI
+        freeze) of calling add_url per item on a large import. Each entry is
+        ``{url, source, relay_id?, note?}``; deduped by url/relay_id against
+        existing items and within the batch. Returns the count actually added."""
+        with self._exclusive_lock():
+            existing = self._read_unlocked()
+            seen_urls = {i.url for i in existing}
+            seen_ids = {i.relay_id for i in existing if i.relay_id}
+            new_items: list[ShortcutInboxItem] = []
+            for entry in entries:
+                url = str(entry.get("url") or "").strip()
+                if not url:
+                    continue
+                relay_id = entry.get("relay_id")
+                if url in seen_urls or (relay_id and relay_id in seen_ids):
+                    continue
+                new_items.append(
+                    ShortcutInboxItem(
+                        id=_stable_id(url, relay_id),
+                        url=url,
+                        source=str(entry.get("source") or ""),
+                        status="pending",
+                        created_at=_now_iso(),
+                        relay_id=relay_id,
+                        note=str(entry.get("note") or "").strip(),
+                    )
+                )
+                seen_urls.add(url)
+                if relay_id:
+                    seen_ids.add(relay_id)
+            if new_items:
+                self._write_all([*existing, *new_items])
+            return len(new_items)
+
     def all_items(self) -> list[ShortcutInboxItem]:
         # Reads are safe without the lock: _write_all swaps the file atomically,
         # so a reader always sees a fully-written prior or next snapshot.

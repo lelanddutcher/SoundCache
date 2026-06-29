@@ -208,3 +208,19 @@ def test_ingest_url_captures_from_music_page_for_resolved_video(tmp_path):
     out = svc.ingest_url(video_url)
     assert out.status == "ingested" and out.music_id == "999"
     assert seen["url"] == "https://www.tiktok.com/music/espresso-999"  # NOT the video URL
+
+
+def test_title_artist_ignores_placeholder_slug_uses_real_title():
+    from sound_vault.ingest.service import IngestService
+    # A favorites/pack/deeplink URL we synthesized as /music/sound-<id> yields
+    # title_guess="sound" — must NOT become the title; the captured title wins.
+    resolved = tiktok_music("u", music_id="999", title_guess="sound")
+    title, artist = IngestService._title_artist(resolved, {"title": "Espresso", "uploader": "dj"})
+    assert title == "Espresso" and artist == "dj"
+    # With no captured title, a placeholder slug falls through to Unknown (not "sound")
+    title2, _ = IngestService._title_artist(resolved, {"title": "", "uploader": "dj"})
+    assert title2 == "Unknown"
+    # A REAL slug from a direct /music/<name>-<id> share is still used as the title
+    real = tiktok_music("u", music_id="123", title_guess="Kickoff")
+    title3, _ = IngestService._title_artist(real, {"title": "DL Title", "uploader": "x"})
+    assert title3 == "Kickoff"

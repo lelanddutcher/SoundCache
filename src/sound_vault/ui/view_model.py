@@ -403,6 +403,7 @@ class LibraryViewModel:
         seen_urls = {i.url for i in existing}
         seen_ids = {i.relay_id for i in existing if i.relay_id}
         counts = {"queued": 0, "skipped": 0, "rejected": 0}
+        to_add: list[dict] = []  # accumulate, then one bulk write (avoids O(n²) + UI freeze)
 
         def _queue(url: str, mid: str, source: str, note: str) -> None:
             url = (url or "").strip()
@@ -413,7 +414,7 @@ class LibraryViewModel:
             if url in seen_urls or relay_id in seen_ids:
                 counts["skipped"] += 1
                 return
-            self.inbox.add_url(url, source=source, relay_id=relay_id, note=note)
+            to_add.append({"url": url, "source": source, "relay_id": relay_id, "note": note})
             seen_urls.add(url)
             seen_ids.add(relay_id)
             counts["queued"] += 1
@@ -444,6 +445,8 @@ class LibraryViewModel:
                     continue
                 _queue(f"https://www.tiktok.com/music/sound-{mid}", mid, "tiktok_favorites", "TikTok favorites")
 
+        if to_add:
+            self.inbox.add_urls_bulk(to_add)
         write_event("pack.imported", source="tiktok" if pack_names == ["TikTok favorites"] else "pack", **{k: str(v) for k, v in counts.items()})
         return {"packs": pack_names, **counts}
 
