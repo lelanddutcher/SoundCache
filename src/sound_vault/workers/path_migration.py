@@ -1,6 +1,6 @@
 """Migrate stale absolute paths in the catalog + folder sidecars to vault-relative.
 
-Historic rows store absolute paths like ``/nas/TikTok Sound Vault/sounds/.../x.m4a``
+Historic rows store absolute paths like ``/path/to/Sound Cache/sounds/.../x.m4a``
 from when the vault lived at ``/nas``. Those break the moment the vault moves; the
 indexer survives via glob fallback, but rewriting them to relative paths
 (``sounds/.../x.m4a``) makes the vault portable and lets explicit-path resolution work.

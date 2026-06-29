@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-VAULT_ROOT = Path("/nas/TikTok Sound Vault")
+VAULT_ROOT = Path("/path/to/Sound Cache")
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe"

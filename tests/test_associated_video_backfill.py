@@ -161,7 +161,7 @@ def test_update_metadata_rebases_stale_video_paths_before_hashtag_backfill(tmp_p
                     {
                         "rank": 1,
                         "video_id": "abc",
-                        "downloaded_video_path": f"/nas/TikTok Sound Vault/sounds/123/videos/{mp4.name}",
+                        "downloaded_video_path": f"/path/to/Sound Cache/sounds/123/videos/{mp4.name}",
                         "description": "stale path but valid local file #RepairTok",
                     }
                 ]

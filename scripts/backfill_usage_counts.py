@@ -34,13 +34,13 @@ def run_capture(script: Path, url: str, storage_state: Path | None, *, cwd: Path
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill TikTok music-page usage_count labels into metadata.json.")
-    parser.add_argument("--vault", type=Path, default=Path("/nas/TikTok Sound Vault"))
-    parser.add_argument("--project", type=Path, default=Path("/nas/Projects/Tiktok Sound Organizer"))
-    parser.add_argument("--storage-state", type=Path, default=Path("/nas/Projects/Tiktok Sound Organizer/auth/tiktok.storageState.json"))
+    parser.add_argument("--vault", type=Path, default=Path("/path/to/Sound Cache"))
+    parser.add_argument("--project", type=Path, default=Path("/path/to/sound-organizer"))
+    parser.add_argument("--storage-state", type=Path, default=Path("/path/to/sound-organizer/auth/tiktok.storageState.json"))
     parser.add_argument("--script", type=Path, default=Path(__file__).with_name("capture_usage_count.cjs"))
     parser.add_argument("--limit", type=int, default=0, help="0 means no limit")
     parser.add_argument("--delay", type=float, default=8.0)
-    parser.add_argument("--log", type=Path, default=Path("/nas/TikTok Sound Vault/workers/usage-count-backfill.jsonl"))
+    parser.add_argument("--log", type=Path, default=Path("/path/to/Sound Cache/workers/usage-count-backfill.jsonl"))
     args = parser.parse_args()
 
     args.log.parent.mkdir(parents=True, exist_ok=True)

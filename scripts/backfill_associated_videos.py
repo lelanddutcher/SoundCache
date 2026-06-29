@@ -209,9 +209,9 @@ def run_capture(cmd: list[str], *, cwd: Path, timeout: int) -> CaptureResult:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Retry associated-video backfill from disk audit, not checkpoint state.")
-    parser.add_argument("--vault", type=Path, default=Path("/nas/TikTok Sound Vault"))
-    parser.add_argument("--project", type=Path, default=Path("/nas/Projects/Tiktok Sound Organizer"))
-    parser.add_argument("--capture-script", type=Path, default=Path("/nas/Projects/Tiktok Sound Organizer/scripts/capture_associated_videos.cjs"))
+    parser.add_argument("--vault", type=Path, default=Path("/path/to/Sound Cache"))
+    parser.add_argument("--project", type=Path, default=Path("/path/to/sound-organizer"))
+    parser.add_argument("--capture-script", type=Path, default=Path("/path/to/sound-organizer/scripts/capture_associated_videos.cjs"))
     parser.add_argument("--minimum-videos", type=int, default=3)
     parser.add_argument("--limit", type=int, default=0, help="0 means no limit")
     parser.add_argument("--delay", type=float, default=15.0)
@@ -219,7 +219,7 @@ def main() -> int:
     parser.add_argument("--retry-attempted", action="store_true", help="Retry music IDs that already have rows in the log")
     parser.add_argument("--metadata-only", action="store_true", help="Only repair manifests/metadata from existing associated-video sidecars; do not launch capture")
     parser.add_argument("--fail-on-errors", action="store_true", help="Exit nonzero when any item remains below the requested video count")
-    parser.add_argument("--log", type=Path, default=Path("/nas/TikTok Sound Vault/workers/associated-video-backfill.jsonl"))
+    parser.add_argument("--log", type=Path, default=Path("/path/to/Sound Cache/workers/associated-video-backfill.jsonl"))
     args = parser.parse_args()
 
     if args.metadata_only:

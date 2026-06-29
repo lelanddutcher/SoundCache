@@ -14,7 +14,7 @@ from typing import Any, Sequence
 
 from sound_vault.vault.indexer import SoundRecord, build_index
 
-VAULT_ROOT = Path("/nas/TikTok Sound Vault")
+VAULT_ROOT = Path("/path/to/Sound Cache")
 
 _STOPWORDS = {
     "a",

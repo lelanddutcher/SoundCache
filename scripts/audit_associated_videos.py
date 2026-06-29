@@ -122,9 +122,9 @@ def write_outputs(rows: list[AssociatedVideoAuditRow], output_dir: Path) -> None
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Audit TikTok Sound Vault associated-video coverage and queue misses.")
-    parser.add_argument("--vault", type=Path, default=Path("/nas/TikTok Sound Vault"))
+    parser.add_argument("--vault", type=Path, default=Path("/path/to/Sound Cache"))
     parser.add_argument("--minimum-videos", type=int, default=3)
-    parser.add_argument("--output-dir", type=Path, default=Path("/nas/TikTok Sound Vault/workers/backfill"))
+    parser.add_argument("--output-dir", type=Path, default=Path("/path/to/Sound Cache/workers/backfill"))
     args = parser.parse_args()
 
     rows = audit_vault(args.vault, minimum_videos=args.minimum_videos)

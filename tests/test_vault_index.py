@@ -222,8 +222,8 @@ def test_hydrate_record_rebases_associated_video_paths_into_videos_folder(tmp_pa
                         "video_id": "999",
                         "author_handle": "creator",
                         "description": "creator clip #CapCut #EditTok",
-                        "downloaded_video_path": f"/nas/TikTok Sound Vault/sounds/42 - Video Sound/videos/{clip.name}",
-                        "screenshot_path": f"/nas/TikTok Sound Vault/sounds/42 - Video Sound/videos/{shot.name}",
+                        "downloaded_video_path": f"/path/to/Sound Cache/sounds/42 - Video Sound/videos/{clip.name}",
+                        "screenshot_path": f"/path/to/Sound Cache/sounds/42 - Video Sound/videos/{shot.name}",
                     }
                 ]
             }
@@ -261,10 +261,10 @@ def test_build_index_rebases_stale_absolute_asset_paths_to_selected_vault(tmp_pa
                 "tiktok_music_id": "42",
                 "tiktok_visible_title": "Folder Only",
                 "paths": {
-                    "folder": "/nas/TikTok Sound Vault/sounds/42 - Folder Only",
-                    "audio": "/nas/TikTok Sound Vault/sounds/42 - Folder Only/folder-audio.m4a",
-                    "artwork": "/nas/TikTok Sound Vault/sounds/42 - Folder Only/artwork.jpg",
-                    "transcript": "/nas/TikTok Sound Vault/sounds/42 - Folder Only/transcript.json",
+                    "folder": "/path/to/Sound Cache/sounds/42 - Folder Only",
+                    "audio": "/path/to/Sound Cache/sounds/42 - Folder Only/folder-audio.m4a",
+                    "artwork": "/path/to/Sound Cache/sounds/42 - Folder Only/artwork.jpg",
+                    "transcript": "/path/to/Sound Cache/sounds/42 - Folder Only/transcript.json",
                 },
             }
         ),

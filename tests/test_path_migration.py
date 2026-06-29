@@ -5,8 +5,8 @@ from sound_vault.workers.path_migration import migrate_vault_paths, to_relative_
 
 
 def test_to_relative_vault_path():
-    assert to_relative_vault_path("/nas/TikTok Sound Vault/sounds/1 - x/a.m4a") == "sounds/1 - x/a.m4a"
-    assert to_relative_vault_path("/Volumes/hermes-share/TikTok Sound Vault/catalog/sounds.jsonl") == "catalog/sounds.jsonl"
+    assert to_relative_vault_path("/path/to/Sound Cache/sounds/1 - x/a.m4a") == "sounds/1 - x/a.m4a"
+    assert to_relative_vault_path("/path/to/Sound Cache/catalog/sounds.jsonl") == "catalog/sounds.jsonl"
     assert to_relative_vault_path("sounds/1 - x/a.m4a") == "sounds/1 - x/a.m4a"  # already relative
     assert to_relative_vault_path("https://www.tiktok.com/music/x-1") == "https://www.tiktok.com/music/x-1"
     assert to_relative_vault_path("") == ""
@@ -16,7 +16,7 @@ def _seed_absolute(tmp_path):
     folder = tmp_path / "sounds" / "1 - Song - Artist"
     folder.mkdir(parents=True)
     (folder / "song.m4a").write_bytes(b"\x00audio")
-    abs_folder = "/nas/TikTok Sound Vault/sounds/1 - Song - Artist"
+    abs_folder = "/path/to/Sound Cache/sounds/1 - Song - Artist"
     metadata = {
         "tiktok_music_id": "1",
         "tiktok_visible_title": "Song",

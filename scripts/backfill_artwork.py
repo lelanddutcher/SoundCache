@@ -12,8 +12,8 @@ import subprocess
 import time
 from typing import Any
 
-VAULT_ROOT = Path("/nas/TikTok Sound Vault")
-PROJECT = Path("/nas/Projects/Tiktok Sound Organizer")
+VAULT_ROOT = Path("/path/to/Sound Cache")
+PROJECT = Path("/path/to/sound-organizer")
 CAPTURE_SCRIPT = PROJECT / "scripts" / "capture_music_artwork.cjs"
 
 

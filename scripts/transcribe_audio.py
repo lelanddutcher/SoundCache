@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Any
 
-VAULT_ROOT = Path("/nas/TikTok Sound Vault")
+VAULT_ROOT = Path("/path/to/Sound Cache")
 AUDIO_SUFFIXES = (".m4a", ".mp3", ".wav", ".aac", ".flac", ".mp4", ".mov")
 _MODEL_CACHE: dict[str, Any] = {}
 

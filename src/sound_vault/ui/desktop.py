@@ -1501,6 +1501,7 @@ class OnboardingDialog(QDialog):
 
 class SoundVaultWindow(QMainWindow):
     previewHydrated = Signal(int, str, object)
+    updateChecked = Signal(object, bool)  # (UpdateInfo|None, manual)
 
     def __init__(self, *, vault_root: Path | None = None, settings: AppSettings | None = None) -> None:
         super().__init__()
@@ -1592,6 +1593,7 @@ class SoundVaultWindow(QMainWindow):
         self._preview_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sound-vault-preview")
         self._preview_token = 0
         self.previewHydrated.connect(self._apply_hydrated_preview)
+        self.updateChecked.connect(self._on_update_checked)
         self._build_ui()
         self._setup_import_progress()
         self._build_menu_bar()
@@ -1609,6 +1611,8 @@ class SoundVaultWindow(QMainWindow):
         self._start_relay_auto_poll()
         self._maybe_run_onboarding()
         self._maybe_prompt_tiktok_connect()
+        if not _env_flag("SOUND_VAULT_DISABLE_UPDATE_CHECK"):
+            QTimer.singleShot(4000, lambda: self._check_for_updates(manual=False))
 
     def _maybe_prompt_tiktok_connect(self) -> None:
         """First-run nudge: if the user has paired an iPhone (so they intend to
@@ -3082,6 +3086,7 @@ class SoundVaultWindow(QMainWindow):
         self._add_action(vault_menu, "Setup Wizard…", self.run_onboarding)
 
         help_menu = bar.addMenu("&Help")
+        self._add_action(help_menu, "Check for Updates…", lambda: self._check_for_updates(manual=True))
         self._add_action(help_menu, "Welcome / Setup Wizard…", self.run_onboarding)
         self._add_action(help_menu, "Open App Data Folder", self.open_data_folder)
         self._add_action(help_menu, "Open soundcache.io", lambda: self._open_url("https://soundcache.io"))
@@ -3221,6 +3226,45 @@ class SoundVaultWindow(QMainWindow):
             "No login, no cloud — just a folder that's yours.<br>"
             "<a href='https://soundcache.io'>soundcache.io</a>",
         )
+
+    def _check_for_updates(self, *, manual: bool) -> None:
+        """Best-effort: off-thread fetch of the hosted version manifest; deliver the
+        result to the UI thread via updateChecked. Never blocks or breaks anything."""
+        from sound_vault import __version__
+        from sound_vault.update_check import check_for_update
+
+        def _run() -> None:
+            info = check_for_update(__version__)
+            self.updateChecked.emit(info, manual)
+
+        try:
+            self._preview_executor.submit(_run)
+        except Exception as exc:  # noqa: BLE001 - update check is cosmetic
+            write_event("gui.update_check_submit_failed", **exception_fields(exc))
+
+    def _on_update_checked(self, info, manual: bool) -> None:
+        if info is None:
+            if manual:
+                from sound_vault import __version__
+
+                QMessageBox.information(
+                    self, "Check for Updates",
+                    f"You're on the latest version (Sound Cache {__version__}). ✅",
+                )
+            return
+        write_event("gui.update_available", version=str(info.version))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Update available")
+        body = f"Sound Cache {info.version} is available."
+        if info.notes:
+            body += f"\n\n{info.notes}"
+        box.setText(body)
+        get_btn = box.addButton("Get the update", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is get_btn:
+            self._open_web_url(info.url, success_msg="Opening the download page…")
 
     def run_onboarding(self) -> None:
         dialog = OnboardingDialog(
