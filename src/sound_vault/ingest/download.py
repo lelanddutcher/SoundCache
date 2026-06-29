@@ -232,6 +232,8 @@ class PlaywrightCaptureDownloader:
                 # captures only; absent on /music/ pages). Informational for now.
                 "sound_is_original": meta.get("original"),
                 "sound_duration": meta.get("soundDuration"),
+                # "Add to Spotify" link for published tracks, if TikTok showed one.
+                "spotify_url": str(meta.get("spotifyUrl") or "").strip(),
             }
         )
         return info

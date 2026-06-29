@@ -47,7 +47,19 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
         (s || "").replace(/\s*[·∙•|/–-]+\s*[\d.,]+\s*[kKmMbB]?\s*(?:videos?|posts?|clips?)\b.*$/i, "").trim();
       title = stripUsage(title);
       author = stripUsage(author);
-      return { title, author, coverUrl, usage, pageUrl: location.href };
+      // TikTok shows an "Add to Spotify"/"Listen on Spotify" link for published
+      // tracks — capture the canonical open.spotify.com track/album/artist URL so the
+      // app can offer an "Open in Spotify" button. Prefer a track link; strip query.
+      let spotifyUrl = "";
+      const spotifyAnchors = Array.from(document.querySelectorAll('a[href*="spotify.com"]'));
+      for (const a of spotifyAnchors) {
+        const href = (a.getAttribute("href") || "").trim();
+        if (/open\.spotify\.com\/(track|album|artist)\//i.test(href)) { spotifyUrl = href.split("?")[0]; break; }
+      }
+      if (!spotifyUrl && spotifyAnchors.length) {
+        spotifyUrl = (spotifyAnchors[0].getAttribute("href") || "").trim().split("?")[0];
+      }
+      return { title, author, coverUrl, usage, pageUrl: location.href, spotifyUrl };
     });
     const parseCount = (s) => {
       if (!s) return null;
@@ -68,11 +80,17 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
         try {
           const node = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
           if (!node) return {};
-          const data = JSON.parse(node.textContent || "{}");
+          const raw = node.textContent || "{}";
+          const data = JSON.parse(raw);
           const scope = data.__DEFAULT_SCOPE__ || {};
           const item = ((scope["webapp.video-detail"] || {}).itemInfo || {}).itemStruct || {};
           const m = item.music || {};
-          if (!m.id) return {};
+          // Fallback: pull a Spotify track/album link straight out of the SSR JSON
+          // text (TikTok's DSP-link payload) when no DOM anchor was rendered.
+          let spotifyUrl = "";
+          const sm = raw.match(/https:\\?\/\\?\/open\.spotify\.com\\?\/(?:track|album|artist)\\?\/[A-Za-z0-9]+/);
+          if (sm) spotifyUrl = sm[0].replace(/\\\//g, "/");
+          if (!m.id) return { spotifyUrl };
           return {
             musicId: String(m.id),
             original: typeof m.original === "boolean" ? m.original : null,
@@ -81,6 +99,7 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
             mTitle: m.title || "",
             mAuthor: m.authorName || "",
             playUrl: typeof m.playUrl === "string" ? m.playUrl : "",
+            spotifyUrl,
           };
         } catch (e) { return {}; }
       });
@@ -108,6 +127,7 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
       original: typeof musicJson.original === "boolean" ? musicJson.original : null,
       soundDuration: musicJson.soundDuration != null ? musicJson.soundDuration : null,
       album: musicJson.album || "",
+      spotifyUrl: meta.spotifyUrl || musicJson.spotifyUrl || "",
     };
     fs.writeFileSync(path.join(outFolder, `${musicId}_meta.json`), JSON.stringify(metaOut, null, 2));
     return true;

@@ -201,6 +201,15 @@ def test_package_can_skip_catalog(tmp_path):
     assert not catalog.exists() or catalog.read_text(encoding="utf-8").strip() == ""
 
 
+def test_package_stores_spotify_url(tmp_path):
+    pkg = package_sound(
+        vault_root=tmp_path, music_id="1", title="t", artist="a",
+        info={"spotify_url": "https://open.spotify.com/track/x"}, audio_path=None, now_iso="t",
+    )
+    meta = json.loads((pkg.folder / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["spotify_url"] == "https://open.spotify.com/track/x"
+
+
 def test_package_non_tiktok_platform(tmp_path):
     pkg = package_sound(
         vault_root=tmp_path,

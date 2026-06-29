@@ -2311,6 +2311,11 @@ class SoundVaultWindow(QMainWindow):
         self.open_tiktok_sound = QPushButton("Open TikTok sound")
         self.open_tiktok_sound.setEnabled(False)
         self.open_tiktok_sound.clicked.connect(self.open_selected_tiktok_sound)
+        # Shown only for sounds TikTok linked to a published Spotify track.
+        self.open_spotify = QPushButton("Open in Spotify")
+        self.open_spotify.setObjectName("spotifyButton")
+        self.open_spotify.setVisible(False)
+        self.open_spotify.clicked.connect(self.open_selected_spotify)
         self.open_folder = QPushButton("Open folder")
         self.open_folder.setEnabled(False)
         self.open_folder.clicked.connect(self.open_selected_folder)
@@ -2364,8 +2369,9 @@ class SoundVaultWindow(QMainWindow):
         action_col.setSpacing(6)
         action_col.addWidget(self.copy_metadata)
         action_col.addWidget(self.open_tiktok_sound)
+        action_col.addWidget(self.open_spotify)
         action_col.addWidget(self.open_folder)
-        for _btn in (self.copy_metadata, self.open_tiktok_sound, self.open_folder, self.open_video, self.open_video_url):
+        for _btn in (self.copy_metadata, self.open_tiktok_sound, self.open_spotify, self.open_folder, self.open_video, self.open_video_url):
             _btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             _btn.setMinimumHeight(32)
         scroll_layout.addWidget(self.artwork_label, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -3544,6 +3550,7 @@ class SoundVaultWindow(QMainWindow):
         self.open_video_url.setEnabled(False)
         self.open_folder.setEnabled(False)
         self.open_tiktok_sound.setEnabled(False)
+        self.open_spotify.setVisible(False)
         self.copy_metadata.setEnabled(False)
         self.progress_slider.setRange(0, 0)
         self.time_label.setText("0:00 / 0:00")
@@ -3610,6 +3617,7 @@ class SoundVaultWindow(QMainWindow):
         self._populate_videos(record)
         self.open_folder.setEnabled(record.folder_path is not None)
         self.open_tiktok_sound.setEnabled(self._sound_url_for_record(record) is not None)
+        self.open_spotify.setVisible(self._spotify_url_for_record(record) is not None)
         self.copy_metadata.setEnabled(True)
         target = self.vm.play_target_for(record)
         duration_ms = self._duration_ms_for_record(record)
@@ -3842,6 +3850,35 @@ class SoundVaultWindow(QMainWindow):
             self.statusBar().showMessage("No TikTok sound URL in metadata", 2500)
             return
         self._open_web_url(url, success_msg="Opened TikTok sound page")
+
+    @staticmethod
+    def _spotify_url_for_record(record) -> str | None:
+        """The captured 'Add to Spotify' link for a record, if it's a real https
+        spotify.com URL (the value is third-party-scraped, so validate the host)."""
+        raw = getattr(record, "raw", None)
+        url = str(raw.get("spotify_url") or "").strip() if isinstance(raw, dict) else ""
+        if not url:
+            return None
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(url)
+        except (ValueError, TypeError):
+            return None
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme.lower() == "https" and (host == "spotify.com" or host.endswith(".spotify.com")):
+            return url
+        return None
+
+    def open_selected_spotify(self) -> None:
+        if self.current_preview_record is None:
+            self.statusBar().showMessage("No selected sound to open", 2500)
+            return
+        url = self._spotify_url_for_record(self.current_preview_record)
+        if url is None:
+            self.statusBar().showMessage("This sound has no Spotify link", 2500)
+            return
+        self._open_web_url(url, success_msg="Opened in Spotify")
 
     def copy_selected_metadata(self) -> None:
         if self.current_preview_record is None:
@@ -5211,6 +5248,16 @@ QMainWindow, QWidget {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #66ecff, stop:0.55 #b793ff, stop:1 #ff6ad5);
 }
+
+/* "Open in Spotify" — only shown for sounds with a captured Spotify link */
+#spotifyButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1ed760, stop:1 #1db954);
+    color: #06210f;
+    font-weight: 700;
+    border: 1px solid #18a449;
+    border-top: 1px solid #4ff08a;
+}
+#spotifyButton:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #28e06b, stop:1 #1ec45e); }
 
 /* Right inspector */
 #preview {

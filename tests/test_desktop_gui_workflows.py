@@ -986,6 +986,21 @@ def test_repair_portability_noop_when_all_names_clean(tmp_path, monkeypatch):
     assert rebuilt == []  # no rename → no reindex
 
 
+def test_spotify_url_for_record_validates_host_and_scheme():
+    """Only real https spotify.com links are surfaced (the value is third-party
+    scraped, so a malicious host/scheme must be rejected)."""
+    from types import SimpleNamespace
+
+    f = SoundVaultWindow._spotify_url_for_record
+    assert f(SimpleNamespace(raw={"spotify_url": "https://open.spotify.com/track/x"})) == "https://open.spotify.com/track/x"
+    assert f(SimpleNamespace(raw={"spotify_url": "https://spotify.com/album/y"})) == "https://spotify.com/album/y"
+    assert f(SimpleNamespace(raw={"spotify_url": "http://open.spotify.com/track/x"})) is None  # not https
+    assert f(SimpleNamespace(raw={"spotify_url": "https://evil.com/track/x"})) is None  # wrong host
+    assert f(SimpleNamespace(raw={"spotify_url": "https://open.spotify.com.evil.com/x"})) is None  # lookalike
+    assert f(SimpleNamespace(raw={})) is None
+    assert f(SimpleNamespace(raw=None)) is None
+
+
 def test_eta_rolling_estimate_and_duration_format():
     from sound_vault.ui.desktop import SoundVaultWindow
 

@@ -284,6 +284,7 @@ def package_sound(
         "source_artist": info.get("artist") or info.get("uploader") or None,
         "source_provider": info.get("source_provider") or None,
         "source_confidence": source_confidence,
+        "spotify_url": str(info.get("spotify_url") or "").strip(),
         "user_notes": user_notes,
         "tags": tags,
         "status": status,
