@@ -155,6 +155,76 @@ def faster_whisper_available() -> bool:
     return True
 
 
+def _faster_whisper_device() -> tuple[str, str]:
+    """Pick (device, compute_type) for CTranslate2. CUDA when an NVIDIA GPU is
+    present (float16), else CPU (int8). CTranslate2 has no Metal/Apple-GPU path, so
+    on Apple Silicon use the mlx backend instead — see mlx_whisper_transcriber."""
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda", "float16"
+    except Exception:  # noqa: BLE001 - any probe failure -> safe CPU default
+        pass
+    return "cpu", "int8"
+
+
+def mlx_whisper_available() -> bool:
+    """MLX = Apple's on-device ML framework; runs whisper on the Apple-Silicon GPU.
+    Only meaningful on arm64 macOS with the mlx-whisper package installed."""
+    import platform
+
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx_whisper  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _mlx_model_repo(model: str) -> str:
+    """Map a model name to an mlx-community HF repo. A value already containing '/'
+    is treated as an explicit repo."""
+    name = (model or "base").strip()
+    if "/" in name:
+        return name
+    aliases = {
+        "turbo": "mlx-community/whisper-large-v3-turbo",
+        "large": "mlx-community/whisper-large-v3-mlx",
+        "large-v3": "mlx-community/whisper-large-v3-mlx",
+        "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    }
+    return aliases.get(name, f"mlx-community/whisper-{name}-mlx")
+
+
+def mlx_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Path], dict[str, Any]] | None":
+    """A callable(audio_path) -> {text, language, model, engine} using mlx-whisper on
+    the Apple-Silicon GPU. The model downloads from HF on first use. Returns None when
+    MLX isn't available (non-arm64-mac or package missing)."""
+    if not mlx_whisper_available():
+        return None
+    cfg = config or LocalASRConfig()
+    repo = _mlx_model_repo(cfg.model)
+
+    def _transcribe(audio_path: Path, should_stop: "Callable[[], bool] | None" = None) -> dict[str, Any]:
+        # mlx_whisper.transcribe is a single blocking GPU call (no segment generator
+        # to break on), so the only safe cancel point is before it starts.
+        if should_stop is not None and should_stop():
+            return {"text": "", "language": "", "model": cfg.model, "engine": "mlx-whisper"}
+        import mlx_whisper
+
+        result = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=repo)
+        return {
+            "text": str(result.get("text") or "").strip(),
+            "language": str(result.get("language") or ""),
+            "model": cfg.model,
+            "engine": "mlx-whisper",
+        }
+
+    return _transcribe
+
+
 def faster_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Path], dict[str, Any]] | None":
     """A lazy callable(audio_path) -> {text, language, model, engine} using faster-whisper.
 
@@ -172,12 +242,17 @@ def faster_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callabl
         if model is None:
             from faster_whisper import WhisperModel
 
-            model = WhisperModel(
-                cfg.model,
-                device="cpu",
-                compute_type=cfg.compute_type,
-                download_root=cfg.model_cache_dir or None,
-            )
+            device, compute_type = _faster_whisper_device()
+            try:
+                model = WhisperModel(
+                    cfg.model, device=device, compute_type=compute_type,
+                    download_root=cfg.model_cache_dir or None,
+                )
+            except Exception:  # noqa: BLE001 - GPU init can fail (missing cuDNN); fall back to CPU
+                model = WhisperModel(
+                    cfg.model, device="cpu", compute_type=cfg.compute_type,
+                    download_root=cfg.model_cache_dir or None,
+                )
             state["model"] = model
         # Honor a quit before the (uninterruptible) VAD preprocessing even starts.
         if should_stop is not None and should_stop():

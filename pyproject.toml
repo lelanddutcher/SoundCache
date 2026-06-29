@@ -23,6 +23,11 @@ gui = [
 asr = [
   "faster-whisper>=1.1.0",
 ]
+asr-gpu = [
+  # Apple-Silicon GPU acceleration via Apple's MLX. CUDA users get GPU automatically
+  # through faster-whisper (CTranslate2) and don't need this.
+  "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 ingest = [
   "yt-dlp>=2025.1",
 ]

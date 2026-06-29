@@ -134,21 +134,23 @@ _AUTO = object()
 
 
 def build_transcriber(settings=None):
-    """Build a per-sound transcriber from settings, or None if unavailable.
+    """Build a per-sound transcriber, GPU-accelerated when possible, or None.
 
-    Local faster-whisper is the only locally-runnable engine (cloud needs the
-    openai package + an API key), so use it when installed. Disabled by the
-    SOUND_VAULT_DISABLE_TRANSCRIBE env var (set in tests/CI)."""
+    Backend selection (override with SOUND_VAULT_ASR_BACKEND=mlx|faster-whisper):
+    'auto' (default) prefers MLX — Apple's on-device framework that runs whisper on
+    the Apple-Silicon GPU — when available, otherwise faster-whisper (which itself
+    auto-uses CUDA on an NVIDIA GPU, else CPU). Disabled by SOUND_VAULT_DISABLE_TRANSCRIBE."""
     from sound_vault.diagnostics import write_event
 
     if os.getenv("SOUND_VAULT_DISABLE_TRANSCRIBE"):
         write_event("asr.build_transcriber", result="none", reason="disabled_env")
         return None
-    from sound_vault.workers.transcription import LocalASRConfig, faster_whisper_available, faster_whisper_transcriber
+    from sound_vault.workers.transcription import (
+        LocalASRConfig,
+        faster_whisper_transcriber,
+        mlx_whisper_transcriber,
+    )
 
-    if not faster_whisper_available():
-        write_event("asr.build_transcriber", result="none", reason="faster_whisper_unavailable")
-        return None
     cfg = {}
     if settings is None:
         try:
@@ -162,15 +164,26 @@ def build_transcriber(settings=None):
             cfg = settings.transcription_config()
         except Exception:  # noqa: BLE001
             cfg = {}
-    transcriber = faster_whisper_transcriber(
-        LocalASRConfig(
-            model=str(cfg.get("local_model") or "base"),
-            model_cache_dir=(str(cfg.get("model_cache_dir") or "") or None),
-        )
+    model = str(cfg.get("local_model") or "base")
+    asr_cfg = LocalASRConfig(model=model, model_cache_dir=(str(cfg.get("model_cache_dir") or "") or None))
+
+    backend = (os.getenv("SOUND_VAULT_ASR_BACKEND") or "auto").strip().lower()
+    if backend in ("faster-whisper", "faster_whisper", "cpu", "cuda"):
+        order = [("faster-whisper", faster_whisper_transcriber), ("mlx-whisper", mlx_whisper_transcriber)]
+    else:  # auto / mlx → GPU-first (MLX on Apple Silicon), CPU/CUDA faster-whisper fallback
+        order = [("mlx-whisper", mlx_whisper_transcriber), ("faster-whisper", faster_whisper_transcriber)]
+
+    transcriber, chosen = None, ""
+    for name, builder in order:
+        built = builder(asr_cfg)
+        if built is not None:
+            transcriber, chosen = built, name
+            break
+    write_event(
+        "asr.build_transcriber", result="ok" if transcriber else "none",
+        engine=chosen, backend=backend, model=model,
+        reason="" if transcriber else "no_backend_available",
     )
-    write_event("asr.build_transcriber", result="ok" if transcriber else "none",
-                reason="" if transcriber else "transcriber_factory_none",
-                model=str(cfg.get("local_model") or "base"))
     return transcriber
 
 
