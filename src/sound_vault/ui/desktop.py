@@ -1708,7 +1708,11 @@ class SoundVaultWindow(QMainWindow):
 
         preview = self._build_preview_panel()
         shell.addWidget(preview)
-        self.setStyleSheet(STYLESHEET)
+        _assets = Path(__file__).resolve().parent / "assets"
+        styled = STYLESHEET.replace(
+            "__DECK_BG__", (_assets / "deck-bg.png").as_posix()
+        ).replace("__SIDEBAR_BG__", (_assets / "sidebar-bg.png").as_posix())
+        self.setStyleSheet(styled)
         self.show_view("library")
 
     def toggle_library_section(self) -> None:
@@ -4583,14 +4587,18 @@ QMainWindow, QWidget {
 /* Shell & main surfaces — violet night */
 #appShell { background: #05030f; }
 #mainDeck {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #1a0d40, stop:0.05 #150a33, stop:1 #0a0518);
+    background-color: #0a0518;
+    background-image: url("__DECK_BG__");
+    background-repeat: no-repeat;
+    background-position: top center;
     border-left: 1px solid #2a1758;
     border-right: 1px solid #1a0c33;
 }
 #sidebar {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #1d1046, stop:0.06 #170c39, stop:1 #0a0518);
+    background-color: #0a0518;
+    background-image: url("__SIDEBAR_BG__");
+    background-repeat: no-repeat;
+    background-position: top left;
     border-right: 1px solid #2a1758;
 }
 
