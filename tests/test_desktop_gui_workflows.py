@@ -740,3 +740,48 @@ def test_duplicate_review_quarantine_moves_folders_and_removes_group(tmp_path, m
     assert not duplicate_folder.exists()
     assert any((vault / "reports" / "duplicate-quarantine").glob("*/2 - Move Me"))
     window.close()
+
+
+def test_close_event_requests_interruption_before_waiting(tmp_path, monkeypatch):
+    """On quit, each running background worker must get requestInterruption()
+    BEFORE wait(). Waiting without requesting interruption first is what let a
+    still-running QThread be destroyed at teardown and crash Qt with SIGABRT."""
+    from PySide6.QtGui import QCloseEvent
+
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    vault = tmp_path / "vault"
+    (vault / "catalog").mkdir(parents=True)
+
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    window.show()
+    app.processEvents()
+
+    events: list[str] = []
+
+    class _FakeWorker:
+        def __init__(self, name):
+            self.name = name
+
+        def isRunning(self):  # noqa: N802 - Qt API shape
+            return True
+
+        def requestInterruption(self):  # noqa: N802 - Qt API shape
+            events.append(f"interrupt:{self.name}")
+
+        def wait(self, _ms):
+            events.append(f"wait:{self.name}")
+            return True
+
+    window._import_worker = _FakeWorker("import")
+    window._transcribe_worker = _FakeWorker("transcribe")
+
+    window.closeEvent(QCloseEvent())
+
+    # Every interrupt must precede every wait (interruption requested up front).
+    last_interrupt = max(i for i, e in enumerate(events) if e.startswith("interrupt:"))
+    first_wait = min(i for i, e in enumerate(events) if e.startswith("wait:"))
+    assert last_interrupt < first_wait
+    assert "interrupt:import" in events and "interrupt:transcribe" in events

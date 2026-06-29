@@ -843,7 +843,7 @@ class LibraryViewModel:
                 self._catalog_stats = inspect_catalog_stats(self.vault_root)
         return result
 
-    def import_pending(self, *, reporter: Any = None) -> list[Any]:
+    def import_pending(self, *, reporter: Any = None, should_stop: "Callable[[], bool] | None" = None) -> list[Any]:
         """Drain pending inbox links: resolve -> download -> package -> cache upsert.
 
         Returns the per-item ingest outcomes. Newly ingested sounds are refreshed
@@ -856,7 +856,7 @@ class LibraryViewModel:
         # background transcription pass afterwards, so don't block each import on a
         # CPU-bound whisper run here (transcriber=None skips the inline attempt).
         service = build_ingest_service(vault_root=self.vault_root, db=self.db, transcriber=None)
-        results = service.drain_inbox(self.inbox)
+        results = service.drain_inbox(self.inbox, should_stop=should_stop)
         with self._lock:
             for _item, outcome in results:
                 if outcome.status == "ingested" and outcome.music_id:
@@ -926,6 +926,7 @@ class LibraryViewModel:
         *,
         transcriber: "Callable[[Path], dict[str, Any]] | None" = None,
         progress: "Callable[[int, int, str], None] | None" = None,
+        should_stop: "Callable[[], bool] | None" = None,
     ) -> int:
         """Transcribe a bounded list of sounds in place (writes metadata.json).
 
@@ -946,6 +947,8 @@ class LibraryViewModel:
         done = 0
         total = len(targets)
         for index, (music_id, folder, audio) in enumerate(targets):
+            if should_stop is not None and should_stop():
+                break
             try:
                 result = transcribe_sound_folder(Path(folder), audio_path=Path(audio), transcriber=transcriber)
                 if result.get("status") in ("ok", "empty"):

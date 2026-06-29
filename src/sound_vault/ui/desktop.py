@@ -1185,7 +1185,9 @@ class _ImportWorker(QThread):
                     device_id=device_id,
                     device_secret=device_secret,
                 )
-            outcomes = self._vm.import_pending(reporter=self._reporter)
+            outcomes = self._vm.import_pending(
+                reporter=self._reporter, should_stop=self.isInterruptionRequested
+            )
             self.importFinished.emit(outcomes, None)
         except Exception as exc:  # noqa: BLE001 - surface failure to the UI thread
             self.importFinished.emit([], f"{type(exc).__name__}: {exc}")
@@ -1208,7 +1210,9 @@ class _TranscriptionWorker(QThread):
     def run(self) -> None:
         try:
             count = self._vm.transcribe_targets(
-                self._targets, progress=lambda done, total, _mid: self.progress.emit(done, total)
+                self._targets,
+                progress=lambda done, total, _mid: self.progress.emit(done, total),
+                should_stop=self.isInterruptionRequested,
             )
             self.finished_ok.emit(count, None)
         except Exception as exc:  # noqa: BLE001 - surface to UI thread
@@ -2717,10 +2721,19 @@ class SoundVaultWindow(QMainWindow):
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 timer.stop()
-        for worker_name in ("_poll_worker", "_import_worker", "_transcribe_worker"):
-            worker = getattr(self, worker_name, None)
+        # Cooperatively cancel the background workers BEFORE waiting. Each run loop
+        # polls QThread.isInterruptionRequested between items and forwards it into
+        # the active capture subprocess (killed mid-flight), so a quit during a long
+        # bulk import returns in well under a second instead of timing out. Waiting
+        # without first requesting interruption is what let a still-running QThread
+        # be destroyed at teardown and crash Qt with SIGABRT.
+        workers = [getattr(self, name, None) for name in ("_poll_worker", "_import_worker", "_transcribe_worker")]
+        for worker in workers:
             if worker is not None and worker.isRunning():
-                worker.wait(5000)
+                worker.requestInterruption()
+        for worker in workers:
+            if worker is not None and worker.isRunning():
+                worker.wait(10000)
         self.save_table_layout("library", self.table)
         self.save_table_layout("inbox_v2", self.inbox_table)
         self.settings.set_hidden_table_columns("library", self.hidden_library_columns())

@@ -1,3 +1,5 @@
+import sys
+import time
 from pathlib import Path
 
 from sound_vault.ingest.download import (
@@ -6,6 +8,29 @@ from sound_vault.ingest.download import (
     PlaywrightCaptureDownloader,
     YtDlpDownloader,
 )
+from sound_vault.ingest.factory import _subprocess_runner
+
+
+def test_subprocess_runner_cancel_kills_long_process_fast():
+    """A capture that's still running when cancel() flips must be killed promptly
+    so the import worker thread can exit on quit (otherwise the QThread is
+    destroyed mid-run and Qt aborts with SIGABRT)."""
+    start = time.monotonic()
+    rc, _out, err = _subprocess_runner(
+        [sys.executable, "-c", "import time; time.sleep(30)"], cancel=lambda: True
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 5  # killed within a poll tick, not after the 30s sleep
+    assert rc != 0
+    assert "cancelled" in err
+
+
+def test_subprocess_runner_runs_to_completion_when_not_cancelled():
+    rc, out, _err = _subprocess_runner(
+        [sys.executable, "-c", "print('done')"], cancel=lambda: False
+    )
+    assert rc == 0
+    assert "done" in out
 
 
 def _extract_writes_m4a(info):

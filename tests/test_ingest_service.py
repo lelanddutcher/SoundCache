@@ -148,6 +148,61 @@ def test_drain_inbox_records_failure_and_retries_until_exhausted(tmp_path):
     assert "boom" in (failed.error or "")
 
 
+def test_drain_inbox_should_stop_halts_between_items_leaving_rest_pending(tmp_path):
+    """A quit (should_stop) during a bulk import must stop promptly and leave the
+    not-yet-processed items fully pending — no failure attempt burned — so they
+    retry cleanly next run. This is the cooperative-cancel path that lets the
+    import worker thread exit instead of crashing Qt at teardown."""
+    store = ShortcutInboxStore(tmp_path / "inbox.jsonl")
+    for i in range(4):
+        store.add_url(f"https://www.tiktok.com/t/{i}/", source="ios_shortcut", relay_id=f"in_{i}")
+    resolve_map = {
+        f"https://www.tiktok.com/t/{i}/": tiktok_music(f"https://www.tiktok.com/t/{i}/", music_id=str(i))
+        for i in range(4)
+    }
+    svc = make_service(tmp_path, FakeDownloader(), resolve_map=resolve_map)
+
+    # Stop after the first item has been ingested.
+    state = {"n": 0}
+
+    def should_stop():
+        return state["n"] >= 1
+
+    original = svc.ingest_url
+
+    def counting_ingest(url, **kwargs):
+        out = original(url, **kwargs)
+        state["n"] += 1
+        return out
+
+    svc.ingest_url = counting_ingest  # type: ignore[method-assign]
+    outcomes = svc.drain_inbox(store, should_stop=should_stop)
+
+    assert len(outcomes) == 1  # only the first item was processed+recorded
+    assert outcomes[0][1].status == "ingested"
+    pending = store.pending()
+    assert len(pending) == 3  # the rest are untouched
+    assert all(item.attempts == 0 for item in pending)  # no failure attempt burned
+
+
+def test_drain_inbox_should_stop_forwards_cancel_into_download(tmp_path):
+    """should_stop is forwarded into the active download so a long capture can be
+    killed mid-flight, not just checked between items."""
+    seen = {}
+
+    class CancelAwareDownloader(FakeDownloader):
+        def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
+            seen["should_stop"] = kwargs.get("should_stop")
+            return super().download(url, dest_dir=dest_dir, basename=basename, source_id=source_id, **kwargs)
+
+    store = ShortcutInboxStore(tmp_path / "inbox.jsonl")
+    store.add_url("https://www.tiktok.com/t/a/", source="ios_shortcut", relay_id="in_1")
+    svc = make_service(tmp_path, CancelAwareDownloader())
+    flag = lambda: False  # noqa: E731 - tiny predicate
+    svc.drain_inbox(store, should_stop=flag)
+    assert seen["should_stop"] is flag
+
+
 def test_ingest_url_writes_user_note_to_metadata(tmp_path):
     svc = make_service(tmp_path, FakeDownloader())
     out = svc.ingest_url("https://www.tiktok.com/t/abc/", source="ios_shortcut", note="  use for gym intros  ")

@@ -171,7 +171,9 @@ class IngestService:
             title = download_title or slug_title or "Unknown"
         return title, artist
 
-    def ingest_url(self, url: str, *, source: str = "ios_shortcut", note: str = "") -> IngestOutcome:
+    def ingest_url(
+        self, url: str, *, source: str = "ios_shortcut", note: str = "", should_stop: "Callable[[], bool] | None" = None
+    ) -> IngestOutcome:
         note = (note or "").strip()
         resolved = self._resolve_source(url)
         if resolved.status != "ok":
@@ -202,6 +204,7 @@ class IngestService:
                 source_id=music_id,
                 platform=resolved.platform,
                 kind=resolved.kind,
+                should_stop=should_stop,
             )
             if not download.ok:
                 return IngestOutcome(
@@ -381,17 +384,33 @@ class IngestService:
         return None
 
     def drain_inbox(
-        self, store: ShortcutInboxStore, *, max_attempts: int = 3
+        self,
+        store: ShortcutInboxStore,
+        *,
+        max_attempts: int = 3,
+        should_stop: "Callable[[], bool] | None" = None,
     ) -> list[tuple[ShortcutInboxItem, IngestOutcome]]:
+        """Ingest every pending item. ``should_stop`` (e.g. the import worker's
+        ``QThread.isInterruptionRequested``) is polled between items and forwarded
+        into the active download so a quit during a long bulk import stops promptly
+        and the interrupted item is left pending (no failure attempt burned)."""
         from sound_vault.diagnostics import exception_fields, write_event
 
         outcomes: list[tuple[ShortcutInboxItem, IngestOutcome]] = []
         for item in store.pending():
+            if should_stop is not None and should_stop():
+                break
             try:
-                outcome = self.ingest_url(item.url, source=item.source, note=getattr(item, "note", "") or "")
+                outcome = self.ingest_url(
+                    item.url, source=item.source, note=getattr(item, "note", "") or "", should_stop=should_stop
+                )
             except Exception as exc:  # noqa: BLE001 - one bad item must never abort the batch
                 write_event("ingest.url_exception", url=item.url, **exception_fields(exc))
                 outcome = IngestOutcome(status="failed", url=item.url, reason=f"{type(exc).__name__}: {exc}")
+            # If a quit cancelled this item mid-download, leave it untouched (still
+            # pending) so it retries cleanly next run rather than counting a failure.
+            if should_stop is not None and should_stop() and outcome.status not in ("ingested", "duplicate"):
+                break
             if outcome.status in ("ingested", "duplicate"):
                 store.mark_imported(item.id)
             else:

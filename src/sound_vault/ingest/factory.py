@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import time
 
 from sound_vault.db.index_db import IndexDatabase
 from sound_vault.ingest.download import CompositeDownloader, PlaywrightCaptureDownloader, YtDlpDownloader
@@ -33,9 +34,33 @@ def ensure_media_tools_on_path() -> None:
         os.environ["PATH"] = os.pathsep.join(parts + added)
 
 
-def _subprocess_runner(cmd, cwd=None):
-    result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=240, check=False)
-    return result.returncode, result.stdout, result.stderr
+def _subprocess_runner(cmd, cwd=None, cancel=None):
+    """Run a capture subprocess, killable mid-flight.
+
+    Polls an optional ``cancel()`` predicate (e.g. the import worker's
+    ``QThread.isInterruptionRequested``) so quitting during a long bulk import
+    terminates the node/Playwright child promptly instead of blocking the worker
+    thread for up to the full timeout. A thread still stuck in a subprocess at app
+    teardown is exactly what left a QThread running and crashed Qt with SIGABRT.
+    Keeps the original 240s ceiling as a hard backstop.
+    """
+    proc = subprocess.Popen(cmd, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 240
+    while True:
+        try:
+            out, err = proc.communicate(timeout=0.25)
+            return proc.returncode, out, err
+        except subprocess.TimeoutExpired:
+            pass
+        cancelled = cancel is not None and cancel()
+        if cancelled or time.monotonic() > deadline:
+            proc.kill()
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:  # pragma: no cover - kill didn't take
+                out, err = "", ""
+            reason = "cancelled" if cancelled else "timed out after 240s"
+            return (proc.returncode if proc.returncode is not None else -1), out, f"capture {reason}"
 
 
 def _repo_root() -> Path:

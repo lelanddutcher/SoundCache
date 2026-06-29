@@ -134,8 +134,18 @@ class PlaywrightCaptureDownloader:
     def available(self) -> bool:
         return self.node_script.exists() and self.storage_state.exists()
 
+    def _invoke_runner(self, cmd: list[str], should_stop: Any = None) -> "tuple[int, str, str]":
+        """Call the injected runner, passing a ``cancel`` predicate when it accepts
+        one. Test/legacy runners with a two-arg signature still work (fall back)."""
+        if should_stop is not None:
+            try:
+                return self._runner(cmd, cwd=self._project_cwd, cancel=should_stop)
+            except TypeError:
+                pass
+        return self._runner(cmd, cwd=self._project_cwd)
+
     def download(
-        self, url: str, *, dest_dir: Path, basename: str, source_id: str | None = None, **_: Any
+        self, url: str, *, dest_dir: Path, basename: str, source_id: str | None = None, **extra: Any
     ) -> DownloadResult:
         if not self.available():
             return DownloadResult(
@@ -146,7 +156,7 @@ class PlaywrightCaptureDownloader:
         music_id = source_id or basename
         cmd = ["node", str(self.node_script), url, str(dest_dir), music_id, str(self.storage_state)]
         try:
-            returncode, _out, err = self._runner(cmd, cwd=self._project_cwd)
+            returncode, _out, err = self._invoke_runner(cmd, extra.get("should_stop"))
         except Exception as exc:  # noqa: BLE001
             return DownloadResult(
                 ok=False, audio_path=None, info={}, method="playwright", error=f"{type(exc).__name__}: {exc}"
@@ -184,7 +194,7 @@ class PlaywrightCaptureDownloader:
         dest_dir.mkdir(parents=True, exist_ok=True)
         cmd = ["node", str(self.node_script), url, str(dest_dir), music_id, str(self.storage_state), "meta-only"]
         try:
-            self._runner(cmd, cwd=self._project_cwd)
+            self._invoke_runner(cmd)
         except Exception:  # noqa: BLE001 - best-effort enrichment
             return {}
         return self._read_capture_meta(dest_dir, music_id)
@@ -251,14 +261,19 @@ class CompositeDownloader:
     def download(
         self, url: str, *, dest_dir: Path, basename: str, source_id: str | None = None, **extra: Any
     ) -> DownloadResult:
-        result = self.primary.download(url, dest_dir=dest_dir, basename=basename, source_id=source_id)
+        # Forward the cancel predicate only when set, so downloaders/fakes that
+        # don't declare **kwargs keep their exact prior call shape.
+        fwd = {"should_stop": extra["should_stop"]} if extra.get("should_stop") is not None else {}
+        result = self.primary.download(url, dest_dir=dest_dir, basename=basename, source_id=source_id, **fwd)
         if result.ok:
             return result
         if self.fallback is None:
             return result
         if self.should_fallback is not None and not self.should_fallback(url, result, source_id=source_id, **extra):
             return result
-        fallback_result = self.fallback.download(url, dest_dir=dest_dir, basename=basename, source_id=source_id)
+        fallback_result = self.fallback.download(
+            url, dest_dir=dest_dir, basename=basename, source_id=source_id, **fwd
+        )
         if fallback_result.ok:
             return fallback_result
         return DownloadResult(
