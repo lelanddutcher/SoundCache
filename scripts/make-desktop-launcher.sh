@@ -7,7 +7,11 @@ set -euo pipefail
 APP="$HOME/Applications/Sound Cache.app"
 VENV_BIN="$HOME/venvs/sound-vault/bin/sound-vault"
 
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+# Bundle the app icon (full-bleed squircle) so Finder/Dock show the real logo.
+ICNS_SRC="$(cd "$(dirname "$0")/.." && pwd)/src/sound_vault/ui/assets/AppIcon.icns"
+[ -f "$ICNS_SRC" ] && cp "$ICNS_SRC" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -21,6 +25,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>launch</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSBackgroundOnly</key><false/>

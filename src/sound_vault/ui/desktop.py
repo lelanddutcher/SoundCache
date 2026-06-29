@@ -1585,8 +1585,24 @@ class SoundVaultWindow(QMainWindow):
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(20, 22, 16, 22)
         side.setSpacing(10)
-        brand = QLabel("▸ Sound Cache")
+        brand = QWidget()
         brand.setObjectName("brand")
+        brand_row = QHBoxLayout(brand)
+        brand_row.setContentsMargins(0, 0, 0, 0)
+        brand_row.setSpacing(9)
+        brand_mark = QLabel()
+        brand_mark.setObjectName("brandMark")
+        _mark = QPixmap(str(_UI_DIR / "assets" / "app-icon-256.png"))
+        if not _mark.isNull():
+            brand_mark.setPixmap(
+                _mark.scaled(26, 26, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            )
+        brand_mark.setFixedSize(26, 26)
+        brand_text = QLabel("Sound Cache")
+        brand_text.setObjectName("brandText")
+        brand_row.addWidget(brand_mark)
+        brand_row.addWidget(brand_text)
+        brand_row.addStretch(1)
         side.addWidget(brand)
         self.nav_buttons = {}
         # The nav + library/playlist list lives in a vertical scroll area so a long
@@ -4560,7 +4576,7 @@ STYLESHEET = """
 QMainWindow, QWidget {
     background: #0a0518;
     color: #d9cef0;
-    font-family: "Fredoka", "Quicksand", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+    font-family: "Quicksand", "Quicksand", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
     font-size: 12px;
 }
 
@@ -4580,15 +4596,19 @@ QMainWindow, QWidget {
 
 /* Brand / section headers */
 #brand {
-    font-family: "Fredoka", "Quicksand", sans-serif;
-    font-size: 17px;
-    font-weight: 700;
-    color: #ff8fe0;
-    padding: 4px 6px 12px 6px;
+    padding: 2px 4px 12px 4px;
     border-bottom: 1px solid #2a1758;
     background: transparent;
-    letter-spacing: 0.01em;
 }
+#brandText {
+    font-family: "Unbounded", "Quicksand", sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+    color: #fbedff;
+    letter-spacing: -0.01em;
+    background: transparent;
+}
+#brandMark { background: transparent; }
 #sourceGroup {
     color: #7d6fa9;
     background: transparent;
@@ -4601,9 +4621,9 @@ QMainWindow, QWidget {
 }
 
 /* Title typography */
-#title { font-family: "Fredoka", sans-serif; font-size: 19px; font-weight: 700; color: #fbedff; letter-spacing: -0.005em; background: transparent; }
-#sectionTitle { font-family: "Fredoka", sans-serif; font-size: 14px; font-weight: 600; color: #fbedff; background: transparent; }
-#previewTitle { font-family: "Fredoka", sans-serif; font-size: 16px; font-weight: 600; color: #fbedff; background: transparent; }
+#title { font-family: "Unbounded", "Quicksand", sans-serif; font-size: 17px; font-weight: 700; color: #fbedff; letter-spacing: -0.01em; background: transparent; }
+#sectionTitle { font-family: "Quicksand", sans-serif; font-size: 14px; font-weight: 600; color: #fbedff; background: transparent; }
+#previewTitle { font-family: "Quicksand", sans-serif; font-size: 16px; font-weight: 600; color: #fbedff; background: transparent; }
 #muted { color: #8c7fb5; font-size: 11px; background: transparent; }
 #onboardBody { color: #d9cef0; font-size: 12px; line-height: 150%; background: transparent; }
 
@@ -4679,7 +4699,7 @@ QMainWindow, QWidget {
 }
 #displayTitle {
     color: #fbedff;
-    font-family: "Fredoka", "Quicksand", sans-serif;
+    font-family: "Quicksand", "Quicksand", sans-serif;
     font-size: 14px;
     font-weight: 600;
     background: transparent;
@@ -4704,7 +4724,7 @@ QMainWindow, QWidget {
     border: 1px solid #2a1758;
     border-radius: 8px;
     padding: 5px 12px;
-    font-family: "Fredoka", sans-serif;
+    font-family: "Quicksand", sans-serif;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.5px;
@@ -4816,7 +4836,7 @@ QToolButton::menu-button { border: none; width: 0; }
     border: 1px solid #1a0c33;
     border-top: 1px solid #fff4ff;
     text-align: center;
-    font-family: "Fredoka", sans-serif;
+    font-family: "Quicksand", sans-serif;
     font-weight: 700;
 }
 #primaryButton:hover {
@@ -4836,7 +4856,7 @@ QToolButton::menu-button { border: none; width: 0; }
     border-radius: 10px;
     padding: 7px 11px;
     text-align: left;
-    font-family: "Fredoka", sans-serif;
+    font-family: "Quicksand", sans-serif;
     font-weight: 500;
 }
 #navButton:hover {
@@ -4908,7 +4928,7 @@ QGroupBox::title {
     color: #66ecff;
     background: transparent;
     text-transform: uppercase;
-    font-family: "Fredoka", sans-serif;
+    font-family: "Quicksand", sans-serif;
     font-size: 9px;
     letter-spacing: 1.6px;
     font-weight: 700;
@@ -4993,7 +5013,7 @@ QHeaderView::section {
     border-right: 1px solid #0c0720;
     border-bottom: 1px solid #0a0518;
     border-top: 1px solid #3a2470;
-    font-family: "Fredoka", sans-serif;
+    font-family: "Quicksand", sans-serif;
     font-weight: 600;
     font-size: 10px;
     text-transform: uppercase;
@@ -5094,7 +5114,7 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 }
 #archiveHealthTitle {
     color: #66ecff;
-    font-family: "Fredoka", "SF Mono", monospace;
+    font-family: "Quicksand", "SF Mono", monospace;
     font-size: 9px;
     font-weight: 700;
     letter-spacing: 1.8px;
@@ -5167,9 +5187,35 @@ def _single_instance_name() -> str:
         return "sound-cache"
 
 
+_UI_DIR = Path(__file__).resolve().parent
+
+
+def _load_brand_fonts() -> None:
+    """Register the bundled brand faces so the stylesheet's Unbounded (display) +
+    Quicksand (body) actually render — neither is a system font."""
+    from PySide6.QtGui import QFontDatabase
+
+    for name in ("Unbounded.ttf", "Quicksand.ttf"):
+        path = _UI_DIR / "fonts" / name
+        if path.exists():
+            QFontDatabase.addApplicationFont(str(path))
+
+
+def app_icon() -> QIcon:
+    for name in ("app-icon.png", "app-icon-256.png"):
+        path = _UI_DIR / "assets" / name
+        if path.exists():
+            return QIcon(str(path))
+    return QIcon()
+
+
 def run_desktop(vault_root: Path | None = None, pending_urls: list[str] | None = None) -> int:
     pending_urls = [u for u in (pending_urls or []) if u]
     app = QApplication.instance() or QApplication(sys.argv)
+    _load_brand_fonts()
+    app.setApplicationName("Sound Cache")
+    app.setApplicationDisplayName("Sound Cache")
+    app.setWindowIcon(app_icon())
 
     bus = _DeepLinkBus()
     open_filter = _FileOpenFilter(bus)
