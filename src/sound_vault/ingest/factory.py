@@ -139,10 +139,16 @@ def build_transcriber(settings=None):
     Local faster-whisper is the only locally-runnable engine (cloud needs the
     openai package + an API key), so use it when installed. Disabled by the
     SOUND_VAULT_DISABLE_TRANSCRIBE env var (set in tests/CI)."""
-    if os.getenv("SOUND_VAULT_DISABLE_TRANSCRIBE"):
-        return None
-    from sound_vault.workers.transcription import LocalASRConfig, faster_whisper_transcriber
+    from sound_vault.diagnostics import write_event
 
+    if os.getenv("SOUND_VAULT_DISABLE_TRANSCRIBE"):
+        write_event("asr.build_transcriber", result="none", reason="disabled_env")
+        return None
+    from sound_vault.workers.transcription import LocalASRConfig, faster_whisper_available, faster_whisper_transcriber
+
+    if not faster_whisper_available():
+        write_event("asr.build_transcriber", result="none", reason="faster_whisper_unavailable")
+        return None
     cfg = {}
     if settings is None:
         try:
@@ -156,12 +162,16 @@ def build_transcriber(settings=None):
             cfg = settings.transcription_config()
         except Exception:  # noqa: BLE001
             cfg = {}
-    return faster_whisper_transcriber(
+    transcriber = faster_whisper_transcriber(
         LocalASRConfig(
             model=str(cfg.get("local_model") or "base"),
             model_cache_dir=(str(cfg.get("model_cache_dir") or "") or None),
         )
     )
+    write_event("asr.build_transcriber", result="ok" if transcriber else "none",
+                reason="" if transcriber else "transcriber_factory_none",
+                model=str(cfg.get("local_model") or "base"))
+    return transcriber
 
 
 def build_ingest_service(

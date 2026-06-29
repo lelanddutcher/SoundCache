@@ -96,6 +96,8 @@ def main() -> None:
     parser.add_argument("--import-date-label", default=None, help="Date/version label for import output files")
     parser.add_argument("--oembed-delay", type=float, default=0.6, help="Delay between oEmbed requests in seconds")
     parser.add_argument("--diagnose-dependencies", action="store_true", help="Print ffmpeg/local ASR/model/Demucs dependency diagnostics")
+    parser.add_argument("--transcribe-pending", action="store_true", help="Transcribe every downloaded sound that still lacks a transcript (headless, with progress)")
+    parser.add_argument("--transcribe-limit", type=int, default=0, help="Cap how many pending sounds --transcribe-pending processes (0 = all)")
     parser.add_argument("--verify-vault", action="store_true", help="Rebuild/search the disposable index and verify durable vault files")
     parser.add_argument("--verify-search", action="append", default=[], help="Search term that must be found during --verify-vault; may be repeated")
     parser.add_argument(
@@ -131,6 +133,49 @@ def main() -> None:
         )
         print(json.dumps(asdict(report), indent=2, sort_keys=True))
         write_event("app.dependency_diagnostics_complete", vault_root=str(vault_root))
+        return
+    if args.transcribe_pending:
+        from sound_vault.ingest.factory import build_transcriber
+        from sound_vault.workers.transcription import _has_transcript_text, transcribe_sound_folder
+
+        transcriber = build_transcriber()
+        if transcriber is None:
+            print("Local transcription unavailable (faster-whisper not installed, or SOUND_VAULT_DISABLE_TRANSCRIBE is set).")
+            write_event("app.transcribe_pending_unavailable", vault_root=str(vault_root))
+            return
+        sounds_root = vault_root / "sounds"
+        pending: list[tuple[Path, Path]] = []
+        for folder in sorted(p for p in sounds_root.iterdir() if p.is_dir()) if sounds_root.exists() else []:
+            meta = folder / "metadata.json"
+            if not meta.exists():
+                continue
+            try:
+                md = json.loads(meta.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(md, dict) or _has_transcript_text(md):
+                continue
+            audios = sorted(folder.glob("*.m4a"))
+            if audios:
+                pending.append((folder, audios[0]))
+        if args.transcribe_limit > 0:
+            pending = pending[: args.transcribe_limit]
+        total = len(pending)
+        print(f"{total} sound(s) need a transcript. Transcribing… (Ctrl-C to stop; safe to re-run — it's idempotent)")
+        if total == 0:
+            return
+        ok = 0
+        for i, (folder, audio) in enumerate(pending, 1):
+            try:
+                res = transcribe_sound_folder(folder, audio_path=audio, transcriber=transcriber)
+                status = str(res.get("status"))
+                if status in ("ok", "empty"):
+                    ok += 1
+                print(f"  [{i}/{total}] {folder.name[:54]} -> {status}", flush=True)
+            except Exception as exc:  # noqa: BLE001 - per-item best-effort
+                print(f"  [{i}/{total}] {folder.name[:54]} -> error: {exc}", flush=True)
+        print(f"Done — {ok}/{total} transcribed. In the app: Vault → Rebuild Index to surface them.")
+        write_event("app.transcribe_pending_complete", vault_root=str(vault_root), total=str(total), transcribed=str(ok))
         return
     if args.run_import_workflow:
         from sound_vault.workflows.import_wizard import ImportWizard

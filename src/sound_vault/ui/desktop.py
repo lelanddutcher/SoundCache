@@ -1273,6 +1273,8 @@ class _TranscriptionQueueWorker(QThread):
     def run(self) -> None:
         transcriber = None
         built = False
+        ok_count = 0
+        write_event("gui.queue_worker_started")
         try:
             while not self.isInterruptionRequested():
                 try:
@@ -1285,22 +1287,30 @@ class _TranscriptionQueueWorker(QThread):
                 if not built:
                     from sound_vault.ingest.factory import build_transcriber
 
-                    transcriber = build_transcriber()  # built once; None if ASR unavailable
+                    transcriber = build_transcriber()  # built once (logs asr.build_transcriber)
                     built = True
-                if transcriber is not None:
-                    try:
-                        ok = self._vm.transcribe_one(
-                            music_id, folder, audio,
-                            transcriber=transcriber, should_stop=self.isInterruptionRequested,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - per-item best-effort, never fatal
-                        write_event("gui.queue_transcribe_error", music_id=str(music_id), **exception_fields(exc))
-                        ok = False
-                    if ok:
-                        self.transcribed.emit(music_id)
+                    if transcriber is None:
+                        # Nothing will transcribe — don't silently drain 1000s of
+                        # items; surface it and stop. (faster-whisper missing/disabled.)
+                        write_event("gui.queue_worker_no_transcriber")
+                        break
+                try:
+                    ok = self._vm.transcribe_one(
+                        music_id, folder, audio,
+                        transcriber=transcriber, should_stop=self.isInterruptionRequested,
+                    )
+                except Exception as exc:  # noqa: BLE001 - per-item best-effort, never fatal
+                    write_event("gui.queue_transcribe_error", music_id=str(music_id), **exception_fields(exc))
+                    ok = False
+                if ok:
+                    ok_count += 1
+                    self.transcribed.emit(music_id)
                 with self._counter_lock:
                     done, enqueued = self._done + 1, self._enqueued
                     self._done = done
+                # Heartbeat so the silent path is diagnosable + progress is visible.
+                if done == 1 or done % 25 == 0:
+                    write_event("gui.queue_transcribe_progress", done=str(done), enqueued=str(enqueued), transcribed=str(ok_count))
                 self.progress.emit(done, enqueued)
         except Exception as exc:  # noqa: BLE001 - a dying run() must surface, not vanish
             write_event("gui.queue_transcribe_worker_fatal", **exception_fields(exc))
