@@ -918,6 +918,49 @@ def test_transcript_refresh_survives_tab_switch(tmp_path, monkeypatch):
     assert refreshed == [True]
 
 
+def test_backlog_transcription_enqueues_untranscribed_sounds(tmp_path, monkeypatch):
+    """Existing sounds with audio but no transcript must be swept into the queue
+    worker (the live pipeline only feeds new imports)."""
+    from pathlib import Path
+
+    from sound_vault.ingest.package import package_sound
+
+    monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_AUTO_INDEX", "1")
+    monkeypatch.delenv("SOUND_VAULT_DISABLE_TRANSCRIBE", raising=False)  # sweep no-ops when set
+    vault = tmp_path / "vault"
+    (vault / "catalog").mkdir(parents=True)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for i in range(2):
+        src = raw / f"{i}.m4a"
+        src.write_bytes(b"\x00audio")
+        package_sound(
+            vault_root=vault, music_id=str(i), title=f"t{i}", artist="a", audio_path=src,
+            tagger=lambda s, d, t: Path(d).write_bytes(Path(s).read_bytes()), now_iso="t",
+        )
+
+    app = _app()
+    window = SoundVaultWindow(vault_root=vault)
+    app.processEvents()
+    window.vm.rebuild_index()
+
+    enq: list[tuple] = []
+
+    class FakeWorker:
+        def enqueue(self, *a):
+            enq.append(a)
+
+    monkeypatch.setattr(window, "_ensure_transcribe_queue_worker", lambda: FakeWorker())
+    window._start_backlog_transcription(force=True)
+
+    assert len(enq) == 2  # both untranscribed sounds queued
+    # Idempotent guard: a non-forced re-run after one has started does nothing new.
+    window._start_backlog_transcription(force=False)
+    assert len(enq) == 2
+
+
 def test_repair_portability_noop_when_all_names_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("SOUND_VAULT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SOUND_VAULT_DATA_DIR", str(tmp_path / "data"))

@@ -415,8 +415,8 @@ or the whole venv folder above.
 
 def _write_info_plist(path: Path, *, version: str) -> None:
     payload = {
-        "CFBundleName": "Sound Vault",
-        "CFBundleDisplayName": "Sound Vault",
+        "CFBundleName": "Sound Cache",
+        "CFBundleDisplayName": "Sound Cache",
         "CFBundleIdentifier": "com.lelanddutcher.sound-vault",
         "CFBundleVersion": version,
         "CFBundleShortVersionString": version,

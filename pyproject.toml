@@ -16,6 +16,9 @@ dependencies = [
 gui = [
   "PySide6>=6.7",
   "qrcode>=7.4",
+  # macOS: lets us set the app menu name to "Sound Cache" instead of "Python"
+  # (the launcher runs a loose venv python not associated with the .app bundle).
+  "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
 ]
 asr = [
   "faster-whisper>=1.1.0",

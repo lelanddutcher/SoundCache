@@ -3069,6 +3069,7 @@ class SoundVaultWindow(QMainWindow):
         vault_menu = bar.addMenu("&Vault")
         self._add_action(vault_menu, "Connect TikTok…", self.open_tiktok_connect)
         self._add_action(vault_menu, "Rebuild Index", self.rebuild_index)
+        self._add_action(vault_menu, "Transcribe Pending Sounds", lambda: self._start_backlog_transcription(force=True))
         self._add_action(vault_menu, "Vault Info…", self.show_vault_info)
         vault_menu.addSeparator()
         self._add_action(vault_menu, "Repair Names for Portability…", self.repair_folder_portability)
@@ -3297,6 +3298,11 @@ class SoundVaultWindow(QMainWindow):
             self.refresh_review_queues()
             self.refresh_worker_status()
             write_event("gui.index_rebuild_complete", vault_root=str(self.vault_root), records=count)
+            # Kick off a one-time background sweep that transcribes the existing
+            # backlog (sounds with audio but no transcript). New imports already
+            # transcribe via the live pipeline; this catches everything that landed
+            # before transcription was wired up (or in an older build).
+            QTimer.singleShot(1500, self._start_backlog_transcription)
         except Exception as exc:
             self.worker_label.setText(f"Worker\nindex error: {exc}")
             self.stats_label.setText("index failed")
@@ -4341,6 +4347,34 @@ class SoundVaultWindow(QMainWindow):
         worker = getattr(self, "_transcribe_queue_worker", None)
         if worker is not None and worker.isRunning():
             worker.enqueue(music_id, folder, audio)
+
+    def _start_backlog_transcription(self, *, force: bool = False) -> None:
+        """Feed every already-downloaded sound that still lacks a transcript into the
+        queue worker, so the backlog drains in the background (concurrently with any
+        import). Auto-runs once per session after the index is ready; the Vault menu
+        action re-runs it on demand. Idempotent — transcribe_one skips sounds that
+        already have a transcript."""
+        if not force and getattr(self, "_backlog_transcription_started", False):
+            return
+        if _env_flag("SOUND_VAULT_DISABLE_TRANSCRIBE"):
+            return
+        worker = self._ensure_transcribe_queue_worker()
+        if worker is None:
+            if force:
+                self.statusBar().showMessage("Transcription engine unavailable (faster-whisper not installed).", 6000)
+            return
+        targets = self.vm.transcription_targets()  # all pending across the vault
+        self._backlog_transcription_started = True
+        if not targets:
+            if force:
+                self.statusBar().showMessage("All sounds already transcribed. ✅", 5000)
+            return
+        for music_id, folder, audio in targets:
+            worker.enqueue(str(music_id), str(folder), str(audio))
+        write_event("gui.backlog_transcription_started", count=str(len(targets)))
+        self.statusBar().showMessage(
+            f"Transcribing {len(targets):,} sound(s) in the background — this can take a while.", 6000
+        )
 
     def _on_queue_progress(self, done: int, enqueued: int) -> None:
         if done >= enqueued:

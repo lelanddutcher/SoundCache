@@ -12,6 +12,30 @@ from sound_vault.settings import AppSettings, default_index_path, index_path_for
 from sound_vault.vault.indexer import resolve_vault_root
 
 
+def _set_macos_app_menu_name(name: str = "Sound Cache") -> None:
+    """Make the macOS menu bar show the app name instead of "Python".
+
+    The Mac launcher execs the venv's python, so the GUI process isn't associated
+    with the .app bundle and Cocoa falls back to the interpreter's bundle name
+    ("Python"). Patching the main bundle's info dictionary BEFORE QApplication is
+    created fixes the app-menu title. Best-effort: a no-op when not on macOS or when
+    pyobjc (the gui extra's pyobjc-framework-Cocoa) isn't installed."""
+    if platform.system() != "Darwin":
+        return
+    try:
+        from Foundation import NSBundle
+
+        bundle = NSBundle.mainBundle()
+        if bundle is None:
+            return
+        info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = name
+            info["CFBundleDisplayName"] = name
+    except Exception:  # noqa: BLE001 - cosmetic only; never block launch
+        pass
+
+
 def _app_log_path() -> Path:
     return user_data_dir() / "app.log"
 
@@ -245,6 +269,7 @@ def main() -> None:
         return
     try:
         write_event("gui.import_start", vault_root=str(vault_root))
+        _set_macos_app_menu_name()  # must run before QApplication is created
         from sound_vault.ui.desktop import run_desktop
 
         write_event("gui.import_complete", vault_root=str(vault_root))
