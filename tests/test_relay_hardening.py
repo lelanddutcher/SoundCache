@@ -112,3 +112,17 @@ def test_cors_not_wildcard():
     text = pathlib.Path(src).read_text(encoding="utf-8")
     assert 'allow_origins=["*"]' not in text
     assert "allow_origin_regex" in text
+
+
+def test_cors_regex_allows_www_and_apex_but_not_lookalikes():
+    """The hits page leaderboard fetch failed ('can't reach the hive mind') because
+    www.soundcache.io wasn't an allowed CORS origin. Both apex and www must pass; any
+    other host must be rejected."""
+    import re
+
+    rx = relay_server._CORS_ORIGIN_REGEX
+    for allowed in ("https://soundcache.io", "https://www.soundcache.io",
+                    "https://soundcache-web.vercel.app", "http://localhost:8000"):
+        assert re.match(rx, allowed), allowed
+    for blocked in ("https://evil.com", "https://soundcache.io.evil.com", "https://notsoundcache.io"):
+        assert re.match(rx, blocked) is None, blocked

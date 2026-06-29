@@ -19,7 +19,7 @@ app = FastAPI(title="Sound Cache Pairing Relay", version="0.1.0")
 # Submit/poll come from the iOS Shortcut + desktop (non-browser, CORS-exempt), so we
 # only need to allow cross-origin GET — and only from our own origins. This kills
 # browser-driven cross-site POSTs entirely.
-_CORS_ORIGIN_REGEX = r"^https://(soundcache\.io|[a-z0-9-]+\.vercel\.app)$|^http://localhost(:\d+)?$"
+_CORS_ORIGIN_REGEX = r"^https://(www\.)?soundcache\.io$|^https://[a-z0-9-]+\.vercel\.app$|^http://localhost(:\d+)?$"
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=_CORS_ORIGIN_REGEX,
