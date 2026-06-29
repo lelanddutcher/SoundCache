@@ -4482,46 +4482,55 @@ class SoundVaultWindow(QMainWindow):
         selected, _filter = QFileDialog.getOpenFileName(
             self,
             "Import TikTok favorite sounds export",
-            str(self.vault_root),
+            self._vault_dialog_start_dir(),
             "JSON files (*.json);;All files (*)",
         )
         if not selected:
             return
         try:
             result = self.vm.import_favorite_sounds_export(Path(selected))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - surface to the user
             write_event("gui.favorite_sounds_import_exception", **exception_fields(exc))
             QMessageBox.warning(self, "Import failed", f"Could not import TikTok favorite sounds export:\n{exc}")
             return
         summary = result.summary
+        # The step above only writes a metadata analysis to catalog/imports — it
+        # fetches no audio. Also queue the favorites so the user can actually
+        # Download & import them (this is what they almost always want).
+        try:
+            queued = int(self.vm.import_sound_pack(Path(selected)).get("queued", 0))
+        except Exception as exc:  # noqa: BLE001 - queuing is best-effort
+            write_event("gui.favorite_sounds_queue_exception", **exception_fields(exc))
+            queued = 0
+        self.refresh_inbox()
+        self.show_view("inbox")
         self.statusBar().showMessage(
-            f"Imported {summary.record_count:,} favorite-sound rows into catalog/imports",
-            5000,
+            f"Imported {summary.record_count:,} favorite sounds • queued {queued:,} for download", 6000
         )
         self.inbox_label.setText(
-            "TikTok export import\n"
-            f"{summary.record_count:,} rows • {summary.unique_music_ids:,} unique IDs\n"
-            f"{summary.already_in_vault:,} existing • {summary.new_to_vault:,} new"
+            "TikTok favorites\n"
+            f"{summary.record_count:,} rows • {queued:,} queued\n"
+            f"{summary.already_in_vault:,} already in vault"
         )
-        QMessageBox.information(
-            self,
-            "TikTok export imported",
-            "\n".join(
-                [
-                    f"Rows: {summary.record_count:,}",
-                    f"Unique music IDs: {summary.unique_music_ids:,}",
-                    f"Blank IDs: {summary.blank_ids:,}",
-                    f"Duplicate rows: {summary.duplicate_music_ids:,}",
-                    f"Malformed rows: {summary.malformed_rows:,}",
-                    f"Already in vault: {summary.already_in_vault:,}",
-                    f"New to vault: {summary.new_to_vault:,}",
-                    f"Ambiguous matches: {summary.ambiguous_matches:,}",
-                    f"JSON: {result.json_path}",
-                    f"CSV: {result.csv_path}",
-                    f"Summary: {result.summary_path}",
-                ]
-            ),
-        )
+        if queued:
+            resp = QMessageBox.question(
+                self,
+                "Favorites queued for download",
+                f"Found {summary.unique_music_ids:,} favorite sounds and queued {queued:,} for download "
+                f"({summary.already_in_vault:,} already in your vault).\n\n"
+                "Download + import them now? (This fetches each with your TikTok session — "
+                "a large library can take a while.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                self.download_and_import()
+        else:
+            QMessageBox.information(
+                self,
+                "TikTok favorites imported",
+                f"All {summary.record_count:,} favorites are already queued or in your vault.\n\n"
+                f"Metadata analysis written to {result.summary_path}",
+            )
 
     def handle_soundcache_url(self, url: str) -> None:
         """Handle a `soundcache://ingest?…` deep link from the website's
