@@ -277,6 +277,11 @@ phase "app exec"
 echo "SOUND_VAULT_DEFAULT_VAULT=$SOUND_VAULT_DEFAULT_VAULT"
 echo "QT_DEBUG_PLUGINS=$QT_DEBUG_PLUGINS"
 trap - EXIT
+# On Apple Silicon force the native arm64 slice, else a Rosetta launch can't dlopen
+# the arm64-only native wheels (mlx/ctranslate2) and transcription has no backend.
+if [[ "$APPLE_SILICON" == "1" ]] && command -v arch >/dev/null 2>&1; then
+  exec arch -arm64 "$APP_SUPPORT/venv/bin/sound-vault"
+fi
 exec "$APP_SUPPORT/venv/bin/sound-vault"
 '''
 

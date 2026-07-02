@@ -133,6 +133,24 @@ def make_index_updater(vault_root: Path, db: IndexDatabase) -> IndexUpdater:
 _AUTO = object()
 
 
+def running_translated() -> bool:
+    """True if this process is running under Rosetta (x86_64) on Apple-Silicon
+    hardware. In that state the arm64-only native ASR wheels (mlx, ctranslate2/av)
+    can't load, so local transcription has no backend — the launcher forces arm64 to
+    avoid it, and this lets us report it clearly if it ever happens anyway."""
+    import platform
+
+    if platform.system() != "Darwin":
+        return False
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "sysctl.proc_translated"], capture_output=True, text=True, timeout=3, check=False
+        )
+        return out.stdout.strip() == "1"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def build_transcriber(settings=None):
     """Build a per-sound transcriber, GPU-accelerated when possible, or None.
 
@@ -179,10 +197,12 @@ def build_transcriber(settings=None):
         if built is not None:
             transcriber, chosen = built, name
             break
+    reason = ""
+    if not transcriber:
+        reason = "rosetta_x86_no_arm64_wheels" if running_translated() else "no_backend_available"
     write_event(
         "asr.build_transcriber", result="ok" if transcriber else "none",
-        engine=chosen, backend=backend, model=model,
-        reason="" if transcriber else "no_backend_available",
+        engine=chosen, backend=backend, model=model, reason=reason,
     )
     return transcriber
 

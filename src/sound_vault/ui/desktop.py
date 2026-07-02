@@ -1636,8 +1636,25 @@ class SoundVaultWindow(QMainWindow):
         self._start_relay_auto_poll()
         self._maybe_run_onboarding()
         self._maybe_prompt_tiktok_connect()
+        QTimer.singleShot(2500, self._warn_if_translated)
         if not _env_flag("SOUND_VAULT_DISABLE_UPDATE_CHECK"):
             QTimer.singleShot(4000, lambda: self._check_for_updates(manual=False))
+
+    def _warn_if_translated(self) -> None:
+        """If we somehow launched under Rosetta (x86), on-device transcription can't
+        load its arm64 engine — say so instead of failing silently."""
+        from sound_vault.ingest.factory import running_translated
+
+        if not running_translated():
+            return
+        write_event("gui.running_translated_rosetta")
+        QMessageBox.warning(
+            self, "Running under Rosetta",
+            "Sound Cache is running under Rosetta (Intel emulation), so on-device "
+            "transcription can't load its Apple-Silicon engine — that's why transcripts "
+            "aren't generating.\n\nQuit and reopen Sound Cache; it now launches natively. "
+            'If it persists, right-click the app → Get Info and uncheck "Open using Rosetta".',
+        )
 
     def _maybe_prompt_tiktok_connect(self) -> None:
         """First-run nudge: if the user has paired an iPhone (so they intend to

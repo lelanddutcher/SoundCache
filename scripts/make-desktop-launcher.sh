@@ -50,6 +50,14 @@ cat > "$APP/Contents/MacOS/launch" <<'SH'
 # install (no rebuild needed). Forward any args (e.g. a soundcache:// deep link
 # passed on the command line) through to the app.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"
+# On Apple Silicon, force the NATIVE arm64 slice. The universal2 framework Python has
+# an x86_64 slice; if macOS launches this bundle under Rosetta, the arm64-only native
+# wheels (mlx, ctranslate2/av) can't dlopen and transcription silently has no backend
+# (PySide6 is universal so the app still opens). hw.optional.arm64 reports the HARDWARE
+# even when the launcher itself is running translated, so it's the correct gate.
+if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ] && command -v arch >/dev/null 2>&1; then
+  exec arch -arm64 "$HOME/venvs/sound-vault/bin/sound-vault" "$@"
+fi
 exec "$HOME/venvs/sound-vault/bin/sound-vault" "$@"
 SH
 chmod +x "$APP/Contents/MacOS/launch"
