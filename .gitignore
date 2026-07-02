@@ -32,3 +32,11 @@ node_modules/
 /.claude/
 /analysis/
 docs/*-2026-*
+docs/**/*-2026-*
+/docs/plans/
+/docs/ui-art-direction-current.md
+
+# marketing site + prototypes live in the separate soundcache-web repo;
+# keep these locally but out of the public app repo
+/web/
+/sketches/
