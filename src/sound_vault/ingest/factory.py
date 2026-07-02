@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 from sound_vault.db.index_db import IndexDatabase
@@ -64,8 +65,16 @@ def _subprocess_runner(cmd, cwd=None, cancel=None):
 
 
 def _repo_root() -> Path:
-    # src/sound_vault/ingest/factory.py -> parents[3] is the repo root, which
-    # holds scripts/ and node_modules/ (so `require('playwright')` resolves).
+    # Where scripts/ + node_modules/ live (so `require('playwright')` resolves).
+    # In a PyInstaller bundle they're collected next to the app under
+    # sys._MEIPASS; in a dev checkout it's the repo root (parents[3]).
+    # Overridable with SOUND_VAULT_NODE_ROOT.
+    override = os.getenv("SOUND_VAULT_NODE_ROOT")
+    if override:
+        return Path(override).expanduser()
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and getattr(sys, "frozen", False):
+        return Path(meipass)
     return Path(__file__).resolve().parents[3]
 
 

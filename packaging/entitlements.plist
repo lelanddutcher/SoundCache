@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Load the many nested .dylib/.so bundled from third-party native wheels
+         (Qt/PySide6, ctranslate2, PyAV's ffmpeg dylibs, mlx) that are not signed
+         by our Team ID. Required for a bundled-Python app; without it you get
+         "library load disallowed by system policy". -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- CPython (ctypes/cffi), Qt's QML/JS engine, and Metal/mlx code paths
+         allocate writable+executable memory without MAP_JIT. Missing this ->
+         crashes under the hardened runtime. This is the classic "Python needs it"
+         entitlement. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Add ONLY if a component crashes on the sanctioned MAP_JIT JIT path.
+         Conceptually mutually exclusive with allow-unsigned-executable-memory;
+         pick based on what actually faults. -->
+    <!-- <key>com.apple.security.cs.allow-jit</key> <true/> -->
+
+    <!-- Add ONLY if the launcher relies on DYLD_* env vars to find bundled libs.
+         Prefer correct @rpath/install_name fixups so you can leave this off. -->
+    <!-- <key>com.apple.security.cs.allow-dyld-environment-variables</key> <true/> -->
+</dict>
+</plist>

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,8 +34,16 @@ def state_path() -> Path:
 
 
 def _repo_root() -> Path:
-    # src/sound_vault/ingest/tiktok_auth.py -> parents[3] is the repo root
-    # (holds scripts/ + node_modules/, so `require('playwright')` resolves).
+    # Where the node assets (scripts/ + node_modules/, so `require('playwright')`
+    # resolves) live. In a PyInstaller bundle they're collected next to the app
+    # under sys._MEIPASS; in a dev checkout it's the repo root (parents[3]).
+    # Overridable with SOUND_VAULT_NODE_ROOT.
+    override = os.getenv("SOUND_VAULT_NODE_ROOT")
+    if override:
+        return Path(override).expanduser()
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and getattr(sys, "frozen", False):
+        return Path(meipass)
     return Path(__file__).resolve().parents[3]
 
 
