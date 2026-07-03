@@ -29,7 +29,18 @@ Sound Cache fixes that permanently. You save a sound once and it lands as a real
 3. The share sheet hands off the *link* (never your audio) to a tiny relay keyed to your personal pair code.
 4. Your desktop pulls the link, downloads the real audio with your own logged-in session, and files it with artwork plus a transcript.
 
-One tap on your phone, and a fully-tagged file appears on your computer. Offline. Unbothered. The relay only ever holds a link on its way to you, with no account, no files, and no tracking. Setup and the signed iOS shortcut live at **[soundcache.io/shortcut](https://soundcache.io/shortcut/)**.
+One tap on your phone, and a fully-tagged file appears on your computer. Offline. Unbothered. The relay only ever holds a link on its way to you, with no account, no files, and no tracking.
+
+Setup:
+
+1. Download and install the Sound Cache mac app from Releases
+2. Click the settings button in the lower left, then click Pair iPhone
+3. Scan the QR code and install the IOS Shortcut.
+
+*Caching from TikTok REQUIRES an active logged in session on your computer*
+1. Click Settings in the Sound Cache App
+2. Clock Connect TikTok
+3. Login here with *any* credental. You can use any credental, like a burner account as the functionality is limited to an active web session.]
 
 ## Features
 
