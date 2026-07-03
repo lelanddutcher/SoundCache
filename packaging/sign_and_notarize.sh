@@ -35,9 +35,17 @@ find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 \
 echo ">> Signing other nested Mach-O executables (node / ffmpeg / yt-dlp / Chromium helpers)"
 find "$APP" -type f -perm -u+x -print0 \
   | while IFS= read -r -d '' f; do
-      if file -b "$f" | grep -q 'Mach-O'; then
-        codesign --force --timestamp --options runtime --sign "$IDENTITY" "$f"
-      fi
+      ftype="$(file -b "$f")"
+      case "$ftype" in
+        *Mach-O*executable*)
+          # Standalone executables (node, ffmpeg, helpers) get the entitlements so
+          # e.g. node's V8 JIT isn't killed by the hardened runtime (Trace/BPT trap).
+          codesign --force --timestamp --options runtime \
+                   --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$f" ;;
+        *Mach-O*)
+          # Other exec-bit Mach-O (a dylib/bundle) — sign without entitlements.
+          codesign --force --timestamp --options runtime --sign "$IDENTITY" "$f" ;;
+      esac
     done
 
 echo ">> Signing nested .framework / helper .app bundles"
