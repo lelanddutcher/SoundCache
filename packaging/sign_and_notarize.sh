@@ -23,13 +23,24 @@ ENTITLEMENTS="${SC_ENTITLEMENTS:-$(dirname "$0")/entitlements.plist}"
 NOTARY_PROFILE="${SC_NOTARY_PROFILE:-SC_NOTARY}"
 ZIP="${APP%.app}-notarize.zip"
 
+# codesign occasionally throws "internal error in Code Signing subsystem" on large
+# binaries (a transient Apple timestamp-server hiccup). Retry a few times.
+csign() {
+  local n=0
+  until codesign "$@"; do
+    n=$((n + 1))
+    [ "$n" -ge 4 ] && { echo "   codesign failed after $n tries: $*" >&2; return 1; }
+    echo "   (codesign retry $n) ${*: -1}" >&2
+  done
+}
+
 echo ">> Stripping extended attributes"
 xattr -cr "$APP"
 
 echo ">> Signing nested dylibs / .so (inside-out)"
 find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 \
   | while IFS= read -r -d '' f; do
-      codesign --force --timestamp --options runtime --sign "$IDENTITY" "$f"
+      csign --force --timestamp --options runtime --sign "$IDENTITY" "$f"
     done
 
 echo ">> Signing other nested Mach-O executables (node / ffmpeg / yt-dlp / Chromium helpers)"
@@ -40,22 +51,22 @@ find "$APP" -type f -perm -u+x -print0 \
         *Mach-O*executable*)
           # Standalone executables (node, ffmpeg, helpers) get the entitlements so
           # e.g. node's V8 JIT isn't killed by the hardened runtime (Trace/BPT trap).
-          codesign --force --timestamp --options runtime \
+          csign --force --timestamp --options runtime \
                    --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$f" ;;
         *Mach-O*)
           # Other exec-bit Mach-O (a dylib/bundle) — sign without entitlements.
-          codesign --force --timestamp --options runtime --sign "$IDENTITY" "$f" ;;
+          csign --force --timestamp --options runtime --sign "$IDENTITY" "$f" ;;
       esac
     done
 
 echo ">> Signing nested .framework / helper .app bundles"
 find "$APP" -type d \( -name "*.framework" -o -name "*.app" \) -not -path "$APP" -print0 \
   | while IFS= read -r -d '' b; do
-      codesign --force --timestamp --options runtime --sign "$IDENTITY" "$b"
+      csign --force --timestamp --options runtime --sign "$IDENTITY" "$b"
     done
 
 echo ">> Signing the outer .app (with entitlements + hardened runtime + timestamp)"
-codesign --force --timestamp --options runtime \
+csign --force --timestamp --options runtime \
          --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
 
 echo ">> Verifying signature locally"
