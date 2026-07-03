@@ -90,8 +90,34 @@ Each entitlement you can drop is hardening you keep, so add `allow-jit` /
 
 ## For this release
 
-Signing/notarization needs the self-contained bundle above, which is a dedicated
-packaging effort. For the initial public release the app ships as source + a
-documented dev install, so a soft-launch **unsigned** (right-click -> Open, or
-`xattr -dr com.apple.quarantine "Sound Cache.app"`) is reasonable for the
-technical early users. Do the signed, notarized `.app` before any wide launch.
+## The actual release pipeline (what ships)
+
+The `.app` here is fully self-contained — it bundles Python, the GPU ASR engines
+(MLX + faster-whisper), the Playwright JS driver, and portable **node + ffmpeg +
+ffprobe** (`packaging/vendor/bin`, downloaded by nothing in git — see below), so an
+end user needs **no Homebrew**. Chromium (~1.5 GB) is NOT bundled; the app downloads
+it on first "Connect TikTok" via Playwright.
+
+```bash
+# 1. one-time: fetch the portable binaries into packaging/vendor/bin/
+#    node (nodejs.org, arm64) + ffmpeg/ffprobe (eugeneware/ffmpeg-static, arm64)
+# 2. build:
+~/venvs/sound-vault/bin/pyinstaller packaging/SoundCache.spec \
+    --distpath dist --workpath build/pyi --noconfirm
+chmod +x "dist/Sound Cache.app/Contents/Frameworks/bin/"*   # datas drops the +x bit
+# 3. sign + notarize the app, then wrap it in a notarized DMG:
+packaging/sign_and_notarize.sh "dist/Sound Cache.app"
+packaging/make_dmg.sh "dist/Sound Cache.app" 0.3.0
+# 4. gh release create v0.3.0 dist/SoundCache-0.3.0-arm64.dmg ...
+```
+
+## Bundled third-party binaries & licenses
+
+- **node** (`nodejs.org`, arm64) — MIT/ISC-style; ships its own OpenSSL/ICU.
+- **ffmpeg + ffprobe** (`github.com/eugeneware/ffmpeg-static`, arm64) — these are
+  **GPL** static builds. Distributing them means the release must honor the GPL:
+  keep the license/notice and be able to point to corresponding source. If that's a
+  concern, swap in an LGPL/BSD ffmpeg build.
+- **Chromium** — downloaded at runtime by Playwright (BSD-3); not redistributed by us.
+
+`packaging/vendor/` is gitignored (these are downloaded binaries, not source).

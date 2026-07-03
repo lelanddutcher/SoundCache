@@ -673,9 +673,29 @@ class _TikTokLoginWorker(QThread):
     signs in on TikTok's own page in the window it opens."""
 
     loginFinished = Signal(bool, str)  # (connected, message)
+    progress = Signal(str)             # status text while preparing (e.g. browser download)
 
     def run(self) -> None:
         ensure_media_tools_on_path()  # a Finder-launched GUI has a stripped PATH → node must resolve
+        # First run on a fresh machine: download Chromium into the Playwright cache.
+        # The .app bundles node + the Playwright driver, but not the ~1.5GB browser.
+        if not tiktok_auth.chromium_installed():
+            self.progress.emit("Setting up the browser (one-time, ~150 MB)… this can take a minute.")
+            try:
+                inst = subprocess.run(
+                    tiktok_auth.chromium_install_command(), cwd=str(tiktok_auth.project_cwd()),
+                    text=True, capture_output=True, timeout=900, check=False,
+                )
+            except FileNotFoundError:
+                self.loginFinished.emit(False, "Could not find Node.js — install it (brew install node) to connect TikTok.")
+                return
+            except subprocess.TimeoutExpired:
+                self.loginFinished.emit(False, "Browser download timed out — check your connection and try again.")
+                return
+            if inst.returncode != 0 and not tiktok_auth.chromium_installed():
+                self.loginFinished.emit(False, "Couldn't set up the browser. " + (inst.stderr or "")[-200:])
+                return
+        self.progress.emit("Opening a TikTok login window… sign in there, then come back.")
         cmd = tiktok_auth.login_command()
         try:
             result = subprocess.run(
@@ -798,6 +818,7 @@ class TikTokConnectDialog(QDialog):
         )
         self._worker = _TikTokLoginWorker(self)
         self._worker.loginFinished.connect(self._on_login_finished)
+        self._worker.progress.connect(self.detail.setText)
         self._worker.start()
 
     def _on_login_finished(self, connected: bool, message: str) -> None:

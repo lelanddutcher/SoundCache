@@ -26,13 +26,28 @@ from sound_vault.vault.indexer import build_record
 _EXTRA_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin")
 
 
+def bundled_bin_dir() -> str | None:
+    """The packaged app ships portable node/ffmpeg/ffprobe under sys._MEIPASS/bin so
+    it needs no Homebrew. Returns that dir when running frozen, else None."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and getattr(sys, "frozen", False):
+        d = Path(meipass) / "bin"
+        if d.is_dir():
+            return str(d)
+    return None
+
+
 def ensure_media_tools_on_path() -> None:
-    """Idempotently add common bin dirs to PATH so node/ffmpeg resolve under a
-    Finder/launchd-launched GUI (which gets a stripped PATH)."""
+    """Idempotently put node/ffmpeg/ffprobe on PATH so they resolve under a
+    Finder/launchd-launched GUI (which gets a stripped PATH). The packaged app's
+    bundled bin dir goes FIRST so it's self-contained; Homebrew dirs are a fallback
+    for a dev/source run."""
     parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+    bundled = bundled_bin_dir()
+    prepend = [bundled] if bundled and bundled not in parts else []
     added = [d for d in _EXTRA_BIN_DIRS if d not in parts and os.path.isdir(d)]
-    if added:
-        os.environ["PATH"] = os.pathsep.join(parts + added)
+    if prepend or added:
+        os.environ["PATH"] = os.pathsep.join(prepend + parts + added)
 
 
 def _subprocess_runner(cmd, cwd=None, cancel=None):

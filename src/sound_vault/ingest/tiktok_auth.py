@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -58,6 +59,34 @@ def project_cwd() -> Path:
 def login_command(*, out_path: Path | None = None) -> list[str]:
     """argv for the interactive login (opens a real TikTok login window)."""
     return ["node", str(login_script()), str(out_path or state_path())]
+
+
+def _playwright_cli() -> Path:
+    return _repo_root() / "node_modules" / "playwright" / "cli.js"
+
+
+def chromium_installed() -> bool:
+    """Authoritatively check (via node/Playwright) whether the Chromium browser is
+    downloaded. Assumes node is already on PATH (the caller augments it)."""
+    check = (
+        "try{const fs=require('fs');"
+        "process.exit(fs.existsSync(require('playwright').chromium.executablePath())?0:3)}"
+        "catch(e){process.exit(3)}"
+    )
+    try:
+        result = subprocess.run(
+            ["node", "-e", check], cwd=str(project_cwd()),
+            capture_output=True, text=True, timeout=25, check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def chromium_install_command() -> list[str]:
+    """argv to download Chromium into the Playwright browser cache (idempotent —
+    a no-op if it's already there). Run once before the first login/capture."""
+    return ["node", str(_playwright_cli()), "install", "chromium"]
 
 
 @dataclass(frozen=True)

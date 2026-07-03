@@ -40,3 +40,6 @@ docs/**/*-2026-*
 # keep these locally but out of the public app repo
 /web/
 /sketches/
+
+# vendored portable binaries for the packaged .app (downloaded, not source)
+/packaging/vendor/

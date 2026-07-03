@@ -64,6 +64,14 @@ def diagnose_dependencies(
     package_available = package_available or _package_available
     version_runner = version_runner or _run_version
     torch_info = torch_info or _torch_info
+    # Put the bundled/Homebrew bin dirs on PATH first so the report reflects the tools
+    # the app actually uses (the packaged .app ships its own node/ffmpeg/ffprobe).
+    try:
+        from sound_vault.ingest.factory import ensure_media_tools_on_path
+
+        ensure_media_tools_on_path()
+    except Exception:  # noqa: BLE001 - diagnostics must never hard-fail
+        pass
     cache_dir = (model_cache_dir or Path.home() / ".cache" / "huggingface" / "hub").expanduser()
     tools = {
         name: _tool_status(name, which=which, version_runner=version_runner)

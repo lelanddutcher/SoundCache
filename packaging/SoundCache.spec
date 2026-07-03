@@ -33,6 +33,12 @@ datas += [(str(ROOT / "package.json"), ".")]
 if (ROOT / "node_modules").is_dir():
     datas += [(str(ROOT / "node_modules"), "node_modules")]
 
+# Portable node + ffmpeg + ffprobe (arm64) so the app needs no Homebrew.
+# ensure_media_tools_on_path() prepends this dir (sys._MEIPASS/bin) to PATH when frozen.
+_vendor_bin = ROOT / "packaging" / "vendor" / "bin"
+if _vendor_bin.is_dir():
+    datas += [(str(_vendor_bin), "bin")]
+
 # Native / data-carrying deps that PyInstaller's static analysis under-collects
 # (ctranslate2 + PyAV ffmpeg dylibs, mlx's Metal lib, whisper VAD assets, etc.).
 for pkg in ("faster_whisper", "ctranslate2", "av", "mlx", "mlx_whisper",
