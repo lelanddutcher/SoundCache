@@ -18,8 +18,6 @@ Sound Cache fixes that permanently. You save a sound once and it lands as a real
 
 ## How it works
 
-You do not change your behavior. You already know how to hit share.
-
 <div align="center">
 
 ![Save a sound anywhere, it lands in your vault](docs/images/relay-flow.png)
