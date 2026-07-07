@@ -174,6 +174,50 @@ class PostgresInboxStore:
             for r in rows
         ]
 
+    def forward_pending(
+        self,
+        *,
+        source_code: str,
+        target_code: str,
+        exclude_sources=(),
+        dry_run: bool = False,
+    ) -> dict:
+        """Re-key waiting (non-expired) inbox items from one pair code to another, so a
+        desktop that re-paired can receive shares that were queued to its OLD code. The
+        target code must be a live, registered pairing or the moved items would be
+        undeliverable. Returns the affected items (URLs) and a count."""
+        now = self._now()
+        source_hash = _hash_pair_code(source_code)
+        target_hash = _hash_pair_code(target_code)
+        exclude = [str(s) for s in (exclude_sources or [])]
+        where = "pair_code_hash = %s AND expires_at >= %s"
+        params: list = [source_hash, now]
+        if exclude:
+            where += " AND source NOT IN (" + ",".join(["%s"] * len(exclude)) + ")"
+            params.extend(exclude)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT expires_at FROM pair_codes WHERE pair_code_hash = %s", (target_hash,))
+            trow = cur.fetchone()
+            if trow is None or float(trow[0]) < now:
+                raise ValueError("target pair code is unknown or expired")
+            cur.execute(
+                f"SELECT url, source, created_at FROM inbox_items WHERE {where} ORDER BY created_at",
+                params,
+            )
+            items = [
+                {"url": str(r[0]), "source": str(r[1]), "created_at": float(r[2])}
+                for r in cur.fetchall()
+            ]
+            if dry_run:
+                return {"dry_run": True, "would_move": len(items), "items": items}
+            if items:
+                cur.execute(
+                    f"UPDATE inbox_items SET pair_code_hash = %s WHERE {where}",
+                    [target_hash, *params],
+                )
+                conn.commit()
+        return {"dry_run": False, "moved": len(items), "items": items}
+
 
 class PostgresLeaderboardStore:
     """Drop-in replacement for LeaderboardStore backed by Postgres."""

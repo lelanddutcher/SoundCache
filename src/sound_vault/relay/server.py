@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 import logging
 import os
+import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -205,6 +206,48 @@ class SaveEventRequest(BaseModel):
         if not sid or len(sid) > 64 or not all(ch.isalnum() or ch in "-_" for ch in sid):
             raise ValueError("sound_id must be a short alphanumeric id")
         return sid
+
+
+class AdminForwardRequest(BaseModel):
+    source_code: str = Field(min_length=1, max_length=64)
+    target_code: str = Field(min_length=1, max_length=64)
+    exclude_sources: list[str] = Field(default_factory=list)
+    dry_run: bool = False
+
+
+def _require_admin(request: Request) -> None:
+    # Ops-only endpoint, gated on a shared secret in RELAY_ADMIN_TOKEN. Respond 404
+    # (not 401/403) on a missing/wrong token so the route stays invisible to scanners.
+    expected = os.getenv("RELAY_ADMIN_TOKEN") or ""
+    provided = request.headers.get("x-admin-token", "")
+    if not expected or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+@app.post("/v1/admin/forward")
+def admin_forward(request: AdminForwardRequest, http_request: Request) -> dict:
+    """Move waiting inbox items from one pair code to another (e.g. after a re-pair
+    stranded shares on the old code). Admin-token gated; dry_run previews only."""
+    _require_admin(http_request)
+    if not hasattr(inbox, "forward_pending"):
+        raise HTTPException(status_code=501, detail="forward not supported on this store")
+    try:
+        result = inbox.forward_pending(
+            source_code=request.source_code.strip(),
+            target_code=request.target_code.strip(),
+            exclude_sources=request.exclude_sources,
+            dry_run=request.dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    log_relay_event(
+        "admin_forward",
+        source=request.source_code,
+        target=request.target_code,
+        moved=str(result.get("moved", result.get("would_move", 0))),
+        dry_run=str(request.dry_run),
+    )
+    return result
 
 
 @app.get("/v1/health")
