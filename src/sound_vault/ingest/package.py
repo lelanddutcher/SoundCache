@@ -154,7 +154,10 @@ def ffmpeg_embed_tags(src: Path, dst: Path, tags: dict) -> None:
         if value:
             cmd += ["-metadata", f"{key}={value}"]
     cmd.append(str(dst))
-    subprocess.run(cmd, check=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        tail = " / ".join((result.stderr or "").strip().splitlines()[-3:]) or "no stderr"
+        raise RuntimeError(f"ffmpeg failed (exit {result.returncode}) tagging {src.name}: {tail}")
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import shutil
+import subprocess
 from typing import Any, Callable, Protocol
 
 # extract(url, opts) mirrors yt_dlp.YoutubeDL(opts).extract_info(url, download=True)
@@ -65,12 +66,38 @@ def _real_extract(url: str, opts: dict) -> dict:
         return ydl.extract_info(url, download=True)
 
 
+def _has_decodable_audio(path: Path) -> bool | None:
+    """Whether ffprobe sees a real audio stream. Returns None when ffprobe itself can't
+    run (missing/timeout) so callers stay lenient. Guards against yt-dlp writing an
+    empty/HTML/partial file that 'exists' but isn't audio (e.g. when the TikTok
+    extractor is broken) -- which would otherwise be reported as a successful download
+    and only blow up later in the packager with an opaque 'moov atom not found'."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - ffprobe missing/errored: don't block the download on it
+        return None
+    if out.returncode != 0:
+        return False
+    return "audio" in (out.stdout or "")
+
+
 class YtDlpDownloader:
     """Primary downloader: extract best audio and transcode to a single m4a."""
 
-    def __init__(self, *, extract: ExtractFn = _real_extract, audio_format: str = "m4a") -> None:
+    def __init__(
+        self,
+        *,
+        extract: ExtractFn = _real_extract,
+        audio_format: str = "m4a",
+        probe_audio: Callable[[Path], bool | None] = _has_decodable_audio,
+    ) -> None:
         self._extract = extract
         self._audio_format = audio_format
+        self._probe_audio = probe_audio
 
     def download(
         self, url: str, *, dest_dir: Path, basename: str, source_id: str | None = None, **_: Any
@@ -105,6 +132,15 @@ class YtDlpDownloader:
         if audio_path is None or not audio_path.exists():
             return DownloadResult(
                 ok=False, audio_path=None, info=_clean_info(info), method="yt-dlp", error="no audio file produced"
+            )
+        # A file exists -- but yt-dlp can write an empty/partial/HTML file when an
+        # extractor is broken (TikTok "No working app info"). Treat a CONFIRMED
+        # non-audio file as a failed download so the authenticated fallback engages,
+        # rather than passing junk to the packager (which dies with a cryptic exit 183).
+        if audio_path.stat().st_size == 0 or self._probe_audio(audio_path) is False:
+            return DownloadResult(
+                ok=False, audio_path=None, info=_clean_info(info), method="yt-dlp",
+                error="yt-dlp produced an unplayable file (extractor may be broken)",
             )
         return DownloadResult(ok=True, audio_path=audio_path, info=_clean_info(info), method="yt-dlp")
 

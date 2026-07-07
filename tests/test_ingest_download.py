@@ -44,7 +44,10 @@ def _extract_writes_m4a(info):
 
 
 def test_ytdlp_downloader_success(tmp_path):
-    dl = YtDlpDownloader(extract=_extract_writes_m4a({"id": "vid123", "title": "Test Sound", "uploader": "Creator", "duration": 12.0}))
+    dl = YtDlpDownloader(
+        extract=_extract_writes_m4a({"id": "vid123", "title": "Test Sound", "uploader": "Creator", "duration": 12.0}),
+        probe_audio=lambda _p: True,  # bypass the real ffprobe check for the stub file
+    )
     result = dl.download("https://x/y", dest_dir=tmp_path, basename="vid123")
     assert isinstance(result, DownloadResult)
     assert result.ok is True
@@ -74,6 +77,19 @@ def test_ytdlp_downloader_no_file_produced(tmp_path):
     result = dl.download("https://x/y", dest_dir=tmp_path, basename="v")
     assert result.ok is False
     assert "no audio" in (result.error or "").lower()
+
+
+def test_ytdlp_downloader_invalid_audio_fails_so_fallback_can_run(tmp_path):
+    # yt-dlp can write a file that EXISTS but isn't decodable audio (e.g. a broken
+    # TikTok extractor). That must be reported as ok=False so the Composite fallback
+    # engages, instead of handing junk to the packager (opaque ffmpeg exit 183).
+    dl = YtDlpDownloader(
+        extract=_extract_writes_m4a({"id": "v", "title": "t"}),
+        probe_audio=lambda _p: False,  # ffprobe would reject this stub as non-audio
+    )
+    result = dl.download("https://x/y", dest_dir=tmp_path, basename="v")
+    assert result.ok is False
+    assert "unplayable" in (result.error or "").lower()
 
 
 class _StubDownloader:
