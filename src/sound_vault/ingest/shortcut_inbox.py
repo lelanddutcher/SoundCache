@@ -147,6 +147,9 @@ class ShortcutInboxStore:
     def pending(self) -> list[ShortcutInboxItem]:
         return [item for item in self.all_items() if item.status == "pending"]
 
+    def failed(self) -> list[ShortcutInboxItem]:
+        return [item for item in self.all_items() if item.status == "failed"]
+
     def counts(self) -> dict[str, int]:
         """Single-pass status tally for a global progress metric.
 
@@ -187,6 +190,41 @@ class ShortcutInboxStore:
                     updated.append(item)
             if changed:
                 self._write_all(updated)
+
+    def requeue(self, item_id: str) -> bool:
+        """Reset one item back to 'pending' (attempts + error cleared) so the next
+        import run re-attempts it -- e.g. after fixing whatever made it fail. Failed
+        items are never dropped from the queue, so this is always available. Returns
+        True if the item existed."""
+        with self._exclusive_lock():
+            updated: list[ShortcutInboxItem] = []
+            found = False
+            for item in self._read_unlocked():
+                if item.id == item_id:
+                    updated.append(ShortcutInboxItem(**{**asdict(item), "status": "pending", "attempts": 0, "error": None}))
+                    found = True
+                else:
+                    updated.append(item)
+            if found:
+                self._write_all(updated)
+        return found
+
+    def requeue_all_failed(self) -> int:
+        """Reset every 'failed' item back to 'pending' for a bulk retry (after an
+        upstream fix, e.g. a yt-dlp update or the auth fallback coming back). Returns
+        how many were re-queued."""
+        with self._exclusive_lock():
+            updated: list[ShortcutInboxItem] = []
+            count = 0
+            for item in self._read_unlocked():
+                if item.status == "failed":
+                    updated.append(ShortcutInboxItem(**{**asdict(item), "status": "pending", "attempts": 0, "error": None}))
+                    count += 1
+                else:
+                    updated.append(item)
+            if count:
+                self._write_all(updated)
+        return count
 
     def _update(
         self,

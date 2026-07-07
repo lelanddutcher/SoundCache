@@ -523,6 +523,18 @@ class LibraryViewModel:
     def pending_inbox(self) -> list[ShortcutInboxItem]:
         return self.inbox.pending()
 
+    def failed_inbox(self) -> list[ShortcutInboxItem]:
+        return self.inbox.failed()
+
+    def retry_inbox_item(self, item_id: str) -> bool:
+        """Re-queue one failed inbox item (back to pending) so the next import retries it."""
+        return self.inbox.requeue(item_id)
+
+    def retry_all_failed_inbox(self) -> int:
+        """Re-queue every failed inbox item for a bulk retry (e.g. after an upstream fix).
+        Returns how many were re-queued."""
+        return self.inbox.requeue_all_failed()
+
     def inbox_text(self) -> str:
         count = len(self.pending_inbox())
         suffix = "link" if count == 1 else "links"

@@ -2209,6 +2209,12 @@ class SoundVaultWindow(QMainWindow):
         import_export.clicked.connect(self.import_tiktok_favorite_sounds_export)
         mark_imported = QPushButton("Mark selected imported")
         mark_imported.clicked.connect(self.mark_selected_inbox_imported)
+        retry_failed = QPushButton("Retry failed")
+        retry_failed.setToolTip(
+            "Reset failed inbox items back to pending so Download & import re-attempts them "
+            "(e.g. after an upstream fix). Failed items always stay in the queue with their error."
+        )
+        retry_failed.clicked.connect(self.retry_failed_inbox)
         header.addWidget(inbox_title)
         header.addStretch(1)
         header.addWidget(download_import)
@@ -2217,6 +2223,7 @@ class SoundVaultWindow(QMainWindow):
         header.addWidget(poll_relay)
         header.addWidget(refresh_inbox)
         header.addWidget(mark_imported)
+        header.addWidget(retry_failed)
         layout.addLayout(header)
         self.inbox_table = QTableWidget(0, 5)
         self.inbox_table.setHorizontalHeaderLabels(["received", "source", "url", "status", "error"])
@@ -4290,7 +4297,9 @@ class SoundVaultWindow(QMainWindow):
         self._start_relay_auto_poll()  # begin polling if a pairing was just configured
 
     def refresh_inbox(self) -> None:
-        self.current_inbox_rows = self.vm.pending_inbox()
+        # Show pending AND failed items: failed ones stay in the queue with their error
+        # so they're visible and can be retried (never silently dropped).
+        self.current_inbox_rows = self.vm.pending_inbox() + self.vm.failed_inbox()
         self.inbox_rows_by_id = {item.id: item for item in self.current_inbox_rows}
         self.inbox_label.setText(self.vm.inbox_text())
         self.inbox_table.setSortingEnabled(False)
@@ -5028,6 +5037,19 @@ class SoundVaultWindow(QMainWindow):
             return
         self.vm.mark_inbox_imported(inbox_item.id)
         self.refresh_inbox()
+
+    def retry_failed_inbox(self) -> None:
+        """Reset every failed inbox item back to pending so the next Download & import
+        re-attempts it (failed items always stay in the queue with their error, so this
+        is available any time -- e.g. after a yt-dlp update or the auth fallback returns)."""
+        count = self.vm.retry_all_failed_inbox()
+        self.refresh_inbox()
+        if count:
+            self.statusBar().showMessage(
+                f"Re-queued {count} failed item(s) — hit Download && import to retry", 4000
+            )
+        else:
+            self.statusBar().showMessage("No failed items to retry", 2500)
 
     def import_tiktok_favorite_sounds_export(self) -> None:
         selected, _filter = QFileDialog.getOpenFileName(
