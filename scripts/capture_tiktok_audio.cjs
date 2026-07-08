@@ -181,88 +181,113 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
       process.exit(0);
     }
 
-    await page.evaluate(async () => {
-      for (const el of Array.from(document.querySelectorAll("video,audio"))) {
-        try { el.muted = false; await el.play(); } catch (e) { /* ignore */ }
-      }
-    });
-    await page.waitForTimeout(3000);
-    const domSources = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("video,audio"))
-        .map((el) => el.currentSrc || el.src || "")
-        .filter((s) => s && !s.startsWith("blob:"))
-    );
-
-    // Pull the catalog playUrl from the page rehydration JSON (video pages SSR it);
-    // for a commercial track this is the full ~60s preview the clip-only path misses.
-    let jsonPlayUrl = "";
-    try {
-      jsonPlayUrl = await page.evaluate(() => {
-        try {
-          const node = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
-          const data = JSON.parse((node && node.textContent) || "{}");
-          const item = (((data.__DEFAULT_SCOPE__ || {})["webapp.video-detail"] || {}).itemInfo || {}).itemStruct || {};
-          return ((item.music || {}).playUrl) || "";
-        } catch (e) { return ""; }
-      });
-    } catch (e) { jsonPlayUrl = ""; }
-
-    const ranked = Array.from(new Set([jsonPlayUrl, ...domSources, ...mediaUrls].filter(Boolean)));
-    // Probe audio-ish / catalog URLs first, but ultimately keep whichever yields the
-    // LONGEST audio (a full /music/ sound beats a trimmed clip).
-    const ordered = [
-      ...ranked.filter((u) => /mime_type=audio_mpeg|mime_type=audio|\.m4a|\.mp3|\.aac|\/obj\//i.test(u)),
-      ...ranked.filter((u) => /tiktokcdn|tiktokv/i.test(u) && !/playback\d*\.mp4|webapp|static/i.test(u)),
-      ...ranked,
-    ];
-    const candidates = Array.from(new Set(ordered)).slice(0, 5); // cap fetch/transcode cost
-
-    if (!candidates.length) {
-      console.error("no media captured (page may require fresh auth)");
-      await browser.close();
-      process.exit(3);
-    }
-
     const probeDuration = (p) => {
       try {
         const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nk=1:nw=1", p]);
         const d = parseFloat(String((r.stdout || "")).trim());
-        return isFinite(d) ? d : 0; // ffprobe missing/parse-fail → 0, so first success wins
+        return isFinite(d) ? d : 0; // ffprobe missing/parse-fail → 0
       } catch (e) { return 0; }
     };
-
     const audioPath = path.join(outFolder, `${musicId}_raw.m4a`);
-    let best = { path: null, dur: -1 };
-    for (let i = 0; i < candidates.length; i++) {
-      try {
-        const resp = await page.context().request.fetch(candidates[i]);
-        if (!resp.ok()) continue;
-        const buf = await resp.body();
-        if (!buf || buf.length < 1000) continue;
-        const rawPath = path.join(outFolder, `${musicId}_raw_${i}`);
-        fs.writeFileSync(rawPath, buf);
-        const candPath = path.join(outFolder, `${musicId}_cand_${i}.m4a`);
-        spawnSync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", rawPath, "-vn", "-c:a", "aac", "-b:a", "192k", candPath]);
-        try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
-        if (fs.existsSync(candPath) && fs.statSync(candPath).size > 1000) {
-          const dur = probeDuration(candPath);
-          if (dur > best.dur) {
-            if (best.path) { try { fs.unlinkSync(best.path); } catch (e) { /* ignore */ } }
-            best = { path: candPath, dur };
-          } else {
-            try { fs.unlinkSync(candPath); } catch (e) { /* ignore */ }
-          }
+
+    // Trigger playback (autoplay + click a play control — TikTok lazy-loads the audio
+    // only after interaction), then collect every non-blob media source we can see:
+    // <video>/<audio> DOM src, the rehydration-JSON playUrl (video pages SSR the full
+    // ~60s track), and the network responses that keep accumulating in mediaUrls.
+    async function triggerAndCollect() {
+      await page.evaluate(async () => {
+        for (const el of Array.from(document.querySelectorAll("video,audio"))) {
+          try { el.muted = false; await el.play(); } catch (e) { /* ignore */ }
         }
-      } catch (e) { /* try the next candidate */ }
+      });
+      for (const sel of ['[data-e2e="music-play"]', 'button[aria-label*="play" i]', '[class*="PlayButton"] button', '[class*="ImgPoster"]']) {
+        try { await page.click(sel, { timeout: 1200 }); break; } catch (e) { /* no such control */ }
+      }
+      await page.waitForTimeout(3000);
+      const domSources = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("video,audio"))
+          .map((el) => el.currentSrc || el.src || "")
+          .filter((s) => s && !s.startsWith("blob:"))
+      );
+      let jsonPlayUrl = "";
+      try {
+        jsonPlayUrl = await page.evaluate(() => {
+          try {
+            const node = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
+            const data = JSON.parse((node && node.textContent) || "{}");
+            const item = (((data.__DEFAULT_SCOPE__ || {})["webapp.video-detail"] || {}).itemInfo || {}).itemStruct || {};
+            return ((item.music || {}).playUrl) || "";
+          } catch (e) { return ""; }
+        });
+      } catch (e) { jsonPlayUrl = ""; }
+      const ranked = Array.from(new Set([jsonPlayUrl, ...domSources, ...mediaUrls].filter(Boolean)));
+      // Probe audio-ish / catalog URLs first, but ultimately keep whichever yields the
+      // LONGEST audio (a full /music/ sound beats a trimmed clip).
+      const ordered = [
+        ...ranked.filter((u) => /mime_type=audio_mpeg|mime_type=audio|\.m4a|\.mp3|\.aac|\/obj\//i.test(u)),
+        ...ranked.filter((u) => /tiktokcdn|tiktokv/i.test(u) && !/playback\d*\.mp4|webapp|static/i.test(u)),
+        ...ranked,
+      ];
+      return Array.from(new Set(ordered)).slice(0, 6); // cap fetch/transcode cost
+    }
+
+    // Fetch each candidate, transcode to m4a, keep the LONGEST that actually has audio.
+    // best.dur starts at 0 (not -1) so a candidate that transcodes to a file with NO
+    // decodable audio (dur 0) can never win — otherwise we'd write an "unplayable file"
+    // the packager then rejects. If nothing has real audio, best.path stays null.
+    async function fetchBest(candidates) {
+      let best = { path: null, dur: 0 };
+      for (let i = 0; i < candidates.length; i++) {
+        try {
+          const resp = await page.context().request.fetch(candidates[i]);
+          if (!resp.ok()) continue;
+          const buf = await resp.body();
+          if (!buf || buf.length < 1000) continue;
+          const rawPath = path.join(outFolder, `${musicId}_raw_${i}`);
+          fs.writeFileSync(rawPath, buf);
+          const candPath = path.join(outFolder, `${musicId}_cand_${i}.m4a`);
+          spawnSync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", rawPath, "-vn", "-c:a", "aac", "-b:a", "192k", candPath]);
+          try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+          if (fs.existsSync(candPath) && fs.statSync(candPath).size > 1000) {
+            const dur = probeDuration(candPath);
+            if (dur > best.dur) {
+              if (best.path) { try { fs.unlinkSync(best.path); } catch (e) { /* ignore */ } }
+              best = { path: candPath, dur };
+            } else {
+              try { fs.unlinkSync(candPath); } catch (e) { /* ignore */ }
+            }
+          }
+        } catch (e) { /* try the next candidate */ }
+      }
+      return best;
+    }
+
+    // A single shot is flaky: the audio may not have loaded within the first wait, or a
+    // transient throttle (e.g. a burst of imports) can starve the first attempt. Retry
+    // with escalation — longer waits, then a full reload — so ONE "Download & import"
+    // reliably lands a capturable sound instead of one-shot failing.
+    let best = { path: null, dur: 0 };
+    for (let attempt = 0; attempt < 3 && !best.path; attempt++) {
+      if (attempt > 0) {
+        await page.waitForTimeout(2500 + attempt * 2500);
+        if (attempt === 2) {
+          try {
+            await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+            await page.waitForTimeout(5000);
+          } catch (e) { /* keep the current page */ }
+        }
+      }
+      const candidates = await triggerAndCollect();
+      if (candidates.length) best = await fetchBest(candidates);
     }
 
     if (best.path) {
       fs.renameSync(best.path, audioPath);
       await scrapeAndWriteMeta(page, outFolder, musicId, url);
-      console.error(`captured audio (${best.dur > 0 ? best.dur.toFixed(1) + "s" : "len?"}) from ${candidates.length} candidate(s)`);
+      console.error(`captured audio (${best.dur > 0 ? best.dur.toFixed(1) + "s" : "len?"})`);
       console.log(audioPath);
     } else {
-      console.error("ffmpeg produced no audio stream");
+      console.error("no playable audio after retries (sound may be region-locked, removed, or serve no preview)");
       await browser.close();
       process.exit(4);
     }
