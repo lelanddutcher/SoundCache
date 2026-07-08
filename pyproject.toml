@@ -1,6 +1,6 @@
 [project]
 name = "sound-vault-desktop"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local-first Sound Cache desktop app and pairing-code relay."
 readme = "README.md"
 license = "MIT"

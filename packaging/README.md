@@ -107,8 +107,8 @@ it on first "Connect TikTok" via Playwright.
 chmod +x "dist/Sound Cache.app/Contents/Frameworks/bin/"*   # datas drops the +x bit
 # 3. sign + notarize the app, then wrap it in a notarized DMG:
 packaging/sign_and_notarize.sh "dist/Sound Cache.app"
-packaging/make_dmg.sh "dist/Sound Cache.app" 0.3.0
-# 4. gh release create v0.3.0 dist/SoundCache-0.3.0-arm64.dmg ...
+packaging/make_dmg.sh "dist/Sound Cache.app" 0.3.1
+# 4. gh release create v0.3.1 dist/SoundCache-0.3.1-arm64.dmg ...
 ```
 
 ## Bundled third-party binaries & licenses
