@@ -461,7 +461,9 @@ class IngestService:
         downstream work — e.g. queue a just-downloaded sound for transcription the
         moment it lands, instead of waiting for the whole batch to finish."""
         from sound_vault.diagnostics import exception_fields, write_event
+        from sound_vault.ingest.receipts import ReceiptLedger
 
+        ledger = ReceiptLedger.beside(store.path)
         outcomes: list[tuple[ShortcutInboxItem, IngestOutcome]] = []
         for item in store.pending():
             if should_stop is not None and should_stop():
@@ -477,10 +479,24 @@ class IngestService:
             # pending) so it retries cleanly next run rather than counting a failure.
             if should_stop is not None and should_stop() and outcome.status not in ("ingested", "duplicate"):
                 break
+            relay_id = getattr(item, "relay_id", None)
             if outcome.status in ("ingested", "duplicate"):
-                store.mark_imported(item.id)
+                # Persist the resolved id on the queue row AND to the durable ledger so
+                # reconciliation can later confirm this sound's audio really landed
+                # (and re-queue it if the folder turns out empty/missing).
+                store.mark_imported(item.id, music_id=outcome.music_id)
+                ledger.record_imported(
+                    relay_id=relay_id, url=item.url, music_id=outcome.music_id,
+                    folder=(str(outcome.folder) if outcome.folder else None),
+                )
             else:
                 store.record_failure(item.id, outcome.reason or "ingest failed", max_attempts=max_attempts)
+                # Terminal once attempts are exhausted — the ledger records the fate so a
+                # failed sound is never invisible even if the queue row is later cleared.
+                terminal = (item.attempts + 1) >= max_attempts
+                ledger.record_failed(
+                    relay_id=relay_id, url=item.url, error=outcome.reason or "ingest failed", terminal=terminal
+                )
             outcomes.append((item, outcome))
             if on_item is not None:
                 on_item(outcome)

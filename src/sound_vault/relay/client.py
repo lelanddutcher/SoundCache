@@ -7,6 +7,7 @@ from typing import Any, Callable
 import urllib.parse
 import urllib.request
 
+from sound_vault.ingest.receipts import ReceiptLedger
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxStore
 from sound_vault.net import ssl_context
 
@@ -69,11 +70,23 @@ class RelayClient:
             )
         return items
 
-    def poll_to_inbox(self, inbox_path: Path) -> list[RelayInboxItem]:
+    def poll_to_inbox(self, inbox_path: Path, *, receipts_path: Path | None = None) -> list[RelayInboxItem]:
         items = self.poll()
         if not items:
             return []
+        # Chain of custody: the relay poll is DESTRUCTIVE (the server deletes what it
+        # returns), so record every delivered item to the durable, never-pruned receipt
+        # ledger BEFORE handing them to the inbox. If the process dies right after this
+        # append, the ledger still proves what was received and reconciliation can
+        # re-queue it from the retained URL — nothing is lost to a crash.
+        ledger = ReceiptLedger(receipts_path) if receipts_path else ReceiptLedger.beside(inbox_path)
+        ledger.record_received_many(
+            [{"relay_id": it.id, "url": it.url, "source": it.source, "note": it.note} for it in items]
+        )
+        # One bulk read+write instead of N add_url cycles: fewer crash windows between
+        # the receipt and the queue, and no O(n^2) rewrite on a large delivery.
         store = ShortcutInboxStore(inbox_path)
-        for item in items:
-            store.add_url(item.url, source=item.source, relay_id=item.id, note=item.note)
+        store.add_urls_bulk(
+            [{"url": it.url, "source": it.source, "relay_id": it.id, "note": it.note} for it in items]
+        )
         return items

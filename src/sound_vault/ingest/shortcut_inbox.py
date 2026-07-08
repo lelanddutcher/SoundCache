@@ -35,6 +35,10 @@ class ShortcutInboxItem:
     attempts: int = 0
     error: str | None = None
     note: str = ""
+    # The resolved vault id, stamped when the item is marked imported, so
+    # reconciliation can verify the sound's audio really landed (and re-queue it
+    # if the folder is missing or empty) without re-resolving the URL.
+    music_id: str | None = None
 
 
 class ShortcutInboxStore:
@@ -165,8 +169,8 @@ class ShortcutInboxStore:
             tally[item.status if item.status in tally else "other"] += 1
         return tally
 
-    def mark_imported(self, item_id: str) -> None:
-        self._update(item_id, status="imported")
+    def mark_imported(self, item_id: str, music_id: str | None = None) -> None:
+        self._update(item_id, status="imported", music_id=music_id)
 
     def mark_failed(self, item_id: str, error: str) -> None:
         self._update(item_id, status="failed", error=error, bump_attempts=True)
@@ -234,6 +238,7 @@ class ShortcutInboxStore:
         error: str | None = None,
         attempts: int | None = None,
         bump_attempts: bool = False,
+        music_id: str | None = None,
     ) -> None:
         with self._exclusive_lock():
             updated: list[ShortcutInboxItem] = []
@@ -242,6 +247,8 @@ class ShortcutInboxStore:
                     fields = {**asdict(item), "status": status}
                     if error is not None:
                         fields["error"] = error
+                    if music_id is not None:
+                        fields["music_id"] = music_id
                     if attempts is not None:
                         fields["attempts"] = attempts
                     elif bump_attempts:
@@ -280,6 +287,7 @@ def _item_from_row(data: Any) -> ShortcutInboxItem | None:
     except (TypeError, ValueError):
         attempts = 0
     error = data.get("error")
+    music_id = data.get("music_id")
     return ShortcutInboxItem(
         id=item_id,
         url=url,
@@ -290,4 +298,5 @@ def _item_from_row(data: Any) -> ShortcutInboxItem | None:
         attempts=attempts,
         error=str(error) if error else None,
         note=str(data.get("note") or ""),
+        music_id=str(music_id) if music_id else None,
     )
