@@ -204,12 +204,17 @@ class PlaywrightCaptureDownloader:
                 ok=False, audio_path=None, info={}, method="playwright", error=(err or "capture failed").strip()[:500]
             )
 
+        # Skip ._ AppleDouble shadows (NFS/SMB writes them beside real files) so we never
+        # move a 0-byte shadow in place of the real capture.
+        def _real(paths):
+            return [p for p in paths if not p.name.startswith("._")]
+
         target = dest_dir / f"{basename}.{self._audio_format}"
         if not target.exists():
             produced = (
-                sorted(dest_dir.glob("*_raw.m4a"))
-                or sorted(dest_dir.glob("*_raw*"))
-                or [p for p in sorted(dest_dir.glob(f"*.{self._audio_format}")) if p != target]
+                _real(sorted(dest_dir.glob("*_raw.m4a")))
+                or _real(sorted(dest_dir.glob("*_raw*")))
+                or [p for p in sorted(dest_dir.glob(f"*.{self._audio_format}")) if p != target and not p.name.startswith("._")]
             )
             if not produced:
                 return DownloadResult(

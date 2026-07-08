@@ -90,7 +90,13 @@ class IngestService:
         self._resolve_source = resolve_source
         self._tagger = tagger
         self._index_updater = index_updater
-        self._work_dir = Path(work_dir) if work_dir else self.vault_root / "inbox" / "working"
+        # Do the transient capture/transcode/probe work on LOCAL disk, never on the vault.
+        # On an NFS/SMB vault mount, the download step's "_raw.m4a -> <id>.m4a" move + an
+        # immediate ffprobe hits close-to-open consistency: the moved target reads back as a
+        # truncated stub, so a perfectly good capture is rejected as an "unplayable file" and
+        # NO TikTok sound could ever be captured into the vault. Only the finished, validated
+        # audio is written to the vault (by package_sound). Overridable for tests.
+        self._work_dir = Path(work_dir) if work_dir else Path(tempfile.gettempdir()) / "soundcache_ingest_working"
         self._now = now or _now_iso
         self._oembed_lookup = oembed_lookup
         self._transcriber = transcriber

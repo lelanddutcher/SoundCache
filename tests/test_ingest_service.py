@@ -62,6 +62,17 @@ def make_service(tmp_path, downloader, *, resolve_map=None, index_sink=None):
     )
 
 
+def test_work_dir_defaults_to_local_not_the_vault(tmp_path):
+    # The transient capture/transcode/probe dir must NOT live on the vault: on an NFS/SMB
+    # mount, close-to-open consistency truncates the moved audio and a good capture gets
+    # rejected as "unplayable" (no TikTok sound could ever land). It must be local.
+    import tempfile
+
+    svc = IngestService(vault_root=tmp_path, downloader=FakeDownloader())
+    assert str(tmp_path) not in str(svc._work_dir)
+    assert str(svc._work_dir).startswith(tempfile.gettempdir())
+
+
 def test_ingest_url_success(tmp_path):
     indexed = []
     dl = FakeDownloader()
