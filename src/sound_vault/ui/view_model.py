@@ -535,6 +535,17 @@ class LibraryViewModel:
         Returns how many were re-queued."""
         return self.inbox.requeue_all_failed()
 
+    def reconcile_inbox(self) -> "ReconcileReport":
+        """Verify that everything the relay delivered actually landed in the vault, and
+        re-queue anything that didn't (stranded deliveries, phantom folders, imports
+        whose audio went missing). Non-destructive: re-ingest is idempotent, so a
+        healthy sound just re-confirms as a duplicate. Returns a ReconcileReport the
+        UI can summarize."""
+        from sound_vault.ingest.factory import build_ingest_service
+
+        service = build_ingest_service(vault_root=self.vault_root, db=self.db, transcriber=None)
+        return service.reconcile(self.inbox)
+
     def inbox_text(self) -> str:
         count = len(self.pending_inbox())
         suffix = "link" if count == 1 else "links"

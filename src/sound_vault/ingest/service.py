@@ -6,7 +6,7 @@ driven from the GUI, a CLI worker, or tests.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -34,6 +34,33 @@ class IngestOutcome:
     audio_path: Path | None = None
     method: str = ""
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ReconcileReport:
+    """The result of reconciling the durable receipt ledger + inbox against the vault:
+    did everything the relay delivered actually land, and what got re-queued to recover
+    the gaps. ``details`` is a human-readable line per action for the UI."""
+
+    received: int = 0            # relay deliveries on record (the ledger's universe)
+    landed: int = 0              # verified present in the vault (audio really on disk)
+    in_queue: int = 0            # still pending/failed in the inbox (in progress)
+    requeued: int = 0            # re-queued to recover (stranded / phantom / never-queued)
+    phantom_folders: int = 0     # vault folders that claim audio but have none on disk
+    unverifiable: int = 0        # imported rows with no music_id we can't cheaply verify
+    details: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        parts = [f"{self.received} relay deliveries on record", f"{self.landed} verified in your vault"]
+        if self.in_queue:
+            parts.append(f"{self.in_queue} still queued")
+        if self.requeued:
+            parts.append(f"{self.requeued} re-queued to recover")
+        if self.phantom_folders:
+            parts.append(f"{self.phantom_folders} phantom folder(s) found")
+        if self.unverifiable:
+            parts.append(f"{self.unverifiable} legacy import(s) unverifiable")
+        return " • ".join(parts)
 
 
 def _hash_id(value: str) -> str:
@@ -501,3 +528,141 @@ class IngestService:
             if on_item is not None:
                 on_item(outcome)
         return outcomes
+
+    @staticmethod
+    def _reconstruct_music_url(music_id: str) -> str:
+        """Rebuild a canonical TikTok /music/ URL from a numeric music_id so a phantom
+        folder (or a delivery whose original share URL we no longer hold) can still be
+        re-captured. Only numeric TikTok ids are reconstructable; anything else -> ""."""
+        mid = str(music_id or "").strip()
+        return f"https://www.tiktok.com/music/sound-{mid}" if mid.isdigit() else ""
+
+    def _phantom_folders(self):
+        """Yield ``(folder, music_id, recover_url)`` for every vault folder that is a
+        silent-data-loss casualty: it CLAIMS audio (or is a bare mkdir-before-audio
+        shell) yet has no real audio on disk. Intentional url_only records and healthy
+        folders are skipped. ``recover_url`` is the metadata's source/canonical URL, or
+        a reconstructed /music/ URL, or "" when nothing can be recovered."""
+        sounds_root = self.vault_root / "sounds"
+        if not sounds_root.exists():
+            return
+        for folder in sorted(sounds_root.iterdir()):
+            if not folder.is_dir() or folder.name.startswith("._"):
+                continue
+            name_id = folder.name.split(" - ", 1)[0].strip()
+            meta_path = folder / "metadata.json"
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue  # unreadable metadata: don't guess, leave it be
+                rel_audio = (meta.get("paths") or {}).get("audio")
+                if not rel_audio:
+                    continue  # url_only: intentionally audio-less, healthy
+                audio = self.vault_root / rel_audio
+                if audio.is_file() and audio.stat().st_size > 0:
+                    continue  # audio really present -> healthy
+                music_id = str(meta.get("tiktok_music_id") or name_id)
+                recover = str(meta.get("source_url") or meta.get("canonical_url") or "").strip()
+                yield folder, music_id, (recover or self._reconstruct_music_url(music_id))
+            else:
+                # A bare folder (the mkdir-before-audio phantom). If it actually holds
+                # audio it's just an in-flight write -> skip; otherwise recover from the id.
+                if self._existing_audio(folder) is not None:
+                    continue
+                yield folder, name_id, self._reconstruct_music_url(name_id)
+
+    def reconcile(self, store: ShortcutInboxStore) -> ReconcileReport:
+        """Answer "did everything the relay delivered land in my vault?" and re-queue
+        whatever didn't. Non-destructive to the vault: it only re-queues (re-ingest is
+        idempotent, so re-queuing a healthy sound is a no-op duplicate).
+
+        Three passes:
+          1. Every relay delivery on the receipt ledger -> is it in the vault? A row
+             marked imported whose audio is actually missing (a phantom), or a delivery
+             that never even reached the queue (a crash between receipt and add), is
+             re-queued from its retained URL.
+          2. Any imported inbox row NOT covered by a receipt (legacy imports) is verified
+             the same way.
+          3. A vault sweep finds phantom folders that predate the ledger entirely and
+             recovers them from their metadata's source URL (or a reconstructed one).
+        """
+        from sound_vault.ingest.receipts import ReceiptLedger
+
+        ledger = ReceiptLedger.beside(store.path)
+        deliveries = ledger.deliveries()
+        all_items = store.all_items()
+        by_relay = {i.relay_id: i for i in all_items if i.relay_id}
+        by_url = {i.url: i for i in all_items}
+
+        tally = {"landed": 0, "in_queue": 0, "unverifiable": 0}
+        requeue_ids: list[str] = []
+        requeue_urls: list[dict] = []
+        seen_urls: set[str] = set()
+        requeued_music_ids: set[str] = set()
+        handled_ids: set[str] = set()
+        details: list[str] = []
+
+        def _queue_url(url: str, source: str, relay_id: str | None, note: str, why: str) -> None:
+            url = (url or "").strip()
+            if url and url not in seen_urls:
+                requeue_urls.append({"url": url, "source": source, "relay_id": relay_id, "note": note})
+                seen_urls.add(url)
+                details.append(f"re-queued ({why}): {url}")
+
+        def _classify(item: ShortcutInboxItem) -> None:
+            if item.status == "imported":
+                if item.music_id and self._folder_for(item.music_id) is not None:
+                    tally["landed"] += 1
+                elif item.music_id:
+                    # marked imported but the vault has no real audio -> phantom, recover it
+                    requeue_ids.append(item.id)
+                    requeued_music_ids.add(item.music_id)
+                    details.append(f"re-queued (imported but audio missing): {item.url}")
+                else:
+                    tally["unverifiable"] += 1  # legacy row, no id to check cheaply
+            else:
+                tally["in_queue"] += 1  # pending/failed: already visible + retryable
+
+        # (1) reconcile relay deliveries against the vault
+        for key, ev in deliveries.items():
+            item = by_relay.get(key) or by_url.get(ev.url)
+            if item is None:
+                _queue_url(ev.url, ev.source or "relay", ev.relay_id, ev.note, "never reached the queue")
+            else:
+                handled_ids.add(item.id)
+                _classify(item)
+
+        # (2) imported inbox rows with no receipt (legacy imports) — verify too
+        for item in all_items:
+            if item.id not in handled_ids and item.status == "imported":
+                _classify(item)
+
+        # (3) vault sweep for phantom folders (may predate the ledger entirely)
+        phantom_folders = 0
+        for folder, music_id, recover_url in self._phantom_folders():
+            phantom_folders += 1
+            if music_id and music_id in requeued_music_ids:
+                continue  # already being recovered via its inbox row
+            if recover_url:
+                _queue_url(recover_url, "recovery", None, "", f"vault phantom {folder.name}")
+            else:
+                details.append(f"phantom folder (no recoverable URL): {folder.name}")
+
+        # apply the recovery re-queues
+        requeued = 0
+        for item_id in requeue_ids:
+            if store.requeue(item_id):
+                requeued += 1
+        if requeue_urls:
+            requeued += store.add_urls_bulk(requeue_urls)
+
+        return ReconcileReport(
+            received=len(deliveries),
+            landed=tally["landed"],
+            in_queue=tally["in_queue"],
+            requeued=requeued,
+            phantom_folders=phantom_folders,
+            unverifiable=tally["unverifiable"],
+            details=details,
+        )

@@ -2196,7 +2196,12 @@ class SoundVaultWindow(QMainWindow):
         inbox_title = QLabel("Shortcut inbox")
         inbox_title.setObjectName("sectionTitle")
         refresh_inbox = QPushButton("Refresh inbox")
-        refresh_inbox.clicked.connect(self.refresh_inbox)
+        refresh_inbox.setToolTip(
+            "Confirm the relay → vault chain of custody: pull anything still waiting on the "
+            "relay, verify every delivered sound actually landed in your vault, and re-queue "
+            "anything missing (stranded or phantom) so you can recover it with Download & import."
+        )
+        refresh_inbox.clicked.connect(self.reconcile_and_refresh_inbox)
         download_import = QPushButton("Download && import")
         download_import.setObjectName("primaryButton")
         download_import.clicked.connect(self.download_and_import)
@@ -4315,6 +4320,56 @@ class SoundVaultWindow(QMainWindow):
                 self.inbox_table.setItem(row_idx, col_idx, table_item)
         self.inbox_table.setSortingEnabled(True)
         self.inbox_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+
+    def reconcile_and_refresh_inbox(self) -> None:
+        """The "Refresh inbox" action: confirm the relay -> vault chain of custody.
+
+        Pulls anything still waiting on the relay, then reconciles the durable receipt
+        ledger against the vault — every sound the relay delivered is verified to be on
+        disk, and whatever isn't (a stranded delivery, a phantom folder, an import whose
+        audio went missing) is re-queued so the user can recover it with Download & import.
+        This is the "did everything from my relay make it into my vault?" check."""
+        base_url = self.settings.relay_base_url()
+        pair_code = self.settings.relay_pair_code()
+        device_id = self.settings.relay_device_id()
+        device_secret = self.settings.relay_device_secret()
+        polled: int | None = None
+        if all((base_url, pair_code, device_id, device_secret)):
+            try:
+                polled = len(
+                    self.vm.poll_relay_inbox(
+                        base_url=base_url, pair_code=pair_code, device_id=device_id, device_secret=device_secret
+                    )
+                )
+            except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+                # Relay unreachable is non-fatal: still reconcile local records vs the vault.
+                write_event("gui.reconcile_poll_failed", **exception_fields(exc))
+                polled = -1
+        try:
+            report = self.vm.reconcile_inbox()
+        except Exception as exc:  # noqa: BLE001 - surface, never crash the UI
+            write_event("gui.reconcile_exception", **exception_fields(exc))
+            QMessageBox.warning(self, "Reconcile failed", f"Could not reconcile the inbox:\n{exc}")
+            self.refresh_inbox()
+            return
+        self.refresh_inbox()
+        lines: list[str] = []
+        if polled is None:
+            lines.append("Relay not configured — reconciled local records against the vault.")
+        elif polled < 0:
+            lines.append("Couldn't reach the relay — reconciled local records against the vault.")
+        elif polled:
+            lines.append(f"Pulled {polled} new link(s) that were waiting on the relay.")
+        else:
+            lines.append("Nothing waiting on the relay.")
+        lines.append(report.summary())
+        if report.requeued:
+            lines.append(
+                f"\nRe-queued {report.requeued} item(s) to recover — hit “Download && import” to fetch them."
+            )
+        else:
+            lines.append("\nEverything the relay delivered is accounted for in your vault. ✓")
+        QMessageBox.information(self, "Inbox reconciled", "\n".join(lines))
 
     def poll_relay_inbox(self) -> None:
         base_url = self.settings.relay_base_url()
