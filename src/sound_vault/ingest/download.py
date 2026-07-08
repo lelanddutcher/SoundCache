@@ -160,12 +160,14 @@ class PlaywrightCaptureDownloader:
         runner: Runner,
         project_cwd: Path | None = None,
         audio_format: str = "m4a",
+        probe_audio: Callable[[Path], bool | None] = _has_decodable_audio,
     ) -> None:
         self.node_script = Path(node_script)
         self.storage_state = Path(storage_state)
         self._runner = runner
         self._project_cwd = Path(project_cwd) if project_cwd else None
         self._audio_format = audio_format
+        self._probe_audio = probe_audio
 
     def available(self) -> bool:
         return self.node_script.exists() and self.storage_state.exists()
@@ -214,6 +216,12 @@ class PlaywrightCaptureDownloader:
                     ok=False, audio_path=None, info={}, method="playwright", error="no audio captured"
                 )
             shutil.move(str(produced[0]), str(target))
+        # Validate the capture too: a bad/empty capture must fail cleanly (ok=False) so the
+        # item stays FAILED in the queue with a clear reason, not crash later at packaging.
+        if target.stat().st_size == 0 or self._probe_audio(target) is False:
+            return DownloadResult(
+                ok=False, audio_path=None, info={}, method="playwright", error="capture produced an unplayable file"
+            )
         return DownloadResult(
             ok=True, audio_path=target, info=self._read_capture_meta(dest_dir, music_id), method="playwright"
         )

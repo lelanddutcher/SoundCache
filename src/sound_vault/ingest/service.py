@@ -212,46 +212,15 @@ class IngestService:
                     status="failed", url=url, music_id=music_id, reason=download.error or "download failed"
                 )
 
-            title, artist = self._title_artist(resolved, download.info)
-            info = {**download.info, "_method": download.method}
-            # Fill a still-thin title/author via oEmbed (capture sidecar wins when present).
-            if resolved.platform == "tiktok" and (title in ("", "Unknown") or not artist):
-                extra = self._enrich_via_oembed(resolved.canonical_url or url)
-                if title in ("", "Unknown") and extra.get("title"):
-                    title = extra["title"]
-                if not artist and extra.get("author_name"):
-                    artist = extra["author_name"]
-                if extra.get("provider_name"):
-                    info.setdefault("source_provider", extra["provider_name"])
-            # Platform-agnostic enrichment: for any platform (Instagram, YouTube,
-            # ...) fill artwork + popularity + provider from yt-dlp's own metadata
-            # when the TikTok page-scrape didn't supply them.
-            if not info.get("source_provider") and resolved.platform not in ("", "unknown"):
-                info["source_provider"] = resolved.platform
-            if info.get("usage_count") is None:
-                count = info.get("view_count") or info.get("like_count")
-                if count is not None:
-                    info["usage_count"] = count
-            if not info.get("cover_path") and info.get("thumbnail"):
-                thumb = self._download_thumbnail(str(info["thumbnail"]), work, music_id)
-                if thumb is not None:
-                    info["cover_path"] = str(thumb)
-            packaged = package_sound(
-                vault_root=self.vault_root,
-                music_id=music_id,
-                title=title,
-                artist=artist,
-                canonical_url=resolved.canonical_url or "",
-                source_url=url,
-                platform=resolved.platform,
-                audio_path=download.audio_path,
-                info=info,
-                status="ingested",
-                tags=[source],
-                user_notes=note,
-                tagger=self._tagger,
-                now_iso=self._now(),
-            )
+            try:
+                packaged = self._enrich_and_package(resolved, download, music_id, url, note, source, work)
+            except Exception as pkg_exc:  # noqa: BLE001 - a file that downloaded but won't
+                # package (e.g. a yt-dlp file that passed the decodability probe yet ffmpeg
+                # still can't tag) must not dead-end: if it came from the primary and the
+                # Playwright fallback is available for TikTok, re-download + package via it.
+                packaged = self._retry_package_via_fallback(
+                    resolved, download, music_id, url, note, source, work, capture_target, should_stop, pkg_exc
+                )
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -277,6 +246,77 @@ class IngestService:
             audio_path=packaged.audio_path,
             method=download.method,
         )
+
+    def _enrich_and_package(self, resolved, download, music_id: str, url: str, note: str, source: str, work: Path):
+        """Enrich the download's metadata (oEmbed / provider / artwork), then package it
+        into the vault. Raises if the audio can't be packaged (e.g. ffmpeg can't tag it)."""
+        title, artist = self._title_artist(resolved, download.info)
+        info = {**download.info, "_method": download.method}
+        # Fill a still-thin title/author via oEmbed (capture sidecar wins when present).
+        if resolved.platform == "tiktok" and (title in ("", "Unknown") or not artist):
+            extra = self._enrich_via_oembed(resolved.canonical_url or url)
+            if title in ("", "Unknown") and extra.get("title"):
+                title = extra["title"]
+            if not artist and extra.get("author_name"):
+                artist = extra["author_name"]
+            if extra.get("provider_name"):
+                info.setdefault("source_provider", extra["provider_name"])
+        # Platform-agnostic enrichment from yt-dlp's own metadata when the scrape didn't supply it.
+        if not info.get("source_provider") and resolved.platform not in ("", "unknown"):
+            info["source_provider"] = resolved.platform
+        if info.get("usage_count") is None:
+            count = info.get("view_count") or info.get("like_count")
+            if count is not None:
+                info["usage_count"] = count
+        if not info.get("cover_path") and info.get("thumbnail"):
+            thumb = self._download_thumbnail(str(info["thumbnail"]), work, music_id)
+            if thumb is not None:
+                info["cover_path"] = str(thumb)
+        return package_sound(
+            vault_root=self.vault_root,
+            music_id=music_id,
+            title=title,
+            artist=artist,
+            canonical_url=resolved.canonical_url or "",
+            source_url=url,
+            platform=resolved.platform,
+            audio_path=download.audio_path,
+            info=info,
+            status="ingested",
+            tags=[source],
+            user_notes=note,
+            tagger=self._tagger,
+            now_iso=self._now(),
+        )
+
+    def _retry_package_via_fallback(
+        self, resolved, download, music_id, url, note, source, work, capture_target, should_stop, pkg_exc
+    ):
+        """A file downloaded but wouldn't package. If it came from the primary (yt-dlp) and
+        the Playwright fallback is available for TikTok, re-download via the fallback and
+        package that. Otherwise re-raise the packaging error so the item stays FAILED in the
+        queue with the real reason (drain_inbox records it; nothing is silently dropped)."""
+        from sound_vault.diagnostics import exception_fields, write_event
+
+        fb = getattr(self.downloader, "fallback", None)
+        used_primary = download.method != "playwright"
+        fb_available = fb is not None and bool(getattr(fb, "available", lambda: False)())
+        if not (used_primary and fb_available and resolved.platform == "tiktok"):
+            raise pkg_exc
+        write_event("ingest.package_failed_fallback", url=url, method=download.method, **exception_fields(pkg_exc))
+        # Clear the unusable primary file so the fallback capture writes cleanly into the same dir.
+        try:
+            if download.audio_path:
+                Path(download.audio_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        fb_download = fb.download(
+            capture_target, dest_dir=work, basename=music_id, source_id=music_id,
+            platform=resolved.platform, kind=resolved.kind, should_stop=should_stop,
+        )
+        if not fb_download.ok:
+            raise RuntimeError(f"primary file unusable ({pkg_exc}); Playwright fallback failed: {fb_download.error}")
+        return self._enrich_and_package(resolved, fb_download, music_id, url, note, source, work)
 
     def reenrich_existing(
         self,

@@ -180,10 +180,34 @@ def test_playwright_capture_success_moves_raw_to_basename(tmp_path):
         (dest / "999_raw.m4a").write_bytes(b"\x00audio")
         return 0, "captured", ""
 
-    dl = PlaywrightCaptureDownloader(node_script=script, storage_state=state, runner=runner)
+    dl = PlaywrightCaptureDownloader(
+        node_script=script, storage_state=state, runner=runner, probe_audio=lambda _p: True
+    )
     assert dl.available() is True
     result = dl.download("https://x", dest_dir=dest, basename="999", source_id="999")
     assert result.ok is True
     assert result.method == "playwright"
     assert (dest / "999.m4a").exists()
     assert not (dest / "999_raw.m4a").exists()
+
+
+def test_playwright_capture_bad_output_fails_cleanly(tmp_path):
+    # A capture that produces an unplayable file must fail (ok=False), not crash later
+    # at packaging -- so the item stays FAILED in the queue with a clear reason.
+    script = tmp_path / "capture.cjs"
+    script.write_text("// stub", encoding="utf-8")
+    state = tmp_path / "state.json"
+    state.write_text("{}", encoding="utf-8")
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    def runner(cmd, cwd=None):
+        (dest / "999_raw.m4a").write_bytes(b"\x00not-audio")
+        return 0, "captured", ""
+
+    dl = PlaywrightCaptureDownloader(
+        node_script=script, storage_state=state, runner=runner, probe_audio=lambda _p: False
+    )
+    result = dl.download("https://x", dest_dir=dest, basename="999", source_id="999")
+    assert result.ok is False
+    assert "unplayable" in (result.error or "").lower()

@@ -92,6 +92,79 @@ def test_ingest_url_is_idempotent(tmp_path):
     assert dl.calls == 1  # no re-download
 
 
+class _PlaywrightFallback:
+    def __init__(self):
+        self.calls = 0
+
+    def available(self):
+        return True
+
+    def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
+        self.calls += 1
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+        p = Path(dest_dir) / f"{basename}.m4a"
+        p.write_bytes(b"\x00GOOD")
+        return DownloadResult(ok=True, audio_path=p, info={"title": "Captured"}, method="playwright")
+
+
+class _PrimaryWithFallback(FakeDownloader):
+    """A yt-dlp primary that downloads a file which passes the download step but can't be
+    packaged, exposing a .fallback like the real CompositeDownloader."""
+
+    def __init__(self, fallback):
+        super().__init__()
+        self.fallback = fallback
+
+    def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
+        self.calls += 1
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+        p = Path(dest_dir) / f"{basename}.m4a"
+        p.write_bytes(b"\x00BAD")
+        return DownloadResult(ok=True, audio_path=p, info={"title": "DL"}, method="yt-dlp")
+
+
+def _tagger_fails_on_bad(src, dst, tags):
+    if Path(src).read_bytes() == b"\x00BAD":
+        raise RuntimeError("ffmpeg failed (exit 183) tagging: moov atom not found")
+    Path(dst).write_bytes(Path(src).read_bytes())
+
+
+def test_package_failure_falls_back_to_playwright(tmp_path):
+    fb = _PlaywrightFallback()
+    dl = _PrimaryWithFallback(fb)
+    svc = IngestService(
+        vault_root=tmp_path, downloader=dl, resolve_source=tiktok_music,
+        tagger=_tagger_fails_on_bad, now=lambda: "2026-06-13T00:00:00Z",
+    )
+    out = svc.ingest_url("https://www.tiktok.com/t/abc/")
+    assert out.status == "ingested"      # recovered via the fallback rather than dead-ending
+    assert fb.calls == 1                 # the Playwright fallback WAS invoked on the package failure
+    assert out.audio_path is not None and out.audio_path.exists()
+
+
+def test_package_failure_without_fallback_stays_failed_in_queue(tmp_path):
+    dl = FakeDownloader()  # ok=True, writes a file; no .fallback attribute
+    svc = IngestService(
+        vault_root=tmp_path, downloader=dl, resolve_source=tiktok_music,
+        tagger=_tagger_fails_on_bad, now=lambda: "2026-06-13T00:00:00Z",
+    )
+    # write a file the tagger will reject, by making FakeDownloader's file the "bad" bytes
+    store = ShortcutInboxStore(tmp_path / "inbox.jsonl")
+    store.add_url("https://www.tiktok.com/t/xyz/", source="ios_shortcut")
+
+    def bad_downloader(url, *, dest_dir, basename, source_id=None, **kwargs):
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+        p = Path(dest_dir) / f"{basename}.m4a"
+        p.write_bytes(b"\x00BAD")
+        return DownloadResult(ok=True, audio_path=p, info={"title": "DL"}, method="yt-dlp")
+
+    dl.download = bad_downloader
+    svc.drain_inbox(store, max_attempts=1)
+    failed = store.failed()
+    assert len(failed) == 1                       # item stays in the queue, not dropped
+    assert "ffmpeg failed" in (failed[0].error or "")  # with the real error reported
+
+
 def test_ingest_url_resolve_failure(tmp_path):
     def bad_resolve(url):
         return ResolvedSource(
