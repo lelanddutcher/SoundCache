@@ -212,10 +212,42 @@ def test_apple_double_shadow_is_not_counted_as_audio(tmp_path):
 def test_reconcile_ignores_non_sound_dirs(tmp_path):
     svc = make_service(tmp_path, FakeDownloader())
     store = _store(tmp_path)
-    (tmp_path / "sounds" / "reports").mkdir(parents=True)  # a stray non-sound directory
+    (tmp_path / "sounds" / "reports").mkdir(parents=True)  # a stray non-sound directory (no " - ")
     report = svc.reconcile(store)
     assert report.phantom_folders == 0
     assert report.requeued == 0
+
+
+def test_reconcile_bare_phantom_non_tiktok_id_is_flagged(tmp_path):
+    # A bare phantom for an Instagram/YouTube sound has an ALPHANUMERIC id (not numeric,
+    # not src_). It must still be flagged as a loss (recognized by the "<id> - title -
+    # artist" folder shape), not silently skipped as a stray dir. No TikTok /music/ URL
+    # can be reconstructed for it, so it's reported rather than auto-recovered.
+    svc = make_service(tmp_path, FakeDownloader())
+    store = _store(tmp_path)
+    (tmp_path / "sounds" / "Cxy123AbC_ - Some Reel Audio - some_creator").mkdir(parents=True)
+    report = svc.reconcile(store)
+    assert report.phantom_folders == 1  # NOT silently skipped
+    assert any("no recoverable URL" in d for d in report.details)
+
+
+def test_reconcile_same_url_two_relay_ids_counts_once(tmp_path):
+    # Re-sharing the same link produces two relay deliveries (two relay_ids) but ONE inbox
+    # row. reconcile must recover/report it once, not double-count.
+    svc = make_service(tmp_path, FakeDownloader())
+    store = _store(tmp_path)
+    ledger = ReceiptLedger.beside(store.path)
+    ledger.record_received_many([{"relay_id": "in_1", "url": "https://t/same"}])
+    ledger.record_received_many([{"relay_id": "in_2", "url": "https://t/same"}])
+    item = store.add_url("https://t/same", source="ios", relay_id="in_1")
+    store.mark_imported(item.id, music_id="Z")  # imported but no vault folder -> phantom
+
+    report = svc.reconcile(store)
+
+    assert report.received == 2  # two genuine deliveries on record
+    assert report.requeued == 1  # ...but one inbox row -> recovered exactly once
+    assert len([d for d in report.details if "https://t/same" in d]) == 1
+    assert [i.status for i in store.all_items()] == ["pending"]
 
 
 def test_reconcile_dedups_phantom_item_and_its_folder(tmp_path):

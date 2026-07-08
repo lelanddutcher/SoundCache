@@ -588,10 +588,16 @@ class IngestService:
                 recover = str(meta.get("source_url") or meta.get("canonical_url") or "").strip()
                 yield folder, music_id, (recover or self._reconstruct_music_url(music_id))
             else:
-                # A bare folder (the mkdir-before-audio phantom). Only treat it as a lost
-                # SOUND folder (name is "<id> - ..."); a stray non-sound dir is ignored. If
-                # it actually holds audio it's just an in-flight write -> skip.
-                if not (name_id.isdigit() or name_id.startswith("src_")):
+                # A bare folder (the mkdir-before-audio phantom, from a hard crash between
+                # folder.mkdir() and the metadata.json write). Recognize it by the packaged
+                # folder-name SHAPE that portable_folder_name produces ("<id> - <title> -
+                # <artist>"), NOT by the id's character class: Instagram/YouTube ids are
+                # alphanumeric (neither numeric nor src_-prefixed), and gating on that would
+                # silently skip a genuinely-lost IG/YT sound. A stray dir with no " - " (e.g.
+                # "reports") is still ignored; one that already holds audio is an in-flight
+                # write. A non-TikTok id yields no reconstructable URL, so it's reported (not
+                # auto-recovered) -- same as the with-metadata branch.
+                if " - " not in folder.name:
                     continue
                 if self._has_real_audio(folder):
                     continue
@@ -654,7 +660,10 @@ class IngestService:
             item = by_relay.get(key) or by_url.get(ev.url)
             if item is None:
                 _queue_url(ev.url, ev.source or "relay", ev.relay_id, ev.note, "never reached the queue")
-            else:
+            elif item.id not in handled_ids:
+                # Re-sharing the same URL yields two deliveries (two relay_ids) but ONE inbox
+                # row; without this guard the row is classified twice and the report double-
+                # counts it (the vault/queue stay correct — requeue is idempotent).
                 handled_ids.add(item.id)
                 _classify(item)
 
