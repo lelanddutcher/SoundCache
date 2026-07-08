@@ -88,7 +88,11 @@ def test_playwright_downloader_reads_meta_sidecar(tmp_path):
         }))
         return (0, "", "")
 
-    dl = PlaywrightCaptureDownloader(node_script=node_script, storage_state=state, runner=fake_runner)
+    # This test exercises the meta-sidecar parsing, not audio decodability, so bypass the
+    # real ffprobe check on the stub bytes (matches test_ingest_download.py's pattern).
+    dl = PlaywrightCaptureDownloader(
+        node_script=node_script, storage_state=state, runner=fake_runner, probe_audio=lambda _p: True
+    )
     result = dl.download("https://www.tiktok.com/music/x-9", dest_dir=tmp_path / "work", basename="9", source_id="9")
     assert result.ok
     assert result.info["title"] == "original sound"
