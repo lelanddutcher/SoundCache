@@ -57,8 +57,11 @@ class ReceiptLedger:
 
     @classmethod
     def beside(cls, inbox_path: Path) -> "ReceiptLedger":
-        """The ledger that lives next to an inbox JSONL (``receipts.jsonl``)."""
-        return cls(Path(inbox_path).with_name("receipts.jsonl"))
+        """The ledger for a given inbox JSONL. Keyed off the inbox's stem so it stays
+        per-vault (the inbox is ``{vault_digest}.jsonl``): a machine with more than one
+        vault must not let vault A's deliveries drive recovery into vault B's queue."""
+        inbox_path = Path(inbox_path)
+        return cls(inbox_path.with_name(f"{inbox_path.stem}.receipts.jsonl"))
 
     # ---- writes (durable) -------------------------------------------------
 

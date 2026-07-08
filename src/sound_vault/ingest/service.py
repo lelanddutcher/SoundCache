@@ -188,7 +188,12 @@ class IngestService:
             if rel_audio is None:
                 return p  # intentional url_only record (no audio expected)
             audio = self.vault_root / rel_audio
-            if audio.is_file() and audio.stat().st_size > 0:
+            if (audio.is_file() and audio.stat().st_size > 0) or self._has_real_audio(p):
+                # Trust real audio physically in the folder even when paths.audio is stale
+                # or absolute — older vaults stored /nas/... paths that stop resolving after
+                # a move/mount change, but the audio file is still right there. This mirrors
+                # how the indexer resolves audio via its folder glob fallback, and prevents a
+                # moved vault's healthy sounds from all reading as "not ingested".
                 return p
         return None
 
@@ -464,11 +469,28 @@ class IngestService:
 
     @staticmethod
     def _existing_audio(folder: Path) -> Path | None:
-        for pattern in ("*.m4a", "*.mp3", "*.aac", "*.wav", "*.ogg"):
-            matches = sorted(p for p in folder.glob(pattern) if p.is_file())
+        for pattern in ("*.m4a", "*.mp3", "*.aac", "*.wav", "*.ogg", "*.opus", "*.flac"):
+            # Skip macOS AppleDouble shadows (._name.m4a): on NFS/SMB these sit beside the
+            # real file and are NOT audio — returning one would break transcription/preview.
+            matches = sorted(p for p in folder.glob(pattern) if p.is_file() and not p.name.startswith("._"))
             if matches:
                 return matches[0]
         return None
+
+    @staticmethod
+    def _has_real_audio(folder: Path) -> bool:
+        """True if the folder holds a real, non-empty audio file (ignoring ._ AppleDouble
+        shadows). Used to recognize a healthy sound whose metadata audio-path is stale."""
+        for pattern in ("*.m4a", "*.mp3", "*.aac", "*.wav", "*.ogg", "*.opus", "*.flac"):
+            for p in folder.glob(pattern):
+                if p.name.startswith("._"):
+                    continue
+                try:
+                    if p.is_file() and p.stat().st_size > 0:
+                        return True
+                except OSError:
+                    continue
+        return False
 
     def drain_inbox(
         self,
@@ -560,15 +582,18 @@ class IngestService:
                 if not rel_audio:
                     continue  # url_only: intentionally audio-less, healthy
                 audio = self.vault_root / rel_audio
-                if audio.is_file() and audio.stat().st_size > 0:
-                    continue  # audio really present -> healthy
+                if (audio.is_file() and audio.stat().st_size > 0) or self._has_real_audio(folder):
+                    continue  # audio really present (path OR glob fallback) -> healthy
                 music_id = str(meta.get("tiktok_music_id") or name_id)
                 recover = str(meta.get("source_url") or meta.get("canonical_url") or "").strip()
                 yield folder, music_id, (recover or self._reconstruct_music_url(music_id))
             else:
-                # A bare folder (the mkdir-before-audio phantom). If it actually holds
-                # audio it's just an in-flight write -> skip; otherwise recover from the id.
-                if self._existing_audio(folder) is not None:
+                # A bare folder (the mkdir-before-audio phantom). Only treat it as a lost
+                # SOUND folder (name is "<id> - ..."); a stray non-sound dir is ignored. If
+                # it actually holds audio it's just an in-flight write -> skip.
+                if not (name_id.isdigit() or name_id.startswith("src_")):
+                    continue
+                if self._has_real_audio(folder):
                     continue
                 yield folder, name_id, self._reconstruct_music_url(name_id)
 

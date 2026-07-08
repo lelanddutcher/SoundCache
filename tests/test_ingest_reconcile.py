@@ -159,6 +159,65 @@ def test_reconcile_healthy_folder_not_flagged(tmp_path):
     assert report.requeued == 0
 
 
+def test_folder_for_trusts_real_audio_despite_stale_absolute_path(tmp_path):
+    # Real-vault case: metadata.paths.audio is a stale ABSOLUTE /nas/... path that no
+    # longer resolves after a vault move, but the audio is physically in the folder.
+    # _folder_for must still recognize it as complete (so it counts as a duplicate and
+    # is NOT re-imported, and NOT flagged as a phantom loss).
+    svc = make_service(tmp_path, FakeDownloader())
+    folder = tmp_path / "sounds" / "555 - Song - Artist"
+    folder.mkdir(parents=True)
+    (folder / "audio.m4a").write_bytes(b"\x00realaudio")
+    (folder / "metadata.json").write_text(
+        json.dumps({"tiktok_music_id": "555", "paths": {"audio": "/nas/old/gone.m4a"}}), encoding="utf-8"
+    )
+    assert svc._folder_for("555") == folder
+
+
+def test_reconcile_stale_absolute_audio_path_is_not_phantom(tmp_path):
+    svc = make_service(tmp_path, FakeDownloader())
+    store = _store(tmp_path)
+    folder = tmp_path / "sounds" / "555 - Song - Artist"
+    folder.mkdir(parents=True)
+    (folder / "audio.m4a").write_bytes(b"\x00realaudio")
+    (folder / "metadata.json").write_text(
+        json.dumps(
+            {"tiktok_music_id": "555", "paths": {"audio": "/nas/TikTok Sound Vault/sounds/555 - Song - Artist/audio.m4a"}}
+        ),
+        encoding="utf-8",
+    )
+    report = svc.reconcile(store)
+    assert report.phantom_folders == 0  # real audio on disk -> healthy despite stale path
+    assert report.requeued == 0
+
+
+def test_apple_double_shadow_is_not_counted_as_audio(tmp_path):
+    # A ._ AppleDouble shadow beside a (missing) real file must NOT rescue a phantom.
+    svc = make_service(tmp_path, FakeDownloader())
+    store = _store(tmp_path)
+    folder = tmp_path / "sounds" / "666 - Phantom - X"
+    folder.mkdir(parents=True)
+    (folder / "._ghost.m4a").write_bytes(b"\x00\x00applesauce")  # AppleDouble metadata, not audio
+    (folder / "metadata.json").write_text(
+        json.dumps(
+            {"tiktok_music_id": "666", "source_url": "https://t/ghost", "paths": {"audio": "sounds/666 - Phantom - X/ghost.m4a"}}
+        ),
+        encoding="utf-8",
+    )
+    report = svc.reconcile(store)
+    assert report.phantom_folders == 1
+    assert store.pending()[0].url == "https://t/ghost"
+
+
+def test_reconcile_ignores_non_sound_dirs(tmp_path):
+    svc = make_service(tmp_path, FakeDownloader())
+    store = _store(tmp_path)
+    (tmp_path / "sounds" / "reports").mkdir(parents=True)  # a stray non-sound directory
+    report = svc.reconcile(store)
+    assert report.phantom_folders == 0
+    assert report.requeued == 0
+
+
 def test_reconcile_dedups_phantom_item_and_its_folder(tmp_path):
     # An imported item whose audio is missing AND a phantom folder for the same id must
     # recover ONCE, not twice.
