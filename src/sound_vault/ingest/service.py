@@ -140,11 +140,30 @@ class IngestService:
             return {}
 
     def _folder_for(self, music_id: str) -> Path | None:
+        """The vault folder for an ALREADY-COMPLETE sound, or None. A folder counts as
+        complete only when the package genuinely finished: metadata.json is present AND
+        either its audio file is on disk, or it is an intentional audio-less (url_only)
+        record. A bare/partial folder from a failed attempt does NOT count -- otherwise
+        _already_ingested would return a false "duplicate" and the retry would be
+        consumed with no sound saved (silent data loss)."""
         sounds_root = self.vault_root / "sounds"
         if not sounds_root.exists():
             return None
-        matches = sorted(p for p in sounds_root.glob(f"{music_id} -*") if p.is_dir())
-        return matches[0] if matches else None
+        for p in sorted(sounds_root.glob(f"{music_id} -*")):
+            meta_path = p / "metadata.json"
+            if not (p.is_dir() and meta_path.is_file()):
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            rel_audio = (meta.get("paths") or {}).get("audio")
+            if rel_audio is None:
+                return p  # intentional url_only record (no audio expected)
+            audio = self.vault_root / rel_audio
+            if audio.is_file() and audio.stat().st_size > 0:
+                return p
+        return None
 
     def _already_ingested(self, music_id: str) -> bool:
         return self._folder_for(music_id) is not None

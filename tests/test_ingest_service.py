@@ -92,6 +92,33 @@ def test_ingest_url_is_idempotent(tmp_path):
     assert dl.calls == 1  # no re-download
 
 
+def test_empty_partial_folder_is_not_a_duplicate_so_retry_reingests(tmp_path):
+    # A prior FAILED attempt can leave a bare vault folder (mkdir before the audio).
+    # That must NOT be seen as an "already ingested" duplicate, or the retry gets
+    # consumed with no sound -> silent data loss (the reported bug).
+    (tmp_path / "sounds" / "123 - stale-partial").mkdir(parents=True)
+    dl = FakeDownloader()
+    svc = make_service(tmp_path, dl)
+    out = svc.ingest_url("https://www.tiktok.com/t/abc/")
+    assert out.status == "ingested"   # re-ingested, NOT falsely "duplicate"
+    assert dl.calls == 1              # actually downloaded (did not short-circuit)
+    assert out.audio_path is not None and out.audio_path.exists()
+
+
+def test_metadata_without_audio_folder_is_not_a_duplicate(tmp_path):
+    # A folder whose metadata.json CLAIMS audio but whose file is gone is a corrupt
+    # partial, not a real duplicate -> a retry must re-ingest it.
+    import json as _json
+    f = tmp_path / "sounds" / "123 - phantom"
+    f.mkdir(parents=True)
+    (f / "metadata.json").write_text(_json.dumps({"paths": {"audio": "sounds/123 - phantom/gone.m4a"}}), encoding="utf-8")
+    dl = FakeDownloader()
+    svc = make_service(tmp_path, dl)
+    out = svc.ingest_url("https://www.tiktok.com/t/abc/")
+    assert out.status == "ingested"
+    assert dl.calls == 1
+
+
 class _PlaywrightFallback:
     def __init__(self):
         self.calls = 0

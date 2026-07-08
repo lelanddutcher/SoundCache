@@ -233,43 +233,54 @@ def package_sound(
     folder_name = portable_folder_name(music_id, title, artist)
     rel_folder = f"sounds/{folder_name}"
     folder = vault_root / "sounds" / folder_name
+    # A failed/partial package must NEVER leave a folder behind: a bare or audio-less
+    # folder would later read as a false "duplicate" (see IngestService._already_ingested)
+    # and the inbox item would be consumed with NO sound -> silent data loss. So we
+    # require the audio to actually land (present, non-empty, decodable) before writing
+    # metadata/catalog, and clean up an incomplete folder on ANY failure.
+    audio_expected = audio_path is not None
     folder.mkdir(parents=True, exist_ok=True)
-
-    final_audio: Path | None = None
-    rel_audio: str | None = None
-    if audio_path is not None:
-        src = Path(audio_path)
-        if src.exists():
+    try:
+        final_audio: Path | None = None
+        rel_audio: str | None = None
+        if audio_expected:
+            src = Path(audio_path)
+            if not src.exists():
+                raise FileNotFoundError(f"package_sound: audio source missing for {music_id}: {audio_path!r}")
             human = build_human_filename(title, artist, music_id, status, platform_tag=_platform_tag(platform))
             dst = folder / human
             tagger(src, dst, _tag_dict(title, artist, music_id, canonical_url, source_confidence, tags))
-            if dst.exists():
-                final_audio = dst
-                rel_audio = f"{rel_folder}/{human}"
-                try:
-                    if src.resolve() != dst.resolve() and src.exists():
-                        src.unlink()
-                except OSError:
-                    pass
-
-    # Cover artwork: if the downloader captured one, copy it in as artwork.<ext>
-    # (the indexer finds it via the artwork.* glob / paths.artwork).
-    rel_artwork: str | None = None
-    assets: list[dict[str, Any]] = []
-    cover_src = info.get("cover_path")
-    if cover_src:
-        cover_path = Path(str(cover_src))
-        if cover_path.exists():
-            ext = (cover_path.suffix or ".jpg").lstrip(".") or "jpg"
-            artwork_dst = folder / f"artwork.{ext}"
+            # Decodability was already validated at download time (yt-dlp + Playwright
+            # outputs are ffprobe-checked) and the tagger (ffmpeg) raises on a bad
+            # transcode; here we just require the tagged file to actually exist non-empty.
+            if (not dst.exists()) or dst.stat().st_size == 0:
+                raise RuntimeError(f"package_sound: packaged audio missing or empty for {music_id}: {dst}")
+            final_audio = dst
+            rel_audio = f"{rel_folder}/{human}"
             try:
-                shutil.copyfile(cover_path, artwork_dst)
-                rel_artwork = f"{rel_folder}/artwork.{ext}"
-                assets.append({"asset_type": "artwork", "path": rel_artwork, "source": "tiktok_music_page"})
+                if src.resolve() != dst.resolve() and src.exists():
+                    src.unlink()
             except OSError:
-                rel_artwork = None
+                pass
 
-    metadata: dict[str, Any] = {
+        # Cover artwork: if the downloader captured one, copy it in as artwork.<ext>
+        # (the indexer finds it via the artwork.* glob / paths.artwork).
+        rel_artwork: str | None = None
+        assets: list[dict[str, Any]] = []
+        cover_src = info.get("cover_path")
+        if cover_src:
+            cover_path = Path(str(cover_src))
+            if cover_path.exists():
+                ext = (cover_path.suffix or ".jpg").lstrip(".") or "jpg"
+                artwork_dst = folder / f"artwork.{ext}"
+                try:
+                    shutil.copyfile(cover_path, artwork_dst)
+                    rel_artwork = f"{rel_folder}/artwork.{ext}"
+                    assets.append({"asset_type": "artwork", "path": rel_artwork, "source": "tiktok_music_page"})
+                except OSError:
+                    rel_artwork = None
+
+        metadata: dict[str, Any] = {
         "vault_version": 1,
         "tiktok_music_id": music_id,
         "platform": platform,
@@ -303,20 +314,28 @@ def package_sound(
             "webpage_url": info.get("webpage_url") or "",
         },
         "packaged_at": now,
-    }
+        }
 
-    metadata_path = folder / "metadata.json"
-    # Atomic write: the concurrent transcription worker reads this file right after
-    # ingest, so a torn (half-written) read would lose the sound.
-    atomic_write_json(metadata_path, metadata)
+        metadata_path = folder / "metadata.json"
+        # Atomic write: the concurrent transcription worker reads this file right after
+        # ingest, so a torn (half-written) read would lose the sound.
+        atomic_write_json(metadata_path, metadata)
 
-    if append_catalog:
-        _locked_append(vault_root / "catalog" / "sounds.jsonl", json.dumps(metadata, ensure_ascii=False) + "\n")
+        if append_catalog:
+            _locked_append(vault_root / "catalog" / "sounds.jsonl", json.dumps(metadata, ensure_ascii=False) + "\n")
 
-    return PackagedSound(
-        music_id=music_id,
-        folder=folder,
-        metadata_path=metadata_path,
-        audio_path=final_audio,
-        metadata=metadata,
-    )
+        return PackagedSound(
+            music_id=music_id,
+            folder=folder,
+            metadata_path=metadata_path,
+            audio_path=final_audio,
+            metadata=metadata,
+        )
+    except BaseException:
+        # Never leave an incomplete folder behind: a folder lacking a completed
+        # metadata.json would read as a false "duplicate" on retry and cause the item to
+        # be consumed with no sound. (A complete pre-existing folder keeps its
+        # metadata.json, so a real sound is never deleted here.)
+        if not (folder / "metadata.json").is_file():
+            shutil.rmtree(folder, ignore_errors=True)
+        raise

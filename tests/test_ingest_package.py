@@ -233,3 +233,34 @@ def test_build_human_filename_is_safe():
     assert "[TT-999]" in name
     for bad in '/:*?"<>|':
         assert bad not in name
+
+
+def test_package_failed_tag_raises_and_leaves_no_folder(tmp_path):
+    # A tagger that fails (e.g. ffmpeg error) must NOT leave a partial vault folder,
+    # or that empty folder would later read as a false "duplicate" and lose the sound.
+    import pytest
+    src = tmp_path / "in.m4a"
+    src.write_bytes(b"\x00audio")
+
+    def failing_tagger(s, d, tags):
+        raise RuntimeError("ffmpeg failed (exit 183)")
+
+    with pytest.raises(RuntimeError):
+        package_sound(vault_root=tmp_path, music_id="X", title="T", artist="A", audio_path=src, tagger=failing_tagger)
+    assert list((tmp_path / "sounds").glob("X -*")) == []  # no partial folder
+    catalog = tmp_path / "catalog" / "sounds.jsonl"
+    assert not catalog.exists() or catalog.read_text().strip() == ""  # no phantom catalog row
+
+
+def test_package_no_audio_produced_raises_and_leaves_no_folder(tmp_path):
+    # Tagger runs but produces no output file -> must raise, not write an audio-less row.
+    import pytest
+    src = tmp_path / "in.m4a"
+    src.write_bytes(b"\x00audio")
+
+    def noop_tagger(s, d, tags):
+        pass  # writes nothing
+
+    with pytest.raises(RuntimeError):
+        package_sound(vault_root=tmp_path, music_id="X", title="T", artist="A", audio_path=src, tagger=noop_tagger)
+    assert list((tmp_path / "sounds").glob("X -*")) == []
