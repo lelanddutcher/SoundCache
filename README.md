@@ -11,7 +11,7 @@
 </div>
 
 ## Why
-
+ 
 TikTok will not let you save the sound. "Favorites" are bookmarks that vanish the moment a video is deleted, a track is taken down, or an account goes private. Screen-recording is lossy, the sketchy mp3 sites are malware, and the link you texted yourself rots in your notes.
 
 Sound Cache fixes that permanently. You save a sound once and it lands as a real, tagged audio file in a local folder you own, complete with the title, artist, artwork, transcript, and example videos, so your FYP's greatest hits outlive platform churn. Built for the **editors and creators** who need the trends offline and organized.
