@@ -20,8 +20,6 @@ Sound Cache fixes that permanently. You save a sound once and it lands as a real
 
 <div align="center">
 
-![Save a sound anywhere, it lands in your vault](docs/images/relay-flow.png)
-
 </div>
 
 1. On TikTok, **tap the sound** (the spinning disc) to open its sound page.
