@@ -82,6 +82,7 @@ from PySide6.QtWidgets import (
 
 from sound_vault.diagnostics import exception_fields, write_event
 from sound_vault.ingest import shortcut_builder, tiktok_auth
+from sound_vault.ingest.errors import humanize_failure
 from sound_vault.ingest.factory import ensure_media_tools_on_path
 from sound_vault.net import ssl_context
 from sound_vault.settings import AppSettings, index_path_for_vault
@@ -2232,6 +2233,8 @@ class SoundVaultWindow(QMainWindow):
         layout.addLayout(header)
         self.inbox_table = QTableWidget(0, 5)
         self.inbox_table.setHorizontalHeaderLabels(["received", "source", "url", "status", "error"])
+        self.inbox_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.inbox_table.customContextMenuRequested.connect(self.open_inbox_context_menu)
         self._prepare_table(self.inbox_table, stretch_column=2)
         self.restore_table_layout("inbox_v2", self.inbox_table)
         layout.addWidget(self.inbox_table, 1)
@@ -4312,7 +4315,11 @@ class SoundVaultWindow(QMainWindow):
         for row_idx, item in enumerate(self.current_inbox_rows):
             received = getattr(item, "created_at", "") or getattr(item, "received_at", "") or ""
             err = getattr(item, "error", "") or ""
-            for col_idx, value in enumerate([received, item.source, item.url, item.status, err]):
+            # Show a friendly one-liner in the error column (raw yt-dlp/TikTok text is
+            # alarming out of context, e.g. "Your IP address is blocked"); the full raw
+            # error stays on hover + right-click ▸ Copy error.
+            friendly = humanize_failure(err).short if err else ""
+            for col_idx, value in enumerate([received, item.source, item.url, item.status, friendly]):
                 table_item = QTableWidgetItem(str(value))
                 table_item.setData(Qt.ItemDataRole.UserRole, item.id)
                 if err:
@@ -4320,6 +4327,44 @@ class SoundVaultWindow(QMainWindow):
                 self.inbox_table.setItem(row_idx, col_idx, table_item)
         self.inbox_table.setSortingEnabled(True)
         self.inbox_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+
+    def _inbox_item_at(self, pos) -> "ShortcutInboxItem | None":
+        """The inbox row under a context-menu position (via the id stashed in UserRole)."""
+        index = self.inbox_table.indexAt(pos)
+        if not index.isValid():
+            return None
+        cell = self.inbox_table.item(index.row(), index.column())
+        item_id = cell.data(Qt.ItemDataRole.UserRole) if cell is not None else None
+        return self.inbox_rows_by_id.get(item_id) if item_id else None
+
+    def open_inbox_context_menu(self, pos) -> None:
+        """Right-click an inbox row to copy its link, open it in the browser (to check
+        if the sound itself is private/removed vs. a Sound Cache problem), or copy the
+        full raw error."""
+        item = self._inbox_item_at(pos)
+        if item is None:
+            return
+        url = getattr(item, "url", "") or ""
+        err = getattr(item, "error", "") or ""
+        menu = QMenu(self)
+        copy_link = QAction("Copy link", self)
+        copy_link.triggered.connect(lambda: self._copy_to_clipboard(url, "Copied link"))
+        copy_link.setEnabled(bool(url))
+        open_link = QAction("Open in browser", self)
+        open_link.triggered.connect(lambda: self._open_web_url(url, success_msg="Opened link in browser"))
+        open_link.setEnabled(bool(url))
+        menu.addAction(copy_link)
+        menu.addAction(open_link)
+        if err:
+            menu.addSeparator()
+            copy_error = QAction("Copy error details", self)
+            copy_error.triggered.connect(lambda: self._copy_to_clipboard(err, "Copied error details"))
+            menu.addAction(copy_error)
+        menu.exec(self.inbox_table.viewport().mapToGlobal(pos))
+
+    def _copy_to_clipboard(self, text: str, status: str = "Copied") -> None:
+        QApplication.clipboard().setText(text or "")
+        self.statusBar().showMessage(status, 2000)
 
     def reconcile_and_refresh_inbox(self) -> None:
         """The "Refresh inbox" action: confirm the relay -> vault chain of custody.
