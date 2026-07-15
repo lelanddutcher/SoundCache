@@ -8,6 +8,6 @@ try:
     try:
         __version__ = _pkg_version("sound-vault-desktop")
     except PackageNotFoundError:
-        __version__ = "0.3.1"
+        __version__ = "0.3.2"
 except Exception:  # noqa: BLE001 - never let version lookup break import
-    __version__ = "0.3.1"
+    __version__ = "0.3.2"
