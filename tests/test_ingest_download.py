@@ -139,6 +139,33 @@ def test_composite_no_fallback_returns_primary_failure():
     assert result.method == "yt-dlp"
 
 
+def test_composite_prefers_capture_first_for_tiktok():
+    # TikTok: the Playwright capture is the AUTHORITY (it navigates a post to its sound),
+    # so it must run FIRST even though yt-dlp would "succeed" (with the video's clip).
+    primary = _StubDownloader(_ok("yt-dlp"), "primary")
+    fallback = _StubDownloader(_ok("playwright"), "fallback")
+    comp = CompositeDownloader(
+        primary=primary, fallback=fallback,
+        should_fallback=lambda url, result, **kw: kw.get("platform") == "tiktok",
+    )
+    res = comp.download("https://x", dest_dir=Path("/tmp"), basename="b", platform="tiktok")
+    assert res.method == "playwright"   # the capture won
+    assert fallback.calls == 1
+    assert primary.calls == 0           # yt-dlp was NOT consulted (its clip is not the sound)
+
+
+def test_composite_tiktok_falls_to_ytdlp_only_if_capture_fails():
+    primary = _StubDownloader(_ok("yt-dlp"), "primary")
+    fallback = _StubDownloader(_fail("playwright"), "fallback")
+    comp = CompositeDownloader(
+        primary=primary, fallback=fallback,
+        should_fallback=lambda url, result, **kw: kw.get("platform") == "tiktok",
+    )
+    res = comp.download("https://x", dest_dir=Path("/tmp"), basename="b", platform="tiktok")
+    assert res.ok and res.method == "yt-dlp"   # last resort, only after capture failed
+    assert fallback.calls == 1 and primary.calls == 1
+
+
 def test_composite_should_fallback_gate():
     primary = _StubDownloader(_fail("yt-dlp"), "primary")
     fallback = _StubDownloader(_ok("playwright"), "fallback")

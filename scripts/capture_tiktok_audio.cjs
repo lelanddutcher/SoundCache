@@ -122,10 +122,12 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url, knownSoundId = 
       coverPath: coverBase,
       usageCount: parseCount(meta.usage),
       pageUrl: meta.pageUrl || url,
-      // The resolved sound id: from the /music/ navigation (knownSoundId) or the
-      // rehydration JSON on a still-on-video capture. Lets the service key the catalog
-      // entry to the SOUND, not the post.
-      structuredMusicId: knownSoundId || musicJson.musicId || "",
+      // The resolved sound id — ONLY the caller's knownSoundId, which is set exclusively
+      // AFTER a successful navigation to the /music/ page (the audio captured is then the
+      // sound's). Do NOT fall back to a fresh musicJson.musicId read here: if the /music/
+      // nav failed we're still on the video page, and re-deriving the id off it would
+      // adopt the sound identity for the video's clip audio (silent mismatch).
+      structuredMusicId: knownSoundId || "",
       original: typeof musicJson.original === "boolean" ? musicJson.original : null,
       soundDuration: musicJson.soundDuration != null ? musicJson.soundDuration : null,
       album: musicJson.album || "",

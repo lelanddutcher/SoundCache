@@ -98,6 +98,18 @@ def test_adopt_is_noop_for_direct_music_share(tmp_path):
     assert svc._adopt_resolved_sound(music, _Dl(), "555") is None
 
 
+def test_no_adoption_when_capture_did_not_resolve_a_sound(tmp_path):
+    # Bug-1 guard: a failed /music/ navigation leaves the sidecar with no sound_id, so the
+    # post's own clip audio must NOT be re-keyed to a sound — it stays the post (honest).
+    svc = make_service(tmp_path, FakeDownloader())
+    video = _tt_video("https://www.tiktok.com/@u/video/POST123")
+
+    class _Dl:  # capture stayed on the video page -> no structuredMusicId
+        info = {"title": "some clip"}
+
+    assert svc._adopt_resolved_sound(video, _Dl(), "POST123") is None
+
+
 def test_adopt_is_noop_for_non_tiktok(tmp_path):
     svc = make_service(tmp_path, FakeDownloader())
     ig = ResolvedSource(

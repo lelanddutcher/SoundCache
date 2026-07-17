@@ -317,6 +317,26 @@ class CompositeDownloader:
         # Forward the cancel predicate only when set, so downloaders/fakes that
         # don't declare **kwargs keep their exact prior call shape.
         fwd = {"should_stop": extra["should_stop"]} if extra.get("should_stop") is not None else {}
+        # TikTok: the authenticated Playwright capture is the AUTHORITY — it resolves a
+        # submitted post to its /music/ sound. yt-dlp's TikTok VIDEO extractor works but
+        # returns the poster's clip audio (not the sound), so run capture FIRST for the
+        # platforms should_fallback selects, not only when yt-dlp fails; yt-dlp is then a
+        # last resort. (Non-TikTok keeps yt-dlp primary — the fallback is TikTok-only.)
+        if (
+            self.fallback is not None
+            and self.should_fallback is not None
+            and self.should_fallback(url, None, source_id=source_id, **extra)
+        ):
+            fb = self.fallback.download(url, dest_dir=dest_dir, basename=basename, source_id=source_id, **fwd)
+            if fb.ok:
+                return fb
+            primary = self.primary.download(url, dest_dir=dest_dir, basename=basename, source_id=source_id, **fwd)
+            if primary.ok:
+                return primary
+            return DownloadResult(
+                ok=False, audio_path=None, info=fb.info, method="playwright+yt-dlp",
+                error=f"capture: {fb.error}; yt-dlp: {primary.error}",
+            )
         result = self.primary.download(url, dest_dir=dest_dir, basename=basename, source_id=source_id, **fwd)
         if result.ok:
             return result
