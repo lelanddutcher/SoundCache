@@ -1032,6 +1032,11 @@ class SettingsDialog(QDialog):
             demucs_model=str(c.get("demucs_model") or "htdemucs_ft"),
         )
         self.result_label.setText("Settings saved. Device secret is stored locally and hidden here.")
+        # If the chosen engine's model isn't downloaded yet, start it now with visible
+        # progress (the model is otherwise fetched silently on first transcription).
+        win = self.parent()
+        if win is not None and hasattr(win, "prepare_asr_model_if_needed"):
+            win.prepare_asr_model_if_needed(str(engine), str(model))
 
     def _retranscribe_library(self) -> None:
         self.save_settings()  # persist the engine pick before the (long) run
@@ -4356,6 +4361,53 @@ class SoundVaultWindow(QMainWindow):
         self.update_pairing_status()
         self.update_tiktok_status()
         self._start_relay_auto_poll()  # begin polling if a pairing was just configured
+
+    def prepare_asr_model_if_needed(self, engine: str, model: str) -> None:
+        """Proactively download the transcription model for (engine, model) with a live
+        status-bar progress readout — so switching to Qwen3-ASR / large-v3-turbo shows the
+        ~1.7 GB download happening instead of it silently fetching on the first transcribe."""
+        from sound_vault.workers.transcription import asr_model_is_cached
+
+        try:
+            if asr_model_is_cached(engine, model):
+                return  # already downloaded — nothing to do
+        except Exception:  # noqa: BLE001
+            pass
+        if getattr(self, "_asr_dl_active", False):
+            return  # a download is already in flight
+        self._asr_dl_active = True
+        self.statusBar().showMessage("Preparing transcription model — starting download…", 4000)
+        self._watch_asr_download(self.vm.prepare_asr_model_async(engine=engine, model=model))
+
+    def _watch_asr_download(self, future) -> None:
+        def _tick() -> None:
+            if not future.done():
+                prog = getattr(self.vm, "asr_download_progress", None) or {}
+                done_mb = (prog.get("done") or 0) / 1e6
+                total_mb = (prog.get("total") or 0) / 1e6
+                if total_mb:
+                    self.statusBar().showMessage(
+                        f"Downloading transcription model… {done_mb:.0f} / {total_mb:.0f} MB", 60000
+                    )
+                else:
+                    self.statusBar().showMessage(f"Downloading transcription model… {done_mb:.0f} MB", 60000)
+                QTimer.singleShot(800, _tick)
+                return
+            self._asr_dl_active = False
+            try:
+                res = future.result()
+            except Exception as exc:  # noqa: BLE001
+                self.statusBar().showMessage(f"Model download failed: {exc}", 8000)
+                return
+            status = res.get("status")
+            if status in ("ok", "cached"):
+                self.statusBar().showMessage("Transcription model ready ✓", 6000)
+            elif status == "skipped":
+                pass  # engine has no HF model to prefetch
+            else:
+                self.statusBar().showMessage(f"Model download: {res.get('reason', 'failed')}", 8000)
+
+        QTimer.singleShot(300, _tick)
 
     def retranscribe_selected(self) -> None:
         """Force re-transcription of the selected library sound(s) with the current engine."""

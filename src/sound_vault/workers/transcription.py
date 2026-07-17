@@ -252,6 +252,84 @@ def _qwen3_model_repo(model: str) -> str:
     return aliases.get(name.lower(), "mlx-community/Qwen3-ASR-1.7B-bf16")
 
 
+def _asr_repo_for(engine: str, model: str) -> str | None:
+    """The HuggingFace repo the given (engine, model) downloads, or None when the engine
+    fetches its model some other way (faster-whisper uses CTranslate2's own cache)."""
+    e = (engine or "").strip().lower()
+    if e in ("qwen3-asr", "qwen3", "qwen"):
+        return _qwen3_model_repo(model)
+    if e in ("mlx-whisper", "mlx", "auto", ""):
+        return _mlx_model_repo(model)
+    return None
+
+
+def asr_model_is_cached(engine: str, model: str) -> bool:
+    """True if the model for (engine, model) is already fully in the HF cache (so no
+    download is needed). Best-effort: unknown/undownloadable engines return True."""
+    repo = _asr_repo_for(engine, model)
+    if not repo:
+        return True
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(repo, local_files_only=True)  # raises if not fully cached
+        return True
+    except Exception:  # noqa: BLE001 - not cached / offline / hub error -> treat as not cached
+        return False
+
+
+def _hf_repo_total_bytes(repo: str) -> int:
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo, files_metadata=True)
+        return sum(int(getattr(s, "size", 0) or 0) for s in (info.siblings or []))
+    except Exception:  # noqa: BLE001 - size is only for the progress denominator
+        return 0
+
+
+def download_asr_model(
+    engine: str,
+    model: str,
+    *,
+    on_progress: "Callable[[int, int], None] | None" = None,
+) -> dict[str, Any]:
+    """Download the (engine, model) HF weights into the cache, reporting byte progress via
+    ``on_progress(done_bytes, total_bytes)``. Idempotent — a cached model returns quickly.
+    Returns {status: cached|ok|skipped|error, repo, total}."""
+    repo = _asr_repo_for(engine, model)
+    if not repo:
+        return {"status": "skipped", "reason": "engine has no HF model to prefetch"}
+    if asr_model_is_cached(engine, model):
+        return {"status": "cached", "repo": repo, "total": 0}
+    total = _hf_repo_total_bytes(repo)
+    done = {"n": 0}
+    try:
+        from huggingface_hub import snapshot_download
+        from tqdm.auto import tqdm as _base_tqdm
+
+        class _ProgressTqdm(_base_tqdm):  # aggregates bytes across all files in the repo
+            def update(self, n=1):
+                result = super().update(n)
+                done["n"] += int(n or 0)
+                if on_progress:
+                    try:
+                        on_progress(done["n"], total)
+                    except Exception:  # noqa: BLE001 - a UI hiccup must not fail the download
+                        pass
+                return result
+
+        snapshot_download(repo, tqdm_class=_ProgressTqdm)
+    except Exception as exc:  # noqa: BLE001 - surface a clean error to the UI
+        return {"status": "error", "repo": repo, "reason": str(exc)}
+    if on_progress:
+        try:
+            on_progress(total or done["n"], total or done["n"])
+        except Exception:  # noqa: BLE001
+            pass
+    return {"status": "ok", "repo": repo, "total": total or done["n"]}
+
+
 def qwen3_asr_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Path], dict[str, Any]] | None":
     """A callable(audio_path) -> {text, language, model, engine} using Qwen3-ASR on the
     Apple-Silicon GPU (MLX). Unlike speech-tuned Whisper, Qwen3-ASR is trained to

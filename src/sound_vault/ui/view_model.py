@@ -305,6 +305,28 @@ class LibraryViewModel:
         """Re-run metadata enrichment (page scrape + oEmbed) on incomplete sounds, off-thread."""
         return self._executor.submit(self._reenrich_incomplete, music_ids, limit)
 
+    def prepare_asr_model_async(self, *, engine: str, model: str) -> Future:
+        """Download the ASR model for (engine, model) if not already cached, off the UI
+        thread. While it runs, poll ``self.asr_download_progress`` -> {done, total, active}
+        for the status bar. The future yields {status, repo, total}."""
+        self.asr_download_progress = {"done": 0, "total": 0, "active": True}
+
+        def _run() -> dict:
+            from sound_vault.workers.transcription import download_asr_model
+
+            def _cb(done: int, total: int) -> None:
+                self.asr_download_progress = {"done": int(done), "total": int(total), "active": True}
+
+            try:
+                result = download_asr_model(engine, model, on_progress=_cb)
+            except Exception as exc:  # noqa: BLE001
+                result = {"status": "error", "reason": str(exc)}
+            last = self.asr_download_progress.get("total", 0)
+            self.asr_download_progress = {"done": last, "total": last, "active": False}
+            return result
+
+        return self._executor.submit(_run)
+
     def retranscribe_async(self, *, music_ids=None) -> Future:
         """Force re-transcription (overwrites the existing transcript) with the currently
         configured ASR engine, off the UI thread. ``music_ids=None`` re-runs the WHOLE
