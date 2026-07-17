@@ -305,6 +305,58 @@ class LibraryViewModel:
         """Re-run metadata enrichment (page scrape + oEmbed) on incomplete sounds, off-thread."""
         return self._executor.submit(self._reenrich_incomplete, music_ids, limit)
 
+    def retranscribe_async(self, *, music_ids=None) -> Future:
+        """Force re-transcription (overwrites the existing transcript) with the currently
+        configured ASR engine, off the UI thread. ``music_ids=None`` re-runs the WHOLE
+        library — the caller MUST have confirmed that, since it re-runs ASR on every sound.
+        Returns {scanned, ok, empty, failed}."""
+        ids = list(music_ids) if music_ids else None
+        return self._executor.submit(self._retranscribe, ids)
+
+    def _retranscribe(self, music_ids) -> dict:
+        from pathlib import Path as _Path
+
+        from sound_vault.ingest.factory import build_transcriber
+        from sound_vault.workers.transcription import transcribe_sound_folder
+
+        summary: dict[str, Any] = {"scanned": 0, "ok": 0, "empty": 0, "failed": 0}
+        try:
+            transcriber = build_transcriber()  # reads AppSettings -> the saved local_engine/model
+        except Exception:  # noqa: BLE001
+            transcriber = None
+        if transcriber is None:
+            summary["reason"] = "no local ASR backend available"
+            return summary
+        records = self.db.search("", limit=100000)
+        if music_ids:
+            wanted = {str(m) for m in music_ids}
+            records = [r for r in records if r.music_id in wanted]
+        else:
+            records = [r for r in records if getattr(r, "local_audio_path", None)]
+        summary["scanned"] = len(records)
+        for record in records:
+            audio = getattr(record, "local_audio_path", None)
+            folder = getattr(record, "folder_path", None)
+            if not audio or not folder:
+                summary["failed"] += 1
+                continue
+            try:
+                result = transcribe_sound_folder(
+                    _Path(folder), audio_path=_Path(audio), transcriber=transcriber, overwrite=True
+                )
+            except Exception:  # noqa: BLE001 - one bad sound must not stop the batch
+                summary["failed"] += 1
+                continue
+            if result.get("status") == "ok":
+                summary["ok" if result.get("has_text") else "empty"] += 1
+            else:
+                summary["failed"] += 1
+            refreshed = self.db.get(record.music_id)
+            if refreshed is not None:
+                with self._lock:
+                    self._records_by_id[record.music_id] = refreshed
+        return summary
+
     def _reenrich_incomplete(self, music_ids, limit: int) -> dict:
         import tempfile
 

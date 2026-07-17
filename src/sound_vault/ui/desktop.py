@@ -956,6 +956,33 @@ class SettingsDialog(QDialog):
         self.telemetry_checkbox.setChecked(settings.telemetry_enabled())
         layout.addWidget(self.telemetry_checkbox)
 
+        # Transcription (lyrics) engine. `base` stays the default; the others are opt-in
+        # and download their model on first use.
+        self._asr_presets = [
+            ("Whisper — base (fast, weak on sung lyrics)", "mlx-whisper", "base"),
+            ("Whisper — large-v3-turbo (much better)", "mlx-whisper", "large-v3-turbo"),
+            ("Qwen3-ASR — best for lyrics (~1.7 GB download)", "qwen3-asr", "qwen3-asr-1.7b"),
+        ]
+        self.asr_engine = QComboBox()
+        for label, engine, model in self._asr_presets:
+            self.asr_engine.addItem(label, userData=(engine, model))
+        _tcfg = settings.transcription_config()
+        _cur = (str(_tcfg.get("local_engine") or ""), str(_tcfg.get("local_model") or ""))
+        for _i, (_l, _e, _m) in enumerate(self._asr_presets):
+            if (_e, _m) == _cur:
+                self.asr_engine.setCurrentIndex(_i)
+                break
+        asr_form = QFormLayout()
+        asr_form.addRow("Transcription (lyrics)", self.asr_engine)
+        layout.addLayout(asr_form)
+        retranscribe_all = QPushButton("Re-transcribe entire library…")
+        retranscribe_all.setToolTip(
+            "Re-run speech recognition on EVERY sound with the selected engine, overwriting "
+            "existing transcripts. You'll be asked to confirm first (it's a big, slow job)."
+        )
+        retranscribe_all.clicked.connect(self._retranscribe_library)
+        layout.addWidget(retranscribe_all)
+
         self.result_label = QLabel("Create pairing code on the relay, then add it to the iOS Shortcut.")
         self.result_label.setWordWrap(True)
         layout.addWidget(self.result_label)
@@ -990,7 +1017,28 @@ class SettingsDialog(QDialog):
             device_secret=self.device_secret.text(),
         )
         self.settings.set_telemetry_enabled(self.telemetry_checkbox.isChecked())
-        self.result_label.setText("Relay settings saved. Device secret is stored locally and hidden here.")
+        # Persist the chosen transcription engine (preserve the cloud/demucs fields).
+        engine, model = self.asr_engine.currentData() or ("mlx-whisper", "base")
+        c = self.settings.transcription_config()
+        self.settings.set_transcription_config(
+            preferred_provider=str(c.get("preferred_provider") or "local"),
+            cloud_provider=str(c.get("cloud_provider") or "openai"),
+            cloud_base_url=str(c.get("cloud_base_url") or "https://api.openai.com/v1"),
+            cloud_model=str(c.get("cloud_model") or "gpt-4o-transcribe"),
+            local_engine=str(engine),
+            local_model=str(model),
+            model_cache_dir=str(c.get("model_cache_dir") or ""),
+            demucs_enabled=bool(c.get("demucs_enabled", False)),
+            demucs_model=str(c.get("demucs_model") or "htdemucs_ft"),
+        )
+        self.result_label.setText("Settings saved. Device secret is stored locally and hidden here.")
+
+    def _retranscribe_library(self) -> None:
+        self.save_settings()  # persist the engine pick before the (long) run
+        win = self.parent()
+        if win is not None and hasattr(win, "retranscribe_entire_library"):
+            self.accept()
+            win.retranscribe_entire_library()
 
     def create_pairing_code(self) -> None:
         base_url = self.relay_url.text().strip().rstrip("/")
@@ -4077,6 +4125,9 @@ class SoundVaultWindow(QMainWindow):
         open_sound_action.triggered.connect(self.open_selected_tiktok_sound)
         folder_action = QAction("Open sound folder", self)
         folder_action.triggered.connect(self.open_selected_folder)
+        retranscribe_action = QAction(f"Re-transcribe{count_label}", self)
+        retranscribe_action.setToolTip("Re-run speech recognition with the engine set in Settings (overwrites the transcript)")
+        retranscribe_action.triggered.connect(self.retranscribe_selected)
         add_to_menu = QMenu("Add to…", self)
         add_favorite_action = QAction("Favorites", self)
         add_favorite_action.triggered.connect(lambda: self.add_music_ids_to_library_target("favorites", music_ids))
@@ -4099,6 +4150,8 @@ class SoundVaultWindow(QMainWindow):
         menu.addMenu(copy_menu)
         menu.addAction(open_sound_action)
         menu.addAction(folder_action)
+        menu.addSeparator()
+        menu.addAction(retranscribe_action)
         menu.exec(self.table.viewport().mapToGlobal(point))
 
     def mark_selected_library_as_duplicate(self, music_ids: tuple[str, ...] | list[str] | None = None) -> None:
@@ -4303,6 +4356,55 @@ class SoundVaultWindow(QMainWindow):
         self.update_pairing_status()
         self.update_tiktok_status()
         self._start_relay_auto_poll()  # begin polling if a pairing was just configured
+
+    def retranscribe_selected(self) -> None:
+        """Force re-transcription of the selected library sound(s) with the current engine."""
+        ids = self._selected_library_music_ids()
+        if not ids:
+            return
+        self.statusBar().showMessage(f"Re-transcribing {len(ids)} sound(s)…", 4000)
+        self._watch_retranscribe(self.vm.retranscribe_async(music_ids=list(ids)))
+
+    def retranscribe_entire_library(self) -> None:
+        """Re-run ASR on EVERY sound (gated behind an explicit confirm — it's slow and
+        overwrites every transcript)."""
+        reply = QMessageBox.question(
+            self,
+            "Re-transcribe entire library?",
+            "This re-runs speech recognition on ALL your sounds with the selected engine and "
+            "OVERWRITES existing transcripts. It can take a long time, and (for Qwen3-ASR) "
+            "downloads a ~1.7 GB model on first use.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.statusBar().showMessage("Re-transcribing the whole library… (runs in the background)", 6000)
+        self._watch_retranscribe(self.vm.retranscribe_async())
+
+    def _watch_retranscribe(self, future) -> None:
+        """Poll a re-transcribe Future without blocking the UI; report + refresh when done."""
+        def _check() -> None:
+            if not future.done():
+                QTimer.singleShot(1200, _check)
+                return
+            try:
+                summary = future.result()
+            except Exception as exc:  # noqa: BLE001
+                self.statusBar().showMessage(f"Re-transcribe failed: {exc}", 6000)
+                return
+            if summary.get("reason"):
+                self.statusBar().showMessage(f"Re-transcribe: {summary['reason']}", 6000)
+                return
+            parts = [f"{summary.get('ok', 0)} re-transcribed"]
+            if summary.get("empty"):
+                parts.append(f"{summary['empty']} empty")
+            if summary.get("failed"):
+                parts.append(f"{summary['failed']} failed")
+            self.statusBar().showMessage(" · ".join(parts), 8000)
+            self.refresh_table()
+
+        QTimer.singleShot(1200, _check)
 
     def refresh_inbox(self) -> None:
         # Show pending AND failed items: failed ones stay in the queue with their error
