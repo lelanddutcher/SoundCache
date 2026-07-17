@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
 import re
@@ -125,7 +126,7 @@ def sanitize_filename_component(value: Any, *, max_len: int = 80) -> str:
 
 
 def _load_records(input_path: Path) -> list[dict[str, Any]]:
-    payload = json.loads(input_path.read_text(encoding="utf-8", errors="replace"))
+    payload = read_json_lenient(input_path)
     if isinstance(payload, dict) and isinstance(payload.get("records"), list):
         return [dict(row) for row in payload["records"] if isinstance(row, dict)]
     if isinstance(payload, list):
@@ -270,7 +271,7 @@ def _merge_metadata(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_lenient(path)
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}

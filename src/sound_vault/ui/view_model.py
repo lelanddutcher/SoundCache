@@ -17,7 +17,7 @@ from sound_vault.importers.tiktok_archive import (
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
 from sound_vault.relay.client import RelayClient, RelayInboxItem, _default_get_json
 from sound_vault.settings import inbox_path_for_vault
-from sound_vault.vault.metadata_io import atomic_write_json
+from sound_vault.vault.metadata_io import atomic_write_json, read_json_lenient
 from sound_vault.vault.indexer import (
     CatalogStats,
     SoundRecord,
@@ -339,6 +339,7 @@ class LibraryViewModel:
         from pathlib import Path as _Path
 
         from sound_vault.ingest.factory import build_transcriber
+        from sound_vault.ingest.service import IngestService
         from sound_vault.workers.transcription import transcribe_sound_folder
 
         summary: dict[str, Any] = {"scanned": 0, "ok": 0, "empty": 0, "failed": 0}
@@ -357,22 +358,39 @@ class LibraryViewModel:
             records = [r for r in records if getattr(r, "local_audio_path", None)]
         summary["scanned"] = len(records)
         for record in records:
-            audio = getattr(record, "local_audio_path", None)
             folder = getattr(record, "folder_path", None)
-            if not audio or not folder:
+            if not folder:
                 summary["failed"] += 1
+                write_event("transcribe.skip", music_id=str(record.music_id),
+                            status="skipped", reason="no folder path")
+                continue
+            audio = getattr(record, "local_audio_path", None)
+            # The indexed audio path is frequently a STALE absolute /nas/ path from before
+            # the vault moved to /Volumes/zpool — the file is still physically present under
+            # a folder-relative name. Trust the hint only if it resolves; otherwise glob the
+            # folder (skips ._ AppleDouble shadows). Without this, a library-wide re-transcribe
+            # mass-fails ~2000 healthy sounds as "no audio".
+            if not audio or not _Path(audio).exists():
+                audio = IngestService._existing_audio(_Path(folder))
+            if not audio:
+                summary["failed"] += 1
+                write_event("transcribe.skip", music_id=str(record.music_id),
+                            status="skipped", reason="no audio file in folder")
                 continue
             try:
                 result = transcribe_sound_folder(
                     _Path(folder), audio_path=_Path(audio), transcriber=transcriber, overwrite=True
                 )
-            except Exception:  # noqa: BLE001 - one bad sound must not stop the batch
+            except Exception as exc:  # noqa: BLE001 - one bad sound must not stop the batch
                 summary["failed"] += 1
+                write_event("transcribe.error", music_id=str(record.music_id), **exception_fields(exc))
                 continue
             if result.get("status") == "ok":
                 summary["ok" if result.get("has_text") else "empty"] += 1
             else:
                 summary["failed"] += 1
+                write_event("transcribe.skip", music_id=str(record.music_id),
+                            status=str(result.get("status")), reason=str(result.get("reason") or ""))
             refreshed = self.db.get(record.music_id)
             if refreshed is not None:
                 with self._lock:
@@ -475,7 +493,7 @@ class LibraryViewModel:
             raise ValueError(
                 f"import file too large ({size / 1_048_576:.0f} MB, limit {_MAX_PACK_BYTES // 1_048_576} MB)"
             )
-        data = _json.loads(path_obj.read_text(encoding="utf-8"))
+        data = read_json_lenient(path_obj)
         if not isinstance(data, dict):
             raise ValueError("not a Sound Cache sound pack (missing 'packs')")
 
@@ -562,7 +580,7 @@ class LibraryViewModel:
             meta_path = Path(folder) / "metadata.json"
             if meta_path.exists():
                 try:
-                    data = _json.loads(meta_path.read_text(encoding="utf-8"))
+                    data = read_json_lenient(meta_path)
                     data["user_notes"] = notes
                     atomic_write_json(meta_path, data)
                 except (OSError, ValueError):
@@ -1134,7 +1152,7 @@ class LibraryViewModel:
 
         meta_path = Path(folder) / "metadata.json"
         try:
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            metadata = read_json_lenient(meta_path)
         except (OSError, json.JSONDecodeError):
             return
         record = build_record(self.vault_root, metadata)

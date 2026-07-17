@@ -4,6 +4,7 @@ import csv
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
 import re
@@ -236,7 +237,7 @@ def build_vault_match_index(vault_root: Path) -> _VaultMatchIndex:
             metadata_path = folder / "metadata.json"
             data: dict[str, Any] = {}
             try:
-                loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+                loaded = read_json_lenient(metadata_path)
                 if isinstance(loaded, dict):
                     data = loaded
             except (OSError, json.JSONDecodeError):

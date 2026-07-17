@@ -26,7 +26,7 @@ from sound_vault.ingest.package import (
     is_portable_filename,
     portable_folder_name,
 )
-from sound_vault.vault.metadata_io import atomic_write_json
+from sound_vault.vault.metadata_io import atomic_write_json, read_json_lenient
 
 
 @dataclass
@@ -61,7 +61,7 @@ def _read_metadata(folder: Path) -> dict:
     if not meta_path.exists():
         return {}
     try:
-        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        data = read_json_lenient(meta_path)
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}

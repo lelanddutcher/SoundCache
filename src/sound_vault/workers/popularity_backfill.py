@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 from pathlib import Path
 import re
 from typing import Any
@@ -48,7 +49,7 @@ def extract_usage_from_text_candidates(candidates: list[str]) -> tuple[int | Non
 def update_metadata_usage_count(folder: Path, result: UsageBackfillResult) -> None:
     metadata_path = folder / "metadata.json"
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata = read_json_lenient(metadata_path)
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read metadata for {folder}: {exc}") from exc
     if not isinstance(metadata, dict):
@@ -70,7 +71,7 @@ def sound_folders_missing_usage(vault_root: Path) -> list[Path]:
     folders = []
     for metadata_path in sorted(sounds_root.glob("*/metadata.json")):
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata = read_json_lenient(metadata_path)
         except (OSError, json.JSONDecodeError):
             folders.append(metadata_path.parent)
             continue
@@ -83,7 +84,7 @@ def music_url_for_folder(folder: Path) -> tuple[str, str]:
     metadata_path = folder / "metadata.json"
     metadata: dict[str, Any] = {}
     try:
-        loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+        loaded = read_json_lenient(metadata_path)
         if isinstance(loaded, dict):
             metadata = loaded
     except (OSError, json.JSONDecodeError):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
 import subprocess
@@ -392,7 +393,7 @@ def _associated_videos(folder: Path | None, data: dict[str, Any], *, load_sideca
     records: list[dict[str, Any]] = []
     if manifest_path and load_sidecars:
         try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload = read_json_lenient(manifest_path)
             if isinstance(payload, dict) and isinstance(payload.get("records"), list):
                 records = [r for r in payload["records"] if isinstance(r, dict)]
         except (OSError, json.JSONDecodeError):
@@ -464,7 +465,7 @@ def _video_manifest_context(folder: Path | None, data: dict[str, Any], *, load_s
     if manifest_path is None:
         return {}
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload = read_json_lenient(manifest_path)
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(payload, dict):
@@ -531,7 +532,7 @@ def _transcript_context(folder: Path | None, data: dict[str, Any], *, load_sidec
     payload: dict[str, Any] = {}
     if transcript_path:
         try:
-            loaded = json.loads(transcript_path.read_text(encoding="utf-8"))
+            loaded = read_json_lenient(transcript_path)
             if isinstance(loaded, dict):
                 payload = loaded
         except (OSError, json.JSONDecodeError):
@@ -628,7 +629,7 @@ def _folder_metadata(folder: Path | None) -> dict[str, Any]:
         return {}
     metadata_path = folder / "metadata.json"
     try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        payload = read_json_lenient(metadata_path)
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}

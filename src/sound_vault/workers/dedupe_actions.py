@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
 import shutil
@@ -105,7 +106,7 @@ class DedupeService:
         metadata_path = original / "metadata.json"
         if metadata_path.exists():
             try:
-                data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                data = read_json_lenient(metadata_path)
             except (OSError, json.JSONDecodeError):
                 data = None
             if isinstance(data, dict):

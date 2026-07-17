@@ -957,12 +957,29 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.telemetry_checkbox)
 
         # Transcription (lyrics) engine. `base` stays the default; the others are opt-in
-        # and download their model on first use.
-        self._asr_presets = [
-            ("Whisper — base (fast, weak on sung lyrics)", "mlx-whisper", "base"),
-            ("Whisper — large-v3-turbo (much better)", "mlx-whisper", "large-v3-turbo"),
-            ("Qwen3-ASR — best for lyrics (~1.7 GB download)", "qwen3-asr", "qwen3-asr-1.7b"),
+        # and download their model on first use. Label each with its *actual* cache state
+        # so the user knows up front whether picking it triggers a download (and how big) —
+        # a previously-fetched model shows "✓ downloaded", not a misleading download size.
+        from sound_vault.workers.transcription import asr_model_is_cached
+
+        _asr_specs = [
+            ("Whisper — base (fast, weak on sung lyrics)", "mlx-whisper", "base", ""),
+            ("Whisper — large-v3-turbo (much better accuracy)", "mlx-whisper", "large-v3-turbo", "~1.6 GB"),
+            ("Qwen3-ASR — best for sung lyrics", "qwen3-asr", "qwen3-asr-1.7b", "~3.8 GB"),
         ]
+        self._asr_presets = []
+        for _base_label, _engine, _model, _size in _asr_specs:
+            try:
+                _cached = asr_model_is_cached(_engine, _model)
+            except Exception:  # noqa: BLE001
+                _cached = False
+            if _cached:
+                _suffix = "  ✓ downloaded"
+            elif _size:
+                _suffix = f"  · downloads {_size} on first use"
+            else:
+                _suffix = ""
+            self._asr_presets.append((_base_label + _suffix, _engine, _model))
         self.asr_engine = QComboBox()
         for label, engine, model in self._asr_presets:
             self.asr_engine.addItem(label, userData=(engine, model))
@@ -4365,11 +4382,15 @@ class SoundVaultWindow(QMainWindow):
     def prepare_asr_model_if_needed(self, engine: str, model: str) -> None:
         """Proactively download the transcription model for (engine, model) with a live
         status-bar progress readout — so switching to Qwen3-ASR / large-v3-turbo shows the
-        ~1.7 GB download happening instead of it silently fetching on the first transcribe."""
+        download happening instead of it silently fetching on the first transcribe.
+
+        When the model is already cached there's nothing to fetch; say so explicitly rather
+        than returning silently, or the user reads the absent progress bar as a failure."""
         from sound_vault.workers.transcription import asr_model_is_cached
 
         try:
             if asr_model_is_cached(engine, model):
+                self.statusBar().showMessage("Transcription engine set — model already downloaded ✓", 5000)
                 return  # already downloaded — nothing to do
         except Exception:  # noqa: BLE001
             pass
@@ -4425,7 +4446,7 @@ class SoundVaultWindow(QMainWindow):
             "Re-transcribe entire library?",
             "This re-runs speech recognition on ALL your sounds with the selected engine and "
             "OVERWRITES existing transcripts. It can take a long time, and (for Qwen3-ASR) "
-            "downloads a ~1.7 GB model on first use.\n\nContinue?",
+            "downloads a ~3.8 GB model on first use.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

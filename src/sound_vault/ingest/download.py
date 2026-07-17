@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 from pathlib import Path
 import shutil
 import subprocess
@@ -257,7 +258,7 @@ class PlaywrightCaptureDownloader:
         if not meta_path.exists():
             return info
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = read_json_lenient(meta_path)
         except (OSError, json.JSONDecodeError):
             return info
         if not isinstance(meta, dict):

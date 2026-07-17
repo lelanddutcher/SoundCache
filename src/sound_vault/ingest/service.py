@@ -19,7 +19,7 @@ from sound_vault.ingest.download import AudioDownloader
 from sound_vault.ingest.package import PackagedSound, Tagger, ffmpeg_embed_tags, package_sound
 from sound_vault.ingest.resolve import ResolvedSource, resolve
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
-from sound_vault.vault.metadata_io import atomic_write_json
+from sound_vault.vault.metadata_io import atomic_write_json, read_json_lenient
 
 ResolveSource = Callable[[str], ResolvedSource]
 IndexUpdater = Callable[[PackagedSound], None]
@@ -187,7 +187,7 @@ class IngestService:
             if not (p.is_dir() and meta_path.is_file()):
                 continue
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta = read_json_lenient(meta_path)
             except (OSError, json.JSONDecodeError):
                 continue
             rel_audio = (meta.get("paths") or {}).get("audio")
@@ -328,7 +328,7 @@ class IngestService:
         # carries the transcript too.
         if self._transcribe_into(packaged.folder, packaged.audio_path):
             try:
-                packaged = replace(packaged, metadata=json.loads(packaged.metadata_path.read_text(encoding="utf-8")))
+                packaged = replace(packaged, metadata=read_json_lenient(packaged.metadata_path))
             except (OSError, json.JSONDecodeError):
                 pass
 
@@ -439,7 +439,7 @@ class IngestService:
         if not meta_path.exists():
             return {"status": "skipped", "music_id": music_id, "reason": "no metadata.json"}
         try:
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            metadata = read_json_lenient(meta_path)
         except (OSError, json.JSONDecodeError) as exc:
             return {"status": "failed", "music_id": music_id, "reason": f"unreadable metadata: {exc}"}
 
@@ -504,7 +504,7 @@ class IngestService:
 
         # Re-read so the index row reflects both the gap fills and any transcript.
         try:
-            final_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            final_meta = read_json_lenient(meta_path)
         except (OSError, json.JSONDecodeError):
             final_meta = metadata
         if self._index_updater is not None:
@@ -624,7 +624,7 @@ class IngestService:
             meta_path = folder / "metadata.json"
             if meta_path.is_file():
                 try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    meta = read_json_lenient(meta_path)
                 except (OSError, json.JSONDecodeError):
                     continue  # unreadable metadata: don't guess, leave it be
                 rel_audio = (meta.get("paths") or {}).get("audio")

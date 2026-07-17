@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 from pathlib import Path
 from typing import Any, Callable
 
@@ -95,7 +96,7 @@ def _now() -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = read_json_lenient(path)
     return data if isinstance(data, dict) else {}
 
 

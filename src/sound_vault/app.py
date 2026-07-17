@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 from pathlib import Path
 import platform
 import sys
@@ -150,7 +151,7 @@ def main() -> None:
             if not meta.exists():
                 continue
             try:
-                md = json.loads(meta.read_text(encoding="utf-8"))
+                md = read_json_lenient(meta)
             except (OSError, json.JSONDecodeError):
                 continue
             if not isinstance(md, dict) or _has_transcript_text(md):

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from sound_vault.vault.metadata_io import atomic_write_json
+from sound_vault.vault.metadata_io import atomic_write_json, read_json_lenient
 from sound_vault.workers.result import WorkerRunResult, write_worker_run
 
 
@@ -128,7 +128,7 @@ def _now() -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = read_json_lenient(path)
     return data if isinstance(data, dict) else {}
 
 
@@ -454,7 +454,7 @@ def transcribe_sound_folder(
     if not meta_path.exists():
         return {"status": "skipped", "reason": "no metadata.json"}
     try:
-        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        metadata = read_json_lenient(meta_path)
     except (OSError, json.JSONDecodeError) as exc:
         return {"status": "failed", "reason": f"unreadable metadata: {exc}"}
     if not overwrite and _has_transcript_text(metadata):

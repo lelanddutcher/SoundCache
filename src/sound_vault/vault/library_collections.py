@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
 import re
@@ -135,7 +136,7 @@ class LibraryCollectionsStore:
         if not self.path.exists():
             return {"version": 1, "favorites": [], "bins": []}
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = read_json_lenient(self.path)
         except (OSError, json.JSONDecodeError):
             return {"version": 1, "favorites": [], "bins": []}
         if not isinstance(data, dict):

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,7 @@ def _group_from_explicit(row: dict[str, Any], index: int) -> DuplicateReviewGrou
 def load_duplicate_review_groups(report_path: Path) -> list[DuplicateReviewGroup]:
     """Load duplicate candidates from either grouped or flat audit report JSON."""
     try:
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        payload = read_json_lenient(report_path)
     except (OSError, json.JSONDecodeError):
         return []
     if isinstance(payload, dict):
@@ -147,7 +148,7 @@ def _unique_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def _append_group_row(report_path: Path, row: dict[str, Any]) -> Any:
     try:
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        payload = read_json_lenient(report_path)
     except (OSError, json.JSONDecodeError):
         return [row]
     if isinstance(payload, list):

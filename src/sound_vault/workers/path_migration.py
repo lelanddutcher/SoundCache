@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 import json
+from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
 
@@ -83,7 +84,7 @@ def _rewrite_folder_metadata(vault_root: Path, result: MigrationResult, *, dry_r
         return
     for metadata_path in sounds_root.glob("*/metadata.json"):
         try:
-            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            data = read_json_lenient(metadata_path)
         except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(data, dict):
