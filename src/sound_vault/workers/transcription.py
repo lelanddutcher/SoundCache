@@ -225,6 +225,69 @@ def mlx_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callable[[
     return _transcribe
 
 
+def qwen3_asr_available() -> bool:
+    """Qwen3-ASR via MLX — Apple's on-device framework runs it on the GPU. Only
+    meaningful on arm64 macOS with the qwen3-asr-mlx package installed."""
+    import platform
+
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import qwen3_asr_mlx  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _qwen3_model_repo(model: str) -> str:
+    """Map a model name/alias to a Qwen3-ASR mlx-community HF repo (defaults to 1.7B).
+    A value already containing '/' is treated as an explicit repo."""
+    name = (model or "").strip()
+    if "/" in name:
+        return name
+    aliases = {
+        "qwen3-asr-0.6b": "mlx-community/Qwen3-ASR-0.6B-bf16",
+        "qwen3-asr-1.7b": "mlx-community/Qwen3-ASR-1.7B-bf16",
+    }
+    return aliases.get(name.lower(), "mlx-community/Qwen3-ASR-1.7B-bf16")
+
+
+def qwen3_asr_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Path], dict[str, Any]] | None":
+    """A callable(audio_path) -> {text, language, model, engine} using Qwen3-ASR on the
+    Apple-Silicon GPU (MLX). Unlike speech-tuned Whisper, Qwen3-ASR is trained to
+    transcribe SINGING over background music, so it reads lyrics far better. The model
+    (~1.7B) downloads from HF on first use and is cached in-process. Returns None when
+    unavailable (non-arm64-mac or package missing)."""
+    if not qwen3_asr_available():
+        return None
+    cfg = config or LocalASRConfig()
+    repo = _qwen3_model_repo(cfg.model)
+    state: dict[str, Any] = {}
+
+    def _transcribe(audio_path: Path, should_stop: "Callable[[], bool] | None" = None) -> dict[str, Any]:
+        empty = {"text": "", "language": "", "model": cfg.model, "engine": "qwen3-asr"}
+        if should_stop is not None and should_stop():
+            return empty
+        model = state.get("model")
+        if model is None:
+            # First use loads + (on a fresh machine) downloads the ~1.7B model; cached after.
+            from qwen3_asr_mlx import Qwen3ASR
+
+            model = Qwen3ASR.from_pretrained(repo)
+            state["model"] = model
+        if should_stop is not None and should_stop():  # a quit during the (slow) load
+            return empty
+        result = model.transcribe(str(audio_path))
+        return {
+            "text": str(getattr(result, "text", "") or "").strip(),
+            "language": str(getattr(result, "language", "") or ""),
+            "model": cfg.model,
+            "engine": "qwen3-asr",
+        }
+
+    return _transcribe
+
+
 def faster_whisper_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Path], dict[str, Any]] | None":
     """A lazy callable(audio_path) -> {text, language, model, engine} using faster-whisper.
 

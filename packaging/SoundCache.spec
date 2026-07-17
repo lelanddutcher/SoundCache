@@ -42,6 +42,7 @@ if _vendor_bin.is_dir():
 # Native / data-carrying deps that PyInstaller's static analysis under-collects
 # (ctranslate2 + PyAV ffmpeg dylibs, mlx's Metal lib, whisper VAD assets, etc.).
 for pkg in ("faster_whisper", "ctranslate2", "av", "mlx", "mlx_whisper",
+            "qwen3_asr_mlx", "soundfile",
             "tokenizers", "huggingface_hub", "yt_dlp", "certifi"):
     try:
         d, b, h = collect_all(pkg)

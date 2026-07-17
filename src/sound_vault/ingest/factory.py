@@ -191,6 +191,7 @@ def build_transcriber(settings=None):
         LocalASRConfig,
         faster_whisper_transcriber,
         mlx_whisper_transcriber,
+        qwen3_asr_transcriber,
     )
 
     cfg = {}
@@ -209,11 +210,18 @@ def build_transcriber(settings=None):
     model = str(cfg.get("local_model") or "base")
     asr_cfg = LocalASRConfig(model=model, model_cache_dir=(str(cfg.get("model_cache_dir") or "") or None))
 
-    backend = (os.getenv("SOUND_VAULT_ASR_BACKEND") or "auto").strip().lower()
-    if backend in ("faster-whisper", "faster_whisper", "cpu", "cuda"):
-        order = [("faster-whisper", faster_whisper_transcriber), ("mlx-whisper", mlx_whisper_transcriber)]
+    # Engine preference: env override > saved setting > auto. Qwen3-ASR (best for sung
+    # lyrics) is OPT-IN — it downloads a ~1.7B model — so 'auto' never auto-selects it.
+    backend = (os.getenv("SOUND_VAULT_ASR_BACKEND") or str(cfg.get("local_engine") or "") or "auto").strip().lower()
+    qwen = ("qwen3-asr", qwen3_asr_transcriber)
+    mlx = ("mlx-whisper", mlx_whisper_transcriber)
+    fw = ("faster-whisper", faster_whisper_transcriber)
+    if backend in ("qwen3-asr", "qwen3", "qwen"):
+        order = [qwen, mlx, fw]
+    elif backend in ("faster-whisper", "faster_whisper", "cpu", "cuda"):
+        order = [fw, mlx]
     else:  # auto / mlx → GPU-first (MLX on Apple Silicon), CPU/CUDA faster-whisper fallback
-        order = [("mlx-whisper", mlx_whisper_transcriber), ("faster-whisper", faster_whisper_transcriber)]
+        order = [mlx, fw]
 
     transcriber, chosen = None, ""
     for name, builder in order:
