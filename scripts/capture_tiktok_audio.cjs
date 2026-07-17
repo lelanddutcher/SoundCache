@@ -182,11 +182,14 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url, knownSoundId = 
     // not the person's trimmed clip. This can't "fall through to the video" — the id
     // comes off the very page the video plays on. resolvedSoundId is written into the
     // sidecar so the service re-keys the catalog entry to the sound.
+    // resolvedSoundId is set ONLY after we've actually navigated to the sound page, so
+    // a failed navigation can't mislabel the video's clip as the sound (the service
+    // adopts this id + we capture the sound's audio only when both are true).
     let resolvedSoundId = "";
     try {
       const pathName = new URL(page.url()).pathname;
       if (/\/(video|photo)\//i.test(pathName)) {
-        resolvedSoundId = await page.evaluate(() => {
+        const candidateId = await page.evaluate(() => {
           try {
             const node = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
             const data = JSON.parse((node && node.textContent) || "{}");
@@ -194,16 +197,15 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url, knownSoundId = 
             return String(((item.music || {}).id) || "");
           } catch (e) { return ""; }
         });
-        if (/^\d+$/.test(resolvedSoundId)) {
-          await page.goto(`https://www.tiktok.com/music/sound-${resolvedSoundId}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+        if (/^\d+$/.test(candidateId)) {
+          await page.goto(`https://www.tiktok.com/music/sound-${candidateId}`, { waitUntil: "domcontentloaded", timeout: 45000 });
           await page.waitForTimeout(6000);
           mediaUrls.length = 0; // drop the video's media; only the sound's audio counts now
+          resolvedSoundId = candidateId; // trusted: navigation succeeded
           console.error(`resolved post -> sound ${resolvedSoundId}`);
-        } else {
-          resolvedSoundId = "";
         }
       }
-    } catch (e) { /* stay on the original page */ }
+    } catch (e) { /* nav failed -> stay on the original page, resolvedSoundId stays "" */ }
 
     if (metaOnly) {
       await scrapeAndWriteMeta(page, outFolder, musicId, url, resolvedSoundId);
