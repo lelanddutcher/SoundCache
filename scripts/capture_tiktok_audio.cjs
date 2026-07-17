@@ -19,7 +19,7 @@ const { chromium } = require("playwright");
 
 // Scrape sound metadata + cover from the loaded music page; write the sidecar.
 // Best-effort: never throws out — returns true/false.
-async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
+async function scrapeAndWriteMeta(page, outFolder, musicId, url, knownSoundId = "") {
   try {
     const meta = await page.evaluate(() => {
       const txt = (sel) => { const el = document.querySelector(sel); return el ? (el.textContent || "").trim() : ""; };
@@ -122,8 +122,10 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
       coverPath: coverBase,
       usageCount: parseCount(meta.usage),
       pageUrl: meta.pageUrl || url,
-      // Structured sound facts from the rehydration JSON (when on a video/photo page).
-      structuredMusicId: musicJson.musicId || "",
+      // The resolved sound id: from the /music/ navigation (knownSoundId) or the
+      // rehydration JSON on a still-on-video capture. Lets the service key the catalog
+      // entry to the SOUND, not the post.
+      structuredMusicId: knownSoundId || musicJson.musicId || "",
       original: typeof musicJson.original === "boolean" ? musicJson.original : null,
       soundDuration: musicJson.soundDuration != null ? musicJson.soundDuration : null,
       album: musicJson.album || "",
@@ -174,8 +176,37 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
     await page.waitForTimeout(7000);
 
+    // Browser-as-authority resolution: if we landed on a POST (/video/ or /photo/),
+    // read the underlying sound id from the page's OWN rehydration JSON and navigate to
+    // the /music/ page. We then capture the clean, full sound + the SOUND's metadata,
+    // not the person's trimmed clip. This can't "fall through to the video" — the id
+    // comes off the very page the video plays on. resolvedSoundId is written into the
+    // sidecar so the service re-keys the catalog entry to the sound.
+    let resolvedSoundId = "";
+    try {
+      const pathName = new URL(page.url()).pathname;
+      if (/\/(video|photo)\//i.test(pathName)) {
+        resolvedSoundId = await page.evaluate(() => {
+          try {
+            const node = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
+            const data = JSON.parse((node && node.textContent) || "{}");
+            const item = (((data.__DEFAULT_SCOPE__ || {})["webapp.video-detail"] || {}).itemInfo || {}).itemStruct || {};
+            return String(((item.music || {}).id) || "");
+          } catch (e) { return ""; }
+        });
+        if (/^\d+$/.test(resolvedSoundId)) {
+          await page.goto(`https://www.tiktok.com/music/sound-${resolvedSoundId}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+          await page.waitForTimeout(6000);
+          mediaUrls.length = 0; // drop the video's media; only the sound's audio counts now
+          console.error(`resolved post -> sound ${resolvedSoundId}`);
+        } else {
+          resolvedSoundId = "";
+        }
+      }
+    } catch (e) { /* stay on the original page */ }
+
     if (metaOnly) {
-      await scrapeAndWriteMeta(page, outFolder, musicId, url);
+      await scrapeAndWriteMeta(page, outFolder, musicId, url, resolvedSoundId);
       console.log(path.join(outFolder, `${musicId}_meta.json`));
       await browser.close();
       process.exit(0);
@@ -283,7 +314,7 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url) {
 
     if (best.path) {
       fs.renameSync(best.path, audioPath);
-      await scrapeAndWriteMeta(page, outFolder, musicId, url);
+      await scrapeAndWriteMeta(page, outFolder, musicId, url, resolvedSoundId);
       console.error(`captured audio (${best.dur > 0 ? best.dur.toFixed(1) + "s" : "len?"})`);
       console.log(audioPath);
     } else {

@@ -256,9 +256,27 @@ def build_ingest_service(
     # submitted video link captures the clean /music/ sound, not the trimmed clip.
     import functools
 
-    from sound_vault.ingest.resolve import resolve, tiktok_music_url_via_oembed
+    from sound_vault.ingest.resolve import resolve, tiktok_music_id_via_ssr, tiktok_music_url_via_oembed
 
-    resolve_source = functools.partial(resolve, music_resolver=tiktok_music_url_via_oembed)
+    def _tiktok_sound_resolver(video_url: str) -> "str | None":
+        """Resolve a TikTok post → its sound's /music/ URL. Prefers the stable first-party
+        SSR music.id, falls back to oEmbed, and logs which strategy won (or 'browser' when
+        both miss and the capture browser will resolve it) so resolver drift is observable
+        BEFORE it becomes a user-facing "pulled the video instead of the sound"."""
+        from sound_vault.diagnostics import write_event
+
+        try:
+            music_id = tiktok_music_id_via_ssr(video_url)
+        except Exception:  # noqa: BLE001 - resolution is best-effort
+            music_id = None
+        if music_id:
+            write_event("resolve.tiktok_sound", strategy="ssr", music_id=music_id)
+            return f"https://www.tiktok.com/music/sound-{music_id}"
+        url = tiktok_music_url_via_oembed(video_url)
+        write_event("resolve.tiktok_sound", strategy=("oembed" if url else "browser"))
+        return url
+
+    resolve_source = functools.partial(resolve, music_resolver=_tiktok_sound_resolver)
     return IngestService(
         vault_root=vault_root,
         downloader=downloader,

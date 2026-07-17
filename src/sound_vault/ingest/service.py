@@ -206,6 +206,29 @@ class IngestService:
     def _already_ingested(self, music_id: str) -> bool:
         return self._folder_for(music_id) is not None
 
+    def _adopt_resolved_sound(self, resolved: ResolvedSource, download, music_id: str):
+        """If the capture browser resolved a submitted POST to its underlying sound
+        (``download.info['sound_id']``), return the re-keyed ``(sound_id, resolved)`` so
+        the catalog entry is identified/named by the SOUND, not the person's post — with
+        the canonical URL pointed at the sound's ``/music/`` page and kind flipped to
+        ``music``. Returns None when there's nothing to adopt (a direct /music/ share, a
+        non-TikTok source, or the capture didn't resolve a different id)."""
+        sound_id = str((download.info or {}).get("sound_id") or "").strip()
+        if not sound_id or sound_id == music_id or resolved.platform != "tiktok":
+            return None
+        # A direct /music/ share is already keyed to its sound — don't re-key it.
+        if resolved.kind == "music" and resolved.source_id == music_id:
+            return None
+        new_resolved = replace(
+            resolved,
+            kind="music",
+            source_id=sound_id,
+            canonical_url=f"https://www.tiktok.com/music/sound-{sound_id}",
+            slug=None,
+            title_guess=None,
+        )
+        return sound_id, new_resolved
+
     @staticmethod
     def _is_placeholder_slug(slug_title: str) -> bool:
         """True when the slug-derived title is a synthesized placeholder (from a
@@ -221,10 +244,18 @@ class IngestService:
         slug_title = (resolved.title_guess or "").strip()
         if IngestService._is_placeholder_slug(slug_title):
             slug_title = ""  # placeholder — defer to the real captured/oEmbed title
+        # A platform-identified SOUND (an Instagram reel's music_info, a YouTube music
+        # track, etc.) is the sound itself, not the person's post — prefer it over the
+        # video caption/uploader so the catalog entry reflects the sound.
+        track = str(info.get("track") or "").strip()
+        track_artist = str(info.get("artist") or "").strip()
         if resolved.platform == "tiktok" and resolved.kind == "music":
             # A real slug (from a direct /music/<name>-<id> share) is a good title;
             # otherwise use what the capture/oEmbed actually scraped.
             title = slug_title or download_title or "Unknown"
+        elif track:
+            title = track
+            artist = track_artist or artist
         else:
             title = download_title or slug_title or "Unknown"
         return title, artist
@@ -268,6 +299,18 @@ class IngestService:
                 return IngestOutcome(
                     status="failed", url=url, music_id=music_id, reason=download.error or "download failed"
                 )
+
+            # Browser-as-authority: for a submitted POST (video/photo) the capture
+            # navigates to the underlying sound's /music/ page and returns its id. Adopt
+            # that as the catalog identity so the sound is keyed/named/deduped by the
+            # SOUND, not the person's post. Fast-path /music/ shares already came in keyed
+            # right, so this is a no-op for them.
+            adopted = self._adopt_resolved_sound(resolved, download, music_id)
+            if adopted is not None:
+                music_id, resolved = adopted
+                existing = self._folder_for(music_id)
+                if existing is not None:
+                    return IngestOutcome(status="duplicate", url=url, music_id=music_id, folder=existing)
 
             try:
                 packaged = self._enrich_and_package(resolved, download, music_id, url, note, source, work)

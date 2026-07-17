@@ -277,8 +277,10 @@ class PlaywrightCaptureDownloader:
                 "associated_video_count": meta.get("videoCount"),
                 "source_provider": "TikTok",
                 "webpage_url": str(meta.get("pageUrl") or "").strip(),
-                # Structured sound facts from the page rehydration JSON (video/photo
-                # captures only; absent on /music/ pages). Informational for now.
+                # The sound id the capture browser resolved (it navigates a submitted
+                # post to its /music/ page). The service adopts this as the catalog
+                # identity so a shared VIDEO is keyed to its SOUND, not the post.
+                "sound_id": str(meta.get("structuredMusicId") or "").strip() or None,
                 "sound_is_original": meta.get("original"),
                 "sound_duration": meta.get("soundDuration"),
                 # "Add to Spotify" link for published tracks, if TikTok showed one.

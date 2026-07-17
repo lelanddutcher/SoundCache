@@ -56,6 +56,68 @@ def _tiktok_music_url(music_id: str, slug: str | None = None) -> str:
     return f"https://www.tiktok.com/music/{slug or 'sound'}-{music_id}"
 
 
+# The typed, load-bearing field TikTok's own web app reads for a post's sound.
+_SSR_SCRIPT_RE = re.compile(
+    r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', re.DOTALL
+)
+
+
+def _music_id_from_ssr_html(html: str) -> str | None:
+    """Extract ``itemStruct.music.id`` from a TikTok /video/ page's rehydration JSON.
+    Pure/testable; returns a numeric id string or None."""
+    import json as _json
+
+    match = _SSR_SCRIPT_RE.search(html or "")
+    if not match:
+        return None
+    try:
+        data = _json.loads(match.group(1))
+        scope = (data or {}).get("__DEFAULT_SCOPE__") or {}
+        item = ((scope.get("webapp.video-detail") or {}).get("itemInfo") or {}).get("itemStruct") or {}
+        music_id = str(((item.get("music") or {}).get("id") or "")).strip()
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return music_id if music_id.isdigit() else None
+
+
+def tiktok_music_id_via_ssr(video_url: str) -> str | None:
+    """Resolve a TikTok /video/ post to its sound id by reading the page's own
+    server-rendered rehydration JSON (``itemStruct.music.id``) — the same first-party
+    field TikTok's frontend uses. Far more stable than scraping oEmbed HTML, and it's
+    a plain HTTPS GET (no auth). ``/photo/`` slideshows are JS shells with no SSR
+    payload, so this returns None for them (the capture browser resolves those).
+    Best-effort: any fetch/parse failure returns None."""
+    if not video_url or not is_safe_public_url(video_url):
+        return None
+    try:
+        request = urllib.request.Request(
+            video_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html",
+            },
+        )
+        with _OPENER.open(request, timeout=20) as response:  # nosec B310 - validated public URL, safe-redirect handler
+            body = response.read(3_000_000).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - resolution is best-effort, never fatal
+        return None
+    return _music_id_from_ssr_html(body)
+
+
+def tiktok_sound_url_resolver(video_url: str) -> str | None:
+    """A TikTok VIDEO/photo → sound ``/music/`` URL resolver that prefers the stable
+    SSR ``music.id`` and falls back to oEmbed. Returns None when neither cheap signal
+    works — the capture browser is then the authority (it reads music.id off the page
+    it's already loading and navigates to the sound itself)."""
+    music_id = tiktok_music_id_via_ssr(video_url)
+    if music_id:
+        return _tiktok_music_url(music_id)
+    return tiktok_music_url_via_oembed(video_url)
+
+
 def tiktok_music_url_via_oembed(video_url: str) -> str | None:
     """Resolve a TikTok video/photo URL to its sound's canonical /music/ URL via
     the public oEmbed endpoint (no auth). oEmbed's ``html`` embeds the
