@@ -330,6 +330,34 @@ def download_asr_model(
     return {"status": "ok", "repo": repo, "total": total or done["n"]}
 
 
+def _decode_to_wav16k(audio_path: Path) -> Path:
+    """Decode any audio to a 16 kHz mono PCM WAV (Qwen3-ASR's native rate) via ffmpeg.
+
+    qwen3_asr_mlx loads audio through libsndfile, which CANNOT decode AAC/.m4a — our
+    entire vault format — and dies with "bad data offset". mlx-whisper avoids this by
+    shelling out to ffmpeg internally; we do the same here. A ``.wav`` suffix also hits
+    qwen3's own native WAV reader, skipping libsndfile entirely. ffmpeg is bundled and on
+    PATH (the bare-``ffmpeg`` call matches package.py's proven decode path)."""
+    import os
+    import subprocess
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(suffix=".wav", prefix="qwen3asr_")
+    os.close(fd)
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(audio_path),
+         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", tmp],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(f"ffmpeg decode failed for {Path(audio_path).name}: {(proc.stderr or '')[-200:]}")
+    return Path(tmp)
+
+
 def qwen3_asr_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Path], dict[str, Any]] | None":
     """A callable(audio_path) -> {text, language, model, engine} using Qwen3-ASR on the
     Apple-Silicon GPU (MLX). Unlike speech-tuned Whisper, Qwen3-ASR is trained to
@@ -355,7 +383,15 @@ def qwen3_asr_transcriber(config: LocalASRConfig | None = None) -> "Callable[[Pa
             state["model"] = model
         if should_stop is not None and should_stop():  # a quit during the (slow) load
             return empty
-        result = model.transcribe(str(audio_path))
+        # Pre-decode to WAV — qwen3_asr_mlx's libsndfile loader can't read our .m4a audio.
+        wav = _decode_to_wav16k(Path(audio_path))
+        try:
+            result = model.transcribe(str(wav))
+        finally:
+            try:
+                wav.unlink()
+            except OSError:
+                pass
         return {
             "text": str(getattr(result, "text", "") or "").strip(),
             "language": str(getattr(result, "language", "") or ""),

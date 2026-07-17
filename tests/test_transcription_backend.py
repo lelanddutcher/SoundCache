@@ -43,3 +43,41 @@ def test_asr_model_is_cached_returns_bool_offline_safe():
     # Never raises (offline / hub error / unknown) — always a plain bool.
     assert isinstance(asr_model_is_cached("qwen3-asr", "qwen3-asr-1.7b"), bool)
     assert asr_model_is_cached("faster-whisper", "base") is True  # nothing to fetch -> cached
+
+
+def test_decode_to_wav16k_converts_aac_that_libsndfile_rejects(tmp_path):
+    """qwen3_asr_mlx loads audio via libsndfile, which CANNOT decode our .m4a/AAC vault
+    files ("bad data offset"). _decode_to_wav16k must turn AAC into a 16 kHz mono WAV that
+    IS readable — the fix that makes Qwen3-ASR work on the real (all-.m4a) library."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not on PATH")
+    try:
+        import soundfile as sf
+    except Exception:  # noqa: BLE001
+        pytest.skip("soundfile not installed")
+
+    from sound_vault.workers.transcription import _decode_to_wav16k
+
+    m4a = tmp_path / "tone.m4a"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=0.5", "-c:a", "aac", str(m4a)],
+        check=True,
+    )
+    # Document the underlying breakage: libsndfile genuinely can't open the AAC.
+    with pytest.raises(Exception):
+        sf.read(str(m4a))
+    # ...but our ffmpeg pre-decode yields a WAV soundfile reads, at 16 kHz mono.
+    wav = _decode_to_wav16k(m4a)
+    try:
+        data, sr = sf.read(str(wav))
+        assert sr == 16000
+        assert data.ndim == 1  # mono
+        assert len(data) > 0
+    finally:
+        wav.unlink(missing_ok=True)
