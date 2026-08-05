@@ -172,11 +172,11 @@ def test_probe_audio_duration_zero_when_ffprobe_missing(tmp_path, monkeypatch):
 # --- preview re-render must not stomp a live playhead -----------------------
 
 
-def _record(audio: Path, folder: Path, *, duration=None):
+def _record(audio: Path, folder: Path, *, duration=None, music_id="123"):
     from sound_vault.vault.indexer import SoundRecord
 
     return SoundRecord(
-        music_id="123", title="t", artist="a", tags=(), status="ingested", raw={},
+        music_id=music_id, title="t", artist="a", tags=(), status="ingested", raw={},
         folder_path=folder, local_audio_path=audio, duration_seconds=duration,
     )
 
@@ -229,5 +229,32 @@ def test_preview_uses_a_cached_probe_when_the_record_has_no_duration(tmp_path, m
 
         assert window.progress_slider.maximum() == 45_000
         assert "0:45" in window.time_label.text()
+    finally:
+        window.close()
+
+
+def test_selecting_another_row_midplay_keeps_the_playing_sounds_scrubber(tmp_path, monkeypatch):
+    """The scrubber belongs to what is PLAYING, not to what is selected.
+
+    Browsing to a sound with no stored duration while something else played re-rendered the
+    preview and reset the range to (0, 0), freezing the *playing* sound's playhead.
+    """
+    window = _window(tmp_path, monkeypatch)
+    try:
+        other = tmp_path / "other.m4a"
+        other.write_bytes(b"\x00")
+        # sound A is playing, scrubber scaled to it
+        window.playing_music_id = "playing-A"
+        window._external_audio_duration_ms = 60_000
+        window.progress_slider.setRange(0, 60_000)
+        window.progress_slider.setValue(9_000)
+        # user selects sound B, which has no stored duration
+        record_b = _record(other, tmp_path, duration=None, music_id="selected-B")
+        _quiet_preview(window, monkeypatch, other)
+
+        window._show_preview_record(record_b)
+
+        assert window.progress_slider.maximum() == 60_000, "selecting another row rescaled the live scrubber"
+        assert window.progress_slider.value() == 9_000, "selecting another row rewound the live playhead"
     finally:
         window.close()

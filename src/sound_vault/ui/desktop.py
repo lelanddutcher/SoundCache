@@ -3912,6 +3912,17 @@ class SoundVaultWindow(QMainWindow):
         except Exception as exc:
             write_event("gui.preview_hydrate_exception", **exception_fields(exc))
             return
+        # ~3% of sounds never got a duration written to metadata.json, and the indexer
+        # deliberately skips ffprobe during a rebuild (probing thousands of files reads as
+        # a hang). Those showed "0:00 / 0:00" until first played. We're already off the UI
+        # thread here, so probe once and cache it — the render below reads the cache.
+        try:
+            if record is not None and not getattr(record, "duration_seconds", None):
+                target = self.vm.play_target_for(record)
+                if isinstance(target, Path):
+                    self._probe_audio_duration_ms(target)
+        except Exception as exc:  # noqa: BLE001 - a duration is a nicety, never break preview
+            write_event("gui.preview_duration_probe_failed", music_id=str(music_id), **exception_fields(exc))
         self.previewHydrated.emit(token, music_id, record)
 
     def _apply_hydrated_preview(self, token: int, music_id: str, record) -> None:
@@ -3951,11 +3962,14 @@ class SoundVaultWindow(QMainWindow):
             # for this file (cache read only — never shell out to ffprobe here, this runs
             # on every selection change and must stay instant).
             duration_ms = self._duration_probe_cache.get(str(target), 0)
-        # Never stomp a live playhead. This method runs a SECOND time when the async
-        # preview hydration lands, which is often AFTER playback has already started.
-        # For a sound with no stored duration that reset the range to (0, 0) — a slider
-        # that can never move — so the playhead froze at the left for the whole track.
-        if self.playing_music_id != record.music_id:
+        # Never stomp a live playhead. The scrubber belongs to whatever is PLAYING, not to
+        # whatever row is selected, so leave it alone whenever audio is running. Two ways
+        # this bit: (1) this method runs a SECOND time when the async preview hydration
+        # lands, which is usually AFTER playback started; (2) selecting another row mid-play
+        # re-rendered the preview. Either way, a record with no stored duration reset the
+        # range to (0, 0) — and a slider whose min == max can never move — so the playhead
+        # froze while the time label kept counting.
+        if self.playing_music_id is None:
             self.progress_slider.setRange(0, duration_ms)
             self.progress_slider.setValue(0)
             self.time_label.setText(f"0:00 / {self._format_ms(duration_ms)}")
