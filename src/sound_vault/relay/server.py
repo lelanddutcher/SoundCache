@@ -16,6 +16,35 @@ from sound_vault.relay.pairing import PairingRegistry
 from sound_vault.url_safety import is_safe_public_url
 
 app = FastAPI(title="Sound Cache Pairing Relay", version="0.1.0")
+
+# The serverless entrypoint lives at api/index.py, and a host that rewrites every
+# request to that entrypoint can hand us the ENTRYPOINT path instead of the original
+# one. That happened for real: Vercel changed internal-rewrite semantics ("Internal
+# rewrites in backend framework projects now route requests using the rewritten
+# destination path"), so a catch-all `/(.*) -> /api/index` rewrite made FastAPI see
+# `/api/index` for every request and 404 the entire relay — submit, poll, health, all
+# of it — with no code change on our side. The rewrite is gone now, but strip the
+# entrypoint prefix defensively so routing alone can never take the relay down again.
+# Deliberately exact — stripping a bare "/api" would mangle any future /api/... route.
+_ENTRYPOINT_PREFIXES = ("/api/index.py", "/api/index")
+
+
+@app.middleware("http")
+async def _strip_entrypoint_prefix(request: Request, call_next):
+    path = request.scope.get("path", "")
+    for prefix in _ENTRYPOINT_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            remainder = path[len(prefix):] or "/"
+            request.scope["path"] = remainder
+            # raw_path is bytes and takes precedence in some ASGI servers; keep it in sync.
+            raw = request.scope.get("raw_path")
+            if isinstance(raw, bytes):
+                request.scope["raw_path"] = remainder.encode("utf-8")
+            logger.info("normalized entrypoint path %s -> %s", path, remainder)
+            break
+    return await call_next(request)
+
+
 # The only browser caller is the landing page reading the public leaderboard (GET).
 # Submit/poll come from the iOS Shortcut + desktop (non-browser, CORS-exempt), so we
 # only need to allow cross-origin GET — and only from our own origins. This kills

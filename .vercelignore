@@ -1,1 +1,32 @@
+# What the relay serverless function needs: api/index.py, vercel.json,
+# requirements.txt, and src/sound_vault/. Everything else is desktop-app baggage.
+#
+# Git-triggered deploys never saw the heavy build outputs (they're gitignored), so this
+# only bit a CLI `vercel --prod`, which uploads the working tree and died on "File size
+# limit exceeded (100 MB)" — dist/ alone is ~1.9 GB. Keep this list ahead of that.
+
+# Desktop build outputs and packaging inputs (GBs of .app / .dmg / binaries)
+dist/
+build/
+packaging/
+*.dmg
+*.zip
+
+# Not used by the relay
+node_modules/
+tests/
+docs/
+analysis/
+_archived-branches/
+scripts/
+.claude/
+
+# Installing this would try to build the whole desktop app
 pyproject.toml
+uv.lock
+
+# Local caches / artefacts
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
