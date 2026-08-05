@@ -52,7 +52,7 @@ Setup:
 - **Editor-friendly.** Drag a sound out of the window to drop the audio file straight into Premiere, Resolve, or CapCut. Favorites, sorting bins, duplicate review, and archive-health coverage are all built in.
 - **Private pairing.** A one-time pair code links your phone's share sheet to your desktop, and the lower-left badge confirms the connection at a glance.
 - **Portable by design.** Sound names with kaomoji, emoji, or exotic Unicode are sanitized for any filesystem (byte-accurate length caps, NFC normalization, emoji sequences preserved) so your vault copies cleanly to a NAS or another drive.
-
+ 
 ## Privacy and security
 
 Local-first means what it says. Your collection lives on your machine, not on a server. There is no account, so there is nothing to leak.
