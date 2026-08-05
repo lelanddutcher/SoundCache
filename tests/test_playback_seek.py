@@ -167,3 +167,67 @@ def test_probe_audio_duration_zero_when_ffprobe_missing(tmp_path, monkeypatch):
         assert window._probe_audio_duration_ms(tmp_path / "clip.m4a") == 0
     finally:
         window.close()
+
+
+# --- preview re-render must not stomp a live playhead -----------------------
+
+
+def _record(audio: Path, folder: Path, *, duration=None):
+    from sound_vault.vault.indexer import SoundRecord
+
+    return SoundRecord(
+        music_id="123", title="t", artist="a", tags=(), status="ingested", raw={},
+        folder_path=folder, local_audio_path=audio, duration_seconds=duration,
+    )
+
+
+def _quiet_preview(window, monkeypatch, audio):
+    monkeypatch.setattr(window.vm, "play_target_for", lambda _r: audio)
+    for name in ("_populate_artwork", "_populate_evidence", "_populate_videos", "_load_user_notes"):
+        monkeypatch.setattr(window, name, lambda *_a, **_k: None)
+
+
+def test_preview_rerender_during_playback_keeps_the_slider_range(tmp_path, monkeypatch):
+    """`update_preview_from_selection` renders the preview twice: once immediately and
+    again when the async hydration lands — which is often AFTER playback started. That
+    second render used the record's stored duration only, so for a sound with no stored
+    duration it reset the range to (0, 0): a slider that can never move. The playhead
+    froze at the far left for the whole track while the time label kept counting.
+    """
+    window = _window(tmp_path, monkeypatch)
+    try:
+        audio = tmp_path / "clip.m4a"
+        audio.write_bytes(b"\x00")
+        record = _record(audio, tmp_path, duration=None)
+        # Playback already resolved a real duration (via the ffprobe fallback).
+        window._external_audio_duration_ms = 45_000
+        window.progress_slider.setRange(0, 45_000)
+        window.progress_slider.setValue(12_000)
+        window.playing_music_id = "123"  # this record is the one currently playing
+        _quiet_preview(window, monkeypatch, audio)
+
+        window._show_preview_record(record)
+
+        assert window.progress_slider.maximum() == 45_000, "hydration reset the range mid-playback"
+        assert window.progress_slider.value() == 12_000, "hydration rewound the playhead mid-playback"
+    finally:
+        window.close()
+
+
+def test_preview_uses_a_cached_probe_when_the_record_has_no_duration(tmp_path, monkeypatch):
+    """Not playing: the preview should still show a real total for a sound with no stored
+    duration, reusing a previously probed value (cache read only — no subprocess here)."""
+    window = _window(tmp_path, monkeypatch)
+    try:
+        audio = tmp_path / "clip.m4a"
+        audio.write_bytes(b"\x00")
+        record = _record(audio, tmp_path, duration=None)
+        window._duration_probe_cache[str(audio)] = 45_000  # probed on a previous play
+        _quiet_preview(window, monkeypatch, audio)
+
+        window._show_preview_record(record)
+
+        assert window.progress_slider.maximum() == 45_000
+        assert "0:45" in window.time_label.text()
+    finally:
+        window.close()

@@ -3946,9 +3946,19 @@ class SoundVaultWindow(QMainWindow):
         self.copy_metadata.setEnabled(True)
         target = self.vm.play_target_for(record)
         duration_ms = self._duration_ms_for_record(record)
-        self.progress_slider.setRange(0, duration_ms)
-        self.progress_slider.setValue(0)
-        self.time_label.setText(f"0:00 / {self._format_ms(duration_ms)}")
+        if duration_ms <= 0 and isinstance(target, Path):
+            # ~3% of sounds have no stored duration. Reuse a duration we already probed
+            # for this file (cache read only — never shell out to ffprobe here, this runs
+            # on every selection change and must stay instant).
+            duration_ms = self._duration_probe_cache.get(str(target), 0)
+        # Never stomp a live playhead. This method runs a SECOND time when the async
+        # preview hydration lands, which is often AFTER playback has already started.
+        # For a sound with no stored duration that reset the range to (0, 0) — a slider
+        # that can never move — so the playhead froze at the left for the whole track.
+        if self.playing_music_id != record.music_id:
+            self.progress_slider.setRange(0, duration_ms)
+            self.progress_slider.setValue(0)
+            self.time_label.setText(f"0:00 / {self._format_ms(duration_ms)}")
         self.playback_status.setText("Ready to play" if target is not None else "No playable audio source")
 
     # ---- user notes (editable, autosaved, searchable) ----
