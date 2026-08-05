@@ -6142,12 +6142,13 @@ QSlider::handle:horizontal {
         stop:0 #ffffff, stop:1 #b793ff);
     border: 1px solid #0a0518;
     width: 14px;
-    /* Negative HORIZONTAL margin (= half the 14px handle + its 1px borders) lets the
-       handle overhang the groove, so the playhead's travel spans the full bar. With
-       `margin: -5px 0` Qt insets the handle's centre by half a handle at each end, so
-       the playhead stopped ~1.8% shy of the right edge — on a 5-minute track that reads
-       as ~6 seconds of error right where the track ends. */
-    margin: -5px -8px;
+    /* Keep the handle INSIDE the widget. A negative horizontal margin makes the handle
+       overhang the groove so its centre can reach both ends, but Qt clips children to the
+       widget rect — the handle then renders as a half-circle at 0% and 100%, which looks
+       broken exactly at the ends it was meant to fix. Qt's half-a-handle inset is the
+       lesser evil; SeekSlider._value_at_x maps clicks through the same geometry, so
+       clicking still lands where the playhead is drawn. */
+    margin: -5px 0;
     border-radius: 7px;
 }
 QSlider::handle:horizontal:hover {

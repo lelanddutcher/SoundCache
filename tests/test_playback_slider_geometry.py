@@ -13,7 +13,6 @@ of a naive `x / width()`.
 from __future__ import annotations
 
 import os
-import re
 
 import pytest
 
@@ -53,38 +52,34 @@ def _handle_center_x(slider: SeekSlider) -> int:
     ).center().x()
 
 
-def test_stylesheet_gives_the_handle_a_negative_horizontal_margin():
-    """Guard the actual rule — a plain `margin: -5px 0` reintroduces the inset."""
-    source = desktop_module.__file__
-    with open(source, encoding="utf-8") as handle:
-        text = handle.read()
-    block = re.search(r"QSlider::handle:horizontal \{(.*?)\}", text, re.S)
-    assert block, "slider handle style block not found"
-    margin = re.search(r"margin:\s*-?\d+px\s+(-?\d+)px", block.group(1))
-    assert margin, "handle margin must set an explicit horizontal value"
-    assert int(margin.group(1)) < 0, "horizontal handle margin must be negative so the playhead reaches both ends"
+def test_handle_is_never_clipped_by_the_widget_edges():
+    """The handle must stay INSIDE the widget at both extremes.
 
-
-def test_playhead_spans_the_full_bar_at_both_ends():
+    A negative horizontal handle margin lets the handle's centre reach the very ends, but
+    Qt clips children to the widget rect — the handle then paints as a half-circle at 0%
+    and 100%, i.e. visibly broken exactly at the ends. Guard against reintroducing that.
+    """
     slider = _slider()
-    slider.setValue(0)
-    left_pct = _handle_center_x(slider) / WIDTH * 100
-    slider.setValue(LONG_TRACK_MS)
-    right_pct = _handle_center_x(slider) / WIDTH * 100
-    # Before the fix these were ~1.3% and ~98.3%.
-    assert left_pct <= 1.0, f"playhead starts {left_pct:.1f}% in, should sit at the left edge"
-    assert right_pct >= 99.0, f"playhead ends at {right_pct:.1f}%, should reach the right edge"
+    for value in (0, LONG_TRACK_MS):
+        slider.setValue(value)
+        opt = QStyleOptionSlider()
+        slider.initStyleOption(opt)
+        rect = slider.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, slider
+        )
+        assert rect.left() >= 0, f"handle clipped at the left edge (x={rect.left()}) for value {value}"
+        assert rect.right() <= WIDTH, f"handle clipped at the right edge (x={rect.right()}) for value {value}"
 
 
-def test_playhead_position_is_proportional_across_the_track():
-    """No systematic drift at any point — the old geometry skewed increasingly rightward."""
+def test_playhead_moves_monotonically_and_reaches_the_extremes():
     slider = _slider()
+    seen = []
     for fraction in (0.0, 0.25, 0.5, 0.75, 0.9, 1.0):
         slider.setValue(int(LONG_TRACK_MS * fraction))
-        actual = _handle_center_x(slider) / WIDTH
-        assert abs(actual - fraction) <= 0.015, (
-            f"at {fraction:.0%} the playhead sits at {actual:.1%} (>1.5% off)"
-        )
+        seen.append(_handle_center_x(slider))
+    assert seen == sorted(seen), f"playhead must advance monotonically, got {seen}"
+    assert seen[0] < WIDTH * 0.05, "playhead should start at the left end"
+    assert seen[-1] > WIDTH * 0.95, "playhead should finish at the right end"
 
 
 def test_click_maps_to_the_value_drawn_under_the_cursor():
