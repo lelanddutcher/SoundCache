@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionButton,
+    QStyleOptionSlider,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -382,10 +383,25 @@ def _env_flag(name: str) -> bool:
 class SeekSlider(QSlider):
     seekRequested = Signal(int)
 
+    def _value_at_x(self, x: float) -> int:
+        """Map a click x to a slider value the way Qt itself lays the handle out.
+
+        A naive ``x / width()`` ignores the handle: Qt draws the handle's travel across
+        ``groove.width() - handle.width()``, so a proportional-to-width mapping drifts from
+        the painted handle by up to half a handle — worst at the two ends, which is exactly
+        where "click the end of the bar" has to be exact."""
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        style = self.style()
+        groove = style.subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
+        handle = style.subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self)
+        span = max(1, groove.width() - handle.width())
+        pos = int(x - groove.x() - handle.width() / 2)
+        return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), pos, span)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         if self.maximum() > self.minimum():
-            ratio = max(0.0, min(1.0, event.position().x() / max(1, self.width())))
-            value = round(self.minimum() + ratio * (self.maximum() - self.minimum()))
+            value = self._value_at_x(event.position().x())
             self.setValue(value)
             self.seekRequested.emit(value)
         super().mousePressEvent(event)
@@ -1611,6 +1627,112 @@ class OnboardingDialog(QDialog):
         return self._chosen_vault
 
 
+class AddSoundDialog(QDialog):
+    """Add sounds by hand — paste one link, a whole list, or messy text with links in it.
+
+    The relay/iOS shortcut is the usual path, but it needs a paired phone. This is the
+    escape hatch: anything you can copy a link to (a sound page, a video, a reel) can be
+    queued straight from the desktop. Links land in the SAME inbox the relay feeds, so a
+    manual add inherits receipts, dedup, retries and the normal import worker."""
+
+    def __init__(self, vm, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.vm = vm
+        self.result_counts: dict[str, Any] = {}
+        self.setWindowTitle("Add sound from link")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        title = QLabel("Add sounds from links")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        blurb = QLabel(
+            "Paste a TikTok, Instagram or YouTube link — a sound page, a video, or a reel. "
+            "Paste as many as you like (one per line, or just paste a chunk of text and "
+            "Sound Cache will find the links). A shared video resolves to its underlying sound."
+        )
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+        self.links_edit = QTextEdit()
+        self.links_edit.setPlaceholderText(
+            "https://www.tiktok.com/music/sound-7362664349930556192\n"
+            "https://vm.tiktok.com/ZP8Gpb8VC/\n"
+            "https://www.instagram.com/reel/…"
+        )
+        self.links_edit.setAcceptRichText(False)  # paste from Safari/Notes drops formatting
+        self.links_edit.setMinimumHeight(120)
+        layout.addWidget(self.links_edit)
+        self.import_now = QCheckBox("Download && import immediately")
+        self.import_now.setChecked(True)
+        self.import_now.setToolTip(
+            "Run the importer as soon as the links are queued. Uncheck to just park them in "
+            "the inbox and import later."
+        )
+        layout.addWidget(self.import_now)
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        actions = QHBoxLayout()
+        paste_btn = QPushButton("Paste from clipboard")
+        paste_btn.clicked.connect(self._paste_clipboard)
+        add_btn = QPushButton("Add to inbox")
+        add_btn.setObjectName("primaryButton")
+        add_btn.setDefault(True)
+        add_btn.clicked.connect(self._commit)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(paste_btn)
+        actions.addStretch(1)
+        actions.addWidget(cancel)
+        actions.addWidget(add_btn)
+        layout.addLayout(actions)
+        self._prefill_from_clipboard()
+
+    def _prefill_from_clipboard(self) -> None:
+        """If a link is already on the clipboard, fill it in — the common case is
+        "I just copied a link and opened this dialog"."""
+        text = (QApplication.clipboard().text() or "").strip()
+        if text and self.vm._LINK_RE.search(text):
+            self.links_edit.setPlainText(text)
+
+    def _paste_clipboard(self) -> None:
+        text = (QApplication.clipboard().text() or "").strip()
+        if not text:
+            self.status_label.setText("Clipboard is empty.")
+            return
+        existing = self.links_edit.toPlainText().strip()
+        self.links_edit.setPlainText(f"{existing}\n{text}".strip() if existing else text)
+
+    def wants_import_now(self) -> bool:
+        return self.import_now.isChecked()
+
+    def _commit(self) -> None:
+        text = self.links_edit.toPlainText().strip()
+        if not text:
+            self.status_label.setText("Paste at least one link first.")
+            return
+        try:
+            counts = self.vm.add_manual_links(text)
+        except Exception as exc:  # noqa: BLE001 - surface, never crash the dialog
+            self.status_label.setText(f"Couldn't queue those links: {exc}")
+            return
+        self.result_counts = counts
+        if not counts.get("queued"):
+            # Nothing queued — explain why and stay open so the text can be fixed.
+            if counts.get("skipped") and not counts.get("rejected"):
+                self.status_label.setText(
+                    f"Already in the inbox ({counts['skipped']} link(s)) — nothing new to add."
+                )
+            elif counts.get("rejected"):
+                self.status_label.setText(
+                    f"{counts['rejected']} link(s) rejected — only TikTok, Instagram and "
+                    "YouTube links can be imported."
+                )
+            else:
+                self.status_label.setText(str(counts.get("reason") or "No links found in that text."))
+            return
+        self.accept()
+
+
 class SoundVaultWindow(QMainWindow):
     previewHydrated = Signal(int, str, object)
     updateChecked = Signal(object, bool)  # (UpdateInfo|None, manual)
@@ -2273,6 +2395,12 @@ class SoundVaultWindow(QMainWindow):
             "anything missing (stranded or phantom) so you can recover it with Download & import."
         )
         refresh_inbox.clicked.connect(self.reconcile_and_refresh_inbox)
+        add_link = QPushButton("Add link…")
+        add_link.setToolTip(
+            "Add a sound by pasting its link — no phone or relay pairing needed. "
+            "Works with TikTok/Instagram/YouTube sound, video and reel links (⌘L)."
+        )
+        add_link.clicked.connect(self.add_sound_manually)
         download_import = QPushButton("Download && import")
         download_import.setObjectName("primaryButton")
         download_import.clicked.connect(self.download_and_import)
@@ -2293,6 +2421,7 @@ class SoundVaultWindow(QMainWindow):
         retry_failed.clicked.connect(self.retry_failed_inbox)
         header.addWidget(inbox_title)
         header.addStretch(1)
+        header.addWidget(add_link)
         header.addWidget(download_import)
         header.addWidget(import_pack)
         header.addWidget(import_export)
@@ -2759,9 +2888,12 @@ class SoundVaultWindow(QMainWindow):
             # the scrubber is usable and the timestamp shows the real total.
             duration_ms = self._probe_audio_duration_ms(target)
         self._external_audio_duration_ms = duration_ms
-        if self._external_audio_duration_ms > 0:
-            self.progress_slider.setRange(0, self._external_audio_duration_ms)
-            self.progress_slider.setValue(min(start_ms, self._external_audio_duration_ms))
+        # ALWAYS reset the range, even when the duration is unknown (0). Otherwise a track
+        # we can't measure inherits the PREVIOUS track's scale — and in continuous play that
+        # strands the playhead at the far right of a range that has nothing to do with what
+        # is now playing.
+        self.progress_slider.setRange(0, max(0, duration_ms))
+        self.progress_slider.setValue(min(start_ms, duration_ms) if duration_ms > 0 else 0)
         self._external_audio_timer.start()
         write_event("gui.external_audio_started", target=str(target), backend=backend, start_ms=str(start_ms))
         self.playback_status.setText(f"Playing {target.name} via macOS audio")
@@ -3183,6 +3315,7 @@ class SoundVaultWindow(QMainWindow):
         self.recent_menu = file_menu.addMenu("Open Recent")
         self._rebuild_recent_menu()
         file_menu.addSeparator()
+        self._add_action(file_menu, "Add Sound from Link…", self.add_sound_manually, "Ctrl+L")
         self._add_action(file_menu, "Import Sound Pack…", self.import_sound_pack)
         self._add_action(file_menu, "Import TikTok Export…", self.import_tiktok_favorite_sounds_export)
         file_menu.addSeparator()
@@ -5409,6 +5542,24 @@ class SoundVaultWindow(QMainWindow):
         if resp == QMessageBox.StandardButton.Yes:
             self.download_and_import()
 
+    def add_sound_manually(self) -> None:
+        """Queue hand-pasted links — the no-phone-required way to add a sound."""
+        dialog = AddSoundDialog(self.vm, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        counts = dialog.result_counts or {}
+        queued, skipped, rejected = counts.get("queued", 0), counts.get("skipped", 0), counts.get("rejected", 0)
+        parts = [f"Queued {queued} link(s)"]
+        if skipped:
+            parts.append(f"{skipped} already queued")
+        if rejected:
+            parts.append(f"{rejected} rejected (unsafe/unsupported URL)")
+        self.refresh_inbox()
+        self.show_view("inbox")
+        self.statusBar().showMessage(", ".join(parts) + ".", 8000)
+        if queued and dialog.wants_import_now():
+            self.download_and_import()
+
     def import_sound_pack(self) -> None:
         selected, _filter = QFileDialog.getOpenFileName(
             self,
@@ -5991,7 +6142,12 @@ QSlider::handle:horizontal {
         stop:0 #ffffff, stop:1 #b793ff);
     border: 1px solid #0a0518;
     width: 14px;
-    margin: -5px 0;
+    /* Negative HORIZONTAL margin (= half the 14px handle + its 1px borders) lets the
+       handle overhang the groove, so the playhead's travel spans the full bar. With
+       `margin: -5px 0` Qt insets the handle's centre by half a handle at each end, so
+       the playhead stopped ~1.8% shy of the right edge — on a 5-minute track that reads
+       as ~6 seconds of error right where the track ends. */
+    margin: -5px -8px;
     border-radius: 7px;
 }
 QSlider::handle:horizontal:hover {

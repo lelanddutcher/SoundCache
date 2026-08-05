@@ -466,6 +466,62 @@ class LibraryViewModel:
     # Hosts a downloaded pack is allowed to reference (the platforms we ingest).
     _PACK_ALLOWED_HOSTS = ("tiktok.com", "instagram.com", "youtube.com", "youtu.be")
 
+    # Grab http(s) links out of arbitrary pasted text, plus bare "tiktok.com/…" forms
+    # (share sheets and chat apps mangle links in both directions).
+    _LINK_RE = re.compile(
+        r"(?:https?://[^\s<>\"']+)"
+        r"|(?:\b(?:www\.)?(?:vm\.|vt\.|m\.)?(?:tiktok\.com|instagram\.com|youtube\.com|youtu\.be)/[^\s<>\"']+)",
+        re.IGNORECASE,
+    )
+
+    def add_manual_links(self, text: str, *, source: str = "manual") -> dict[str, Any]:
+        """Queue hand-entered links (paste a URL, a list, or messy text containing them)
+        into the SAME inbox the relay feeds, so manual adds inherit the whole chain of
+        custody: receipts, dedup, retries, and the existing "Download & import" worker.
+
+        Idempotent — a URL already queued is skipped, not duplicated. Returns
+        ``{queued, skipped, rejected, urls}``."""
+        from urllib.parse import urlparse
+
+        from sound_vault.url_safety import is_safe_public_url
+
+        counts = {"queued": 0, "skipped": 0, "rejected": 0}
+        found = self._LINK_RE.findall(text or "")
+        if not found:
+            return {**counts, "urls": [], "reason": "no links found in the pasted text"}
+
+        def _host_ok(url: str) -> bool:
+            try:
+                host = (urlparse(url).hostname or "").lower()
+            except ValueError:
+                return False
+            return any(host == h or host.endswith("." + h) for h in self._PACK_ALLOWED_HOSTS)
+
+        existing = self.inbox.all_items()
+        seen_urls = {i.url for i in existing}
+        to_add: list[dict] = []
+        queued_urls: list[str] = []
+        for raw in found:
+            url = str(raw).strip().rstrip(").,;'\"")
+            if not url:
+                continue
+            if not url.lower().startswith(("http://", "https://")):
+                url = "https://" + url  # bare tiktok.com/… paste
+            if not is_safe_public_url(url) or not _host_ok(url):
+                counts["rejected"] += 1
+                continue
+            if url in seen_urls:
+                counts["skipped"] += 1
+                continue
+            to_add.append({"url": url, "source": source, "relay_id": f"{source}:{url}", "note": "Added manually"})
+            seen_urls.add(url)
+            queued_urls.append(url)
+            counts["queued"] += 1
+        if to_add:
+            self.inbox.add_urls_bulk(to_add)
+        write_event("inbox.manual_add", **{k: str(v) for k, v in counts.items()})
+        return {**counts, "urls": queued_urls}
+
     def import_sound_pack(self, path: "Path | str") -> dict[str, Any]:
         """Queue sounds into the inbox so "Download & import" fetches them with the
         user's own session. Accepts EITHER a Sound Cache sound-pack JSON (``packs``)
