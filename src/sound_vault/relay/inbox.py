@@ -142,6 +142,10 @@ class InboxStore:
             return []
         if registered.device_id != device_id:
             return []
+        # Keep an actively-polled pairing alive (mirrors PgInboxStore.poll). Without this a
+        # working setup dies silently 30 days after pairing: submits 404 while polls return
+        # an empty list that looks exactly like "nothing waiting".
+        self.register_pair_code(pair_code, device_id=device_id)
         delivered: list[InboxItem] = []
         remaining: list[InboxItem] = []
         expired_ids: list[str] = []

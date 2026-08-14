@@ -1929,6 +1929,21 @@ class SoundVaultWindow(QMainWindow):
             write_event("gui.auto_poll_failed", **exception_fields(error))
             self.statusBar().showMessage("Relay poll failed — check Settings (see logs).", 5000)
             return
+        # A lapsed pairing polls exactly like an empty queue, so shares from the phone get
+        # rejected at submit while this window shows nothing at all. Say it plainly — once
+        # per lapse, not every 60s — so it can't go unnoticed for weeks again.
+        pairing_state = getattr(self.vm, "last_relay_pairing_state", "unknown")
+        if pairing_state == "unknown_or_expired":
+            if not getattr(self, "_pairing_lapse_reported", False):
+                self._pairing_lapse_reported = True
+                write_event("gui.relay_pairing_expired")
+                self.playback_status.setText("Relay pairing expired — re-pair your iPhone in Settings")
+                self.statusBar().showMessage(
+                    "Relay pairing expired — anything shared from your phone is being rejected. "
+                    "Re-pair in Settings → Pair iPhone.", 15000
+                )
+        elif pairing_state == "ok":
+            self._pairing_lapse_reported = False
         if items:
             self.refresh_inbox()
             self.refresh_review_queues()

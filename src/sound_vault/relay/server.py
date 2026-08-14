@@ -321,15 +321,23 @@ def poll(
     pair_code: str = Query(max_length=64),
     x_device_id: str = Header(default=""),
     x_device_secret: str = Header(default=""),
-) -> dict[str, list[dict[str, str]]]:
+) -> dict[str, object]:  # "items" is a list; "pairing" is a status string
     enforce_rate_limit(request, bucket="inbox_poll")
     if not x_device_id or not x_device_secret:
         raise HTTPException(status_code=401, detail="missing device credentials")
     items = inbox.poll(device_id=x_device_id, device_secret=x_device_secret, pair_code=pair_code)
+    # A poll for an unknown/expired pairing returns an empty list, exactly like a healthy
+    # empty queue — so a lapsed pairing was invisible: the phone's shares 404'd at submit
+    # while the desktop happily reported "nothing waiting". Report the pairing state so the
+    # desktop can say so out loud. Extra key only: older clients read "items" and ignore it.
+    pairing_ok = inbox.can_accept_pair_code(pair_code)
     # Never pass the device secret into the log call — even though log_relay_event
     # redacts "*secret*" keys, the raw value would sit in this frame for a debugger.
-    log_relay_event("poll", pair_code=pair_code, device_id=x_device_id)
-    return {"items": [{"id": item.id, "url": item.url, "source": item.source, "note": item.note} for item in items]}
+    log_relay_event("poll", pair_code=pair_code, device_id=x_device_id, pairing_ok=str(pairing_ok))
+    return {
+        "items": [{"id": item.id, "url": item.url, "source": item.source, "note": item.note} for item in items],
+        "pairing": "ok" if pairing_ok else "unknown_or_expired",
+    }
 
 
 @app.post("/v1/events/save")

@@ -666,7 +666,14 @@ class LibraryViewModel:
             device_secret=device_secret,
             get_json=get_json,
         )
-        return client.poll_to_inbox(self.inbox_path)
+        try:
+            return client.poll_to_inbox(self.inbox_path)
+        finally:
+            # Surfaced by the UI: an expired pairing polls exactly like an empty queue, so
+            # without this the desktop reports "nothing waiting" while the phone's shares
+            # are being rejected. Stashed rather than returned to keep the signature (and
+            # every caller/test) unchanged.
+            self.last_relay_pairing_state = getattr(client, "pairing_state", "unknown")
 
     def pending_inbox(self) -> list[ShortcutInboxItem]:
         return self.inbox.pending()

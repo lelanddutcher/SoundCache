@@ -44,6 +44,8 @@ class RelayClient:
         self.device_secret = device_secret
         self.pair_code = pair_code
         self._get_json = get_json
+        # Set from each poll: "ok", "unknown_or_expired", or "unknown" (relay didn't say).
+        self.pairing_state = "unknown"
 
     def poll(self) -> list[RelayInboxItem]:
         payload = self._get_json(
@@ -52,6 +54,11 @@ class RelayClient:
             headers={"x-device-id": self.device_id, "x-device-secret": self.device_secret},
             timeout=20.0,
         )
+        # The relay reports whether the pairing itself is still alive. A lapsed pairing
+        # polls exactly like an empty queue (200, no items) while the phone's shares are
+        # rejected at submit, so without this the desktop cannot tell the difference.
+        # Older relays omit the key — absence means "no opinion", never "expired".
+        self.pairing_state = str(payload.get("pairing") or "").strip() or "unknown"
         items = []
         for item in payload.get("items", []):
             if not isinstance(item, dict):

@@ -155,6 +155,16 @@ class PostgresInboxStore:
                 return []
             if str(pair_row[1]) != device_id:
                 return []
+            # Keep a pairing that is actively in use alive. Pair codes carry a 30-day TTL,
+            # and nothing used to refresh it, so a working setup silently died 30 days after
+            # pairing: submits started 404ing and polls returned an empty list, which is
+            # indistinguishable from "nothing waiting". The desktop is polling right now with
+            # a valid device secret, so this pairing is demonstrably live — push the expiry
+            # out. An abandoned pairing still lapses on schedule.
+            cur.execute(
+                "UPDATE pair_codes SET expires_at = %s WHERE pair_code_hash = %s",
+                (now + self._pair_code_ttl_seconds, wanted),
+            )
             cur.execute("DELETE FROM inbox_items WHERE expires_at < %s", (now,))
             cur.execute(
                 """
