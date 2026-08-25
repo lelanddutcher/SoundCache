@@ -11,14 +11,24 @@
 #          --issuer aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 #        # ...or an app-specific password (appleid.apple.com):
 #        xcrun notarytool store-credentials "SC_NOTARY" \
-#          --apple-id you@example.com --team-id PKUE74YS72 --password abcd-efgh-ijkl-mnop
+#          --apple-id you@example.com --team-id YOUR_TEAM_ID --password abcd-efgh-ijkl-mnop
 #   3. A self-contained .app already built (PyInstaller --windowed, onedir/BUNDLE, arm64).
 #
 # Usage:  packaging/sign_and_notarize.sh "dist/Sound Cache.app"
 set -euo pipefail
 
 APP="${1:?usage: sign_and_notarize.sh <path-to-.app>}"
-IDENTITY="${SC_SIGN_IDENTITY:-Developer ID Application: LELAND ANDREW DUTCHER (PKUE74YS72)}"
+# Resolve the signing identity at run time instead of naming it here. The identity
+# string embeds the Apple Team ID, and this repo is public — keep the developer's
+# identifiers out of it. Override with SC_SIGN_IDENTITY to pick a specific cert.
+IDENTITY="${SC_SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
+  | awk -F'"' '/Developer ID Application/{print $2; exit}')}"
+if [ -z "$IDENTITY" ]; then
+  echo "No 'Developer ID Application' identity in the keychain." >&2
+  echo "Check: security find-identity -v -p codesigning" >&2
+  echo "Or set SC_SIGN_IDENTITY to the exact certificate name." >&2
+  exit 1
+fi
 ENTITLEMENTS="${SC_ENTITLEMENTS:-$(dirname "$0")/entitlements.plist}"
 NOTARY_PROFILE="${SC_NOTARY_PROFILE:-SC_NOTARY}"
 ZIP="${APP%.app}-notarize.zip"

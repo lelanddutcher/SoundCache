@@ -7,7 +7,17 @@ set -euo pipefail
 
 APP="${1:?usage: make_dmg.sh <path-to-.app> [version]}"
 VERSION="${2:-0.3.0}"
-IDENTITY="${SC_SIGN_IDENTITY:-Developer ID Application: LELAND ANDREW DUTCHER (PKUE74YS72)}"
+# Resolve the signing identity at run time instead of naming it here. The identity
+# string embeds the Apple Team ID, and this repo is public — keep the developer's
+# identifiers out of it. Override with SC_SIGN_IDENTITY to pick a specific cert.
+IDENTITY="${SC_SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
+  | awk -F'"' '/Developer ID Application/{print $2; exit}')}"
+if [ -z "$IDENTITY" ]; then
+  echo "No 'Developer ID Application' identity in the keychain." >&2
+  echo "Check: security find-identity -v -p codesigning" >&2
+  echo "Or set SC_SIGN_IDENTITY to the exact certificate name." >&2
+  exit 1
+fi
 NOTARY_PROFILE="${SC_NOTARY_PROFILE:-SC_NOTARY}"
 VOLNAME="Sound Cache"
 OUT="dist/SoundCache-${VERSION}-arm64.dmg"

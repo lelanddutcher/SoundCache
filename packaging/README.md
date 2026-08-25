@@ -11,10 +11,12 @@ is the large number of nested `.dylib`/`.so` files, which each must be signed.
 
 Already in place (verified via `security find-identity -v -p codesigning`):
 
-- **Developer ID Application: LELAND ANDREW DUTCHER (PKUE74YS72)** — the signing cert.
+- A **Developer ID Application** certificate — the signing cert.
 - **Apple Developer Program membership** — implied (you cannot hold a Developer ID
   cert without it).
-- **Team ID = `PKUE74YS72`** (the 10-char string in the cert name is the Team ID).
+- **Team ID** — the 10-character string inside the cert name, e.g.
+  `Developer ID Application: Your Name (ABCDE12345)`. Read it off your own cert;
+  it is not recorded here because this repo is public.
 
 The one thing still needed: a way for `notarytool` to authenticate. It does **not**
 use the signing cert for this. Create ONE of:
@@ -33,7 +35,7 @@ xcrun notarytool store-credentials "SC_NOTARY" \
   --issuer aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 # ...or app-specific password:
 xcrun notarytool store-credentials "SC_NOTARY" \
-  --apple-id you@example.com --team-id PKUE74YS72 --password abcd-efgh-ijkl-mnop
+  --apple-id you@example.com --team-id YOUR_TEAM_ID --password abcd-efgh-ijkl-mnop
 ```
 
 You do **not** need a Developer ID *Installer* cert unless you ship a `.pkg`. For a
