@@ -5,6 +5,7 @@ Build:  ~/venvs/sound-vault/bin/pyinstaller packaging/SoundCache.spec \
             --distpath dist --workpath build/pyi --noconfirm
 Then sign + notarize with packaging/sign_and_notarize.sh.
 """
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -24,12 +25,20 @@ datas += [
 ]
 
 # Node assets for the TikTok login + capture (Playwright's JS driver). At runtime
-# tiktok_auth/factory resolve these from sys._MEIPASS when frozen. Chromium itself
-# is NOT bundled (~1.5GB) — Playwright reuses the ms-playwright browser cache, or a
-# fresh machine runs `playwright install chromium` once.
+# tiktok_auth/factory resolve these from sys._MEIPASS when frozen.
+#
+# Chromium IS bundled (see below). Relying on the shared ~/Library/Caches/ms-playwright
+# cache meant capture broke in two ways: a fresh Mac has no browser at all, and any other
+# tool installing a newer Playwright prunes the exact revision we need. Both surface only
+# as "Executable doesn't exist" at capture time.
 for _cjs in ("tiktok_login.cjs", "capture_tiktok_audio.cjs", "capture_usage_count.cjs"):
     datas += [(str(ROOT / "scripts" / _cjs), "scripts")]
 datas += [(str(ROOT / "package.json"), ".")]
+
+# Chromium is NOT added here. PyInstaller runs every Mach-O it collects through
+# process_collected_binary(), which ad-hoc re-signs it — that fails outright on
+# Chromium's nested "Google Chrome for Testing.app". The browser is copied into the
+# built .app afterwards by packaging/add_browser.sh, before signing.
 if (ROOT / "node_modules").is_dir():
     datas += [(str(ROOT / "node_modules"), "node_modules")]
 
@@ -114,12 +123,12 @@ app = BUNDLE(
     name="Sound Cache.app",
     icon=str(SRC / "sound_vault" / "ui" / "assets" / "AppIcon.icns"),
     bundle_identifier="io.soundcache.app",
-    version="0.4.1",
+    version="0.4.2",
     info_plist={
         "CFBundleName": "Sound Cache",
         "CFBundleDisplayName": "Sound Cache",
-        "CFBundleShortVersionString": "0.4.1",
-        "CFBundleVersion": "0.4.1",
+        "CFBundleShortVersionString": "0.4.2",
+        "CFBundleVersion": "0.4.2",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "12.0",
         "LSApplicationCategoryType": "public.app-category.music",

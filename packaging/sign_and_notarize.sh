@@ -69,9 +69,17 @@ find "$APP" -type f -perm -u+x -print0 \
       esac
     done
 
-echo ">> Signing nested .framework / helper .app bundles"
-find "$APP" -type d \( -name "*.framework" -o -name "*.app" \) -not -path "$APP" -print0 \
-  | while IFS= read -r -d '' b; do
+echo ">> Signing nested .framework / helper .app bundles (deepest first)"
+# Order matters once a real browser is bundled: Chromium.app contains its own helper
+# .app bundles and a versioned .framework. A containing bundle must be sealed AFTER
+# everything inside it, or sealing the parent invalidates the children's signatures and
+# notarization rejects the app. `find` yields parents before children, so sort by path
+# depth descending.
+while IFS= read -r -d '' b; do
+  printf '%d\t%s\0' "$(printf '%s' "$b" | tr -cd '/' | wc -c)" "$b"
+done < <(find "$APP" -type d \( -name "*.framework" -o -name "*.app" \) -not -path "$APP" -print0) \
+  | sort -z -rn -k1,1 \
+  | while IFS=$'\t' read -r -d '' _depth b; do
       csign --force --timestamp --options runtime --sign "$IDENTITY" "$b"
     done
 

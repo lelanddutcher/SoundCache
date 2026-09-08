@@ -14,7 +14,7 @@ async function main() {
     console.error('usage: capture_usage_count.cjs <music-url> [storage-state]');
     process.exit(2);
   }
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, channel: "chromium" });
   const contextOptions = {
     viewport: { width: 1365, height: 900 },
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',

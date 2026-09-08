@@ -37,11 +37,40 @@ def bundled_bin_dir() -> str | None:
     return None
 
 
+def bundled_browsers_dir() -> str | None:
+    """The packaged app ships its own Chromium under sys._MEIPASS/ms-playwright.
+
+    Playwright otherwise reads the SHARED cache at ~/Library/Caches/ms-playwright, which
+    is not ours: any other tool that installs a newer Playwright prunes the revision we
+    need, and a fresh Mac has no browser at all. Both leave capture dead with an
+    "Executable doesn't exist" error. Returns the bundled dir when frozen, else None.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and getattr(sys, "frozen", False):
+        d = Path(meipass) / "ms-playwright"
+        if d.is_dir():
+            return str(d)
+    return None
+
+
+def ensure_browsers_path() -> None:
+    """Point Playwright at the app's own Chromium when we ship one.
+
+    Set unconditionally over an inherited value: a stale PLAYWRIGHT_BROWSERS_PATH in the
+    user's environment would send the bundled app looking somewhere that has no browser.
+    In a source run this is a no-op and Playwright uses the normal shared cache.
+    """
+    bundled = bundled_browsers_dir()
+    if bundled:
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled
+
+
 def ensure_media_tools_on_path() -> None:
     """Idempotently put node/ffmpeg/ffprobe on PATH so they resolve under a
     Finder/launchd-launched GUI (which gets a stripped PATH). The packaged app's
     bundled bin dir goes FIRST so it's self-contained; Homebrew dirs are a fallback
     for a dev/source run."""
+    ensure_browsers_path()
     parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
     bundled = bundled_bin_dir()
     prepend = [bundled] if bundled and bundled not in parts else []

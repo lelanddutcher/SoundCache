@@ -158,7 +158,7 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url, knownSoundId = 
     contextOptions.storageState = storageState;
   }
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, channel: "chromium" });
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
 

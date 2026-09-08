@@ -1,0 +1,60 @@
+"""The app must use its OWN Chromium, not the shared Playwright cache.
+
+Playwright reads ~/Library/Caches/ms-playwright by default. That cache is not ours: a
+fresh Mac has no browser in it, and any other tool that installs a newer Playwright
+prunes the revision we need. Either way TikTok capture dies with "Executable doesn't
+exist" — which is exactly what happened on 2026-09-07, when an unrelated
+chromium-1234 install removed the chromium-1223 this app requires.
+"""
+import os
+
+from sound_vault.ingest import factory
+
+
+def test_source_run_leaves_playwright_alone(monkeypatch):
+    """Unfrozen, we must not set the variable — a dev run uses the normal shared cache."""
+    monkeypatch.delattr(factory.sys, "_MEIPASS", raising=False)
+    monkeypatch.setattr(factory.sys, "frozen", False, raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    factory.ensure_browsers_path()
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in os.environ
+    assert factory.bundled_browsers_dir() is None
+
+
+def test_frozen_app_points_at_its_bundled_browser(monkeypatch, tmp_path):
+    (tmp_path / "ms-playwright" / "chromium-1223").mkdir(parents=True)
+    monkeypatch.setattr(factory.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(factory.sys, "frozen", True, raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    factory.ensure_browsers_path()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "ms-playwright")
+
+
+def test_a_stale_inherited_value_is_overridden(monkeypatch, tmp_path):
+    """An inherited PLAYWRIGHT_BROWSERS_PATH would send the app somewhere with no browser."""
+    (tmp_path / "ms-playwright").mkdir()
+    monkeypatch.setattr(factory.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(factory.sys, "frozen", True, raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/somewhere/else")
+    factory.ensure_browsers_path()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "ms-playwright")
+
+
+def test_frozen_without_a_bundled_browser_does_not_lie(monkeypatch, tmp_path):
+    """No bundled dir (e.g. an old build): leave Playwright on its default lookup."""
+    monkeypatch.setattr(factory.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(factory.sys, "frozen", True, raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    factory.ensure_browsers_path()
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in os.environ
+
+
+def test_headless_capture_uses_the_full_chromium_build():
+    """channel:"chromium" keeps one bundled browser serving headed login AND headless
+    capture. Without it Playwright wants chromium_headless_shell, a second ~190MB
+    download that is not bundled — so capture would fail on a clean machine."""
+    from pathlib import Path
+
+    for name in ("capture_tiktok_audio.cjs", "capture_usage_count.cjs"):
+        text = (Path(__file__).resolve().parent.parent / "scripts" / name).read_text()
+        assert 'channel: "chromium"' in text, f"{name} would need the unbundled headless shell"
