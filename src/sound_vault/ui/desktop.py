@@ -1733,6 +1733,53 @@ class AddSoundDialog(QDialog):
         self.accept()
 
 
+def _failure_summary(reason: str) -> str:
+    """One readable line for an import failure, from whatever the worker reported.
+
+    Reasons arrive as raw tool output: a yt-dlp DownloadError, a Playwright stack, or an
+    ASCII-boxed installer notice. Printed verbatim they overflow the dialog, so match the
+    causes we recognise and fall back to the first meaningful line.
+    """
+    text = (reason or "").strip()
+    if not text:
+        return "Unknown error"
+    low = text.lower()
+    if "executable doesn't exist" in low or "please run the following command to download" in low:
+        return "The capture browser is not installed"
+    if "no working app info" in low:
+        return "TikTok's public extractor is blocked for this link"
+    if "storagestate" in low or "fresh auth" in low or "not connected" in low:
+        return "TikTok session missing or expired"
+    if "no audio captured" in low or "no media captured" in low:
+        return "The page served no audio (sound may be removed or region-locked)"
+    if "timeout" in low or "timed out" in low:
+        return "Timed out fetching the page"
+    if "unplayable" in low:
+        return "Downloaded file was not playable"
+    # Fall back to the first line with real content. Tool output is often wrapped in a
+    # drawn box, in ASCII or Unicode box-drawing characters — a border line is not a
+    # message, so skip any line made only of frame glyphs.
+    _BORDER = set("|-= _") | set("\u2500\u2501\u2502\u2503\u250c\u250d\u250e\u250f"
+                                 "\u2510\u2513\u2514\u2517\u2518\u251b\u2550\u2551"
+                                 "\u2554\u2557\u255a\u255d\u256c\u2560\u2563\u2566\u2569")
+    for line in text.splitlines():
+        stripped = line.strip().strip("|").strip("\u2551").strip()
+        if stripped and not set(stripped) <= _BORDER:
+            return stripped[:160]
+    return text[:160]
+
+
+def _failure_remedy(summary: str) -> str:
+    """The action that actually fixes a recognised cause, or "" when there isn't one."""
+    if summary == "The capture browser is not installed":
+        return "Fix: run  npx playwright install chromium"
+    if summary == "TikTok session missing or expired":
+        return "Fix: Settings → Connect TikTok…"
+    if summary == "TikTok's public extractor is blocked for this link":
+        return "Sound Cache falls back to its own capture browser — connect TikTok if it keeps failing."
+    return ""
+
+
 class SoundVaultWindow(QMainWindow):
     previewHydrated = Signal(int, str, object)
     updateChecked = Signal(object, bool)  # (UpdateInfo|None, manual)
@@ -4845,7 +4892,6 @@ class SoundVaultWindow(QMainWindow):
         if failures:
             sample = failures[0]
             reason = getattr(sample, "reason", "") or "unknown error"
-            more = f"\n\n(+{len(failures) - 1} more)" if len(failures) > 1 else ""
             # If the failures look like a missing/expired TikTok session, route the
             # user straight to the fix instead of showing a dead-end error.
             tiktok_failures = [o for o in failures if self._looks_like_tiktok_auth_failure(o)]
@@ -4865,12 +4911,35 @@ class SoundVaultWindow(QMainWindow):
                 if box.clickedButton() is connect:
                     self.open_tiktok_connect()
                 return
-            QMessageBox.warning(
-                self,
-                "Some imports failed",
-                f"{len(failures)} of {len(outcomes)} link(s) failed.\n\n"
-                f"Example: {getattr(sample, 'url', '')}\n{reason}{more}",
+            # Show every DISTINCT cause, not just the first failure's raw text. A batch
+            # commonly fails for two unrelated reasons at once (e.g. yt-dlp's dead TikTok
+            # extractor AND a missing Playwright browser); the old dialog printed one raw
+            # multi-line reason and hid the rest behind "(+N more)", so the second cause was
+            # invisible and the untruncated text overflowed the window.
+            groups: dict[str, list] = {}
+            for outcome in failures:
+                groups.setdefault(_failure_summary(getattr(outcome, "reason", "")), []).append(outcome)
+            lines = []
+            for summary, group in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+                count = f" ({len(group)} links)" if len(group) > 1 else ""
+                lines.append(f"• {summary}{count}")
+                fix = _failure_remedy(summary)
+                if fix:
+                    lines.append(f"    {fix}")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Some imports failed")
+            box.setText(f"{len(failures)} of {len(outcomes)} link(s) failed.")
+            box.setInformativeText("\n".join(lines))
+            # Full untruncated reasons live behind "Show Details" — scrollable, so a long
+            # stack trace can't blow up the dialog or get clipped.
+            box.setDetailedText(
+                "\n\n".join(
+                    f"{getattr(o, 'url', '')}\n{getattr(o, 'reason', '') or 'unknown error'}"
+                    for o in failures
+                )
             )
+            box.exec()
 
     @staticmethod
     def _looks_like_tiktok_auth_failure(outcome) -> bool:
