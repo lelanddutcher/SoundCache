@@ -58,3 +58,38 @@ def test_headless_capture_uses_the_full_chromium_build():
     for name in ("capture_tiktok_audio.cjs", "capture_usage_count.cjs"):
         text = (Path(__file__).resolve().parent.parent / "scripts" / name).read_text()
         assert 'channel: "chromium"' in text, f"{name} would need the unbundled headless shell"
+
+
+def test_nested_app_bundles_are_signed_with_entitlements():
+    """Bundled Chromium's helper .app bundles must keep our entitlements.
+
+    Its renderer and GPU helpers run V8, which JITs. Under the hardened runtime that is
+    killed without allow-jit + allow-unsigned-executable-memory. Signing a nested .app
+    WITHOUT --entitlements silently overwrites the entitled signature applied to the inner
+    binary earlier in the script, and the headed TikTok login window then dies on open
+    (headless capture kept working, which is why it wasn't obvious).
+    """
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parent.parent / "packaging" / "sign_and_notarize.sh").read_text()
+    bundle_pass = script.split("Signing nested .framework / helper .app bundles", 1)[1]
+    app_branch = bundle_pass.split("*.app)", 1)[1].split(";;", 1)[0]
+    assert "--entitlements" in app_branch, "nested .app bundles must be signed with entitlements"
+
+
+def test_login_window_never_touches_coreaudio():
+    """The TikTok login window must not initialise Chromium's speech/audio stack.
+
+    Chromium calls +[NSSpeechSynthesizer defaultVoice] during startup, which reaches
+    -[BabelFish _monitorAudioDevices] -> AudioObjectAddPropertyListener ->
+    HALSystem::Initialize -> mach_msg, and on this machine that never returns. The window
+    appears and the UI thread is wedged inside a run-loop callback before the login page
+    can paint. A `sample` of the hung process showed 100% of 8028 stacks parked there;
+    with these flags it is 0% and the thread sits idle in the AppKit event wait.
+    Nothing in a login window speaks or plays audio.
+    """
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parent.parent / "scripts" / "tiktok_login.cjs").read_text()
+    for flag in ("--disable-speech-api", "--disable-speech-synthesis-api", "--mute-audio"):
+        assert flag in text, f"{flag} missing — login window can wedge on CoreAudio"

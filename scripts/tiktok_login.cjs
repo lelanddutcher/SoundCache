@@ -36,7 +36,29 @@ const hasSession = (cookies) =>
 
   const browser = await chromium.launch({
     headless: false,
-    args: ["--disable-blink-features=AutomationControlled"],
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      // A login window needs no camera or microphone. Without these Chromium probes the
+      // real capture devices at startup; TCC attributes that to Sound Cache, which holds
+      // no audio-input/camera entitlement, so tccd refuses to even prompt ("Prompting
+      // policy for hardened runtime … requires entitlement … but it is missing") and the
+      // window can wedge before the user can sign in.
+      "--use-fake-device-for-media-stream",
+      "--use-fake-ui-for-media-stream",
+      // THE beachball. Chromium initialises text-to-speech during startup:
+      //   +[NSSpeechSynthesizer defaultVoice] -> +[BabelFish sharedInstance]
+      //     -> -[BabelFish _monitorAudioDevices] -> AudioObjectAddPropertyListener
+      //       -> HALSystem::Initialize -> mach_msg  ... never returns
+      // The UI thread blocks inside a run-loop callback before the login page can paint,
+      // so the window appears and is immediately unresponsive. A sample of the wedged
+      // process showed all 8028 stacks parked in that mach_msg, and the system log had
+      // CoreAudio already erroring for this process (HALC_ProxyObject … 0x10000004).
+      // Nothing in a login window speaks, so keep Chromium away from CoreAudio entirely.
+      "--disable-speech-api",
+      "--disable-speech-synthesis-api",
+      "--mute-audio",
+      "--disable-features=AudioServiceOutOfProcess,MediaSessionService",
+    ],
   });
   const context = await browser.newContext({
     viewport: { width: 1180, height: 820 },

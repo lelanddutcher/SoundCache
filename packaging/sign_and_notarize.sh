@@ -80,7 +80,20 @@ while IFS= read -r -d '' b; do
 done < <(find "$APP" -type d \( -name "*.framework" -o -name "*.app" \) -not -path "$APP" -print0) \
   | sort -z -rn -k1,1 \
   | while IFS=$'\t' read -r -d '' _depth b; do
-      csign --force --timestamp --options runtime --sign "$IDENTITY" "$b"
+      case "$b" in
+        *.app)
+          # A nested .app keeps the entitlements. Bundled Chromium's helper processes
+          # (renderer, GPU) run V8, which JITs — under the hardened runtime that is
+          # killed without allow-jit + allow-unsigned-executable-memory, and the browser
+          # dies the moment a page opens. Signing the bundle without entitlements silently
+          # OVERWRITES the entitled signature applied to its inner binary above, so the
+          # headed TikTok login window beachballed while headless capture still worked.
+          csign --force --timestamp --options runtime \
+                --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$b" ;;
+        *)
+          # Frameworks take no entitlements.
+          csign --force --timestamp --options runtime --sign "$IDENTITY" "$b" ;;
+      esac
     done
 
 echo ">> Signing the outer .app (with entitlements + hardened runtime + timestamp)"

@@ -34,9 +34,16 @@ if [ ! -d "$SRC" ]; then
   exit 1
 fi
 
+# Contents/Resources, NOT Contents/Frameworks. Frameworks may hold only frameworks and
+# dylibs; Chromium ships loose data files (ABOUT, INSTALLATION_COMPLETE) and codesign
+# then refuses to seal the outer app ("In subcomponent: .../ABOUT"). Resources is the
+# correct home for payload. sys._MEIPASS points at Frameworks, so
+# factory.bundled_browsers_dir() also checks the sibling Resources — without that the
+# app silently falls back to the shared cache, which is how 0.4.2 and 0.4.3 shipped the
+# browser as dead weight.
 DEST="$APP/Contents/Resources/ms-playwright/chromium-$REV"
 echo ">> Bundling chromium-$REV into the app"
-rm -rf "$APP/Contents/Resources/ms-playwright"
+rm -rf "$APP/Contents/Frameworks/ms-playwright" "$APP/Contents/Resources/ms-playwright"
 mkdir -p "$(dirname "$DEST")"
 /usr/bin/ditto "$SRC" "$DEST"
 echo ">> Bundled $(du -sh "$DEST" | cut -f1)"

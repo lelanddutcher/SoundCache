@@ -46,10 +46,15 @@ def bundled_browsers_dir() -> str | None:
     "Executable doesn't exist" error. Returns the bundled dir when frozen, else None.
     """
     meipass = getattr(sys, "_MEIPASS", None)
-    if meipass and getattr(sys, "frozen", False):
-        d = Path(meipass) / "ms-playwright"
-        if d.is_dir():
-            return str(d)
+    if not (meipass and getattr(sys, "frozen", False)):
+        return None
+    # _MEIPASS is Contents/Frameworks for a PyInstaller 6 onedir macOS bundle. Check the
+    # sibling Resources too: the packaging step wrote there once, which left this returning
+    # None and the app silently using the shared cache instead of the browser it ships.
+    base = Path(meipass)
+    for candidate in (base / "ms-playwright", base.parent / "Resources" / "ms-playwright"):
+        if candidate.is_dir():
+            return str(candidate)
     return None
 
 
@@ -63,6 +68,13 @@ def ensure_browsers_path() -> None:
     bundled = bundled_browsers_dir()
     if bundled:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled
+    elif getattr(sys, "frozen", False):
+        # Shipped builds must carry their own browser. Falling back to the shared cache is
+        # the exact failure this bundling exists to prevent, and it is invisible until a
+        # capture dies, so say so loudly rather than limping on.
+        from sound_vault.diagnostics import write_event
+
+        write_event("browser.bundled_missing", meipass=str(getattr(sys, "_MEIPASS", "")))
 
 
 def ensure_media_tools_on_path() -> None:
