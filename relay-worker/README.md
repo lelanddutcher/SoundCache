@@ -19,7 +19,12 @@ needs an update.
 
 Production: Worker `soundcache-relay`, D1 database `soundcache-relay`, custom domain
 `api.soundcache.io` (declared in `wrangler.jsonc`; Cloudflare manages its DNS record
-and certificate).
+and certificate). It went live on 2026-11-03 at 23:18 UTC.
+
+`https://soundcache-relay.leland-552.workers.dev` also serves the Worker, but the
+workers.dev zone rejects the Mac app's default `Python-urllib` User-Agent with Cloudflare
+error 1010. Clients must use `api.soundcache.io`. That zone has Browser Integrity Check
+and Bot Fight Mode off, so leave them off, or the Mac app's polls will be blocked.
 
 ## Develop and test
 
@@ -64,7 +69,7 @@ The first cutover therefore deletes the old `api` CNAME, then deploys.
 | Name | Kind | Default |
 | --- | --- | --- |
 | `DB` | D1 binding | `soundcache-relay` |
-| `RELAY_ADMIN_TOKEN` | secret | unset; the admin route then 404s |
+| `RELAY_ADMIN_TOKEN` | secret | unset; the admin route then 404s. Secrets are write-only, so to use the admin route set a fresh value with `wrangler secret put` |
 | `SOUND_VAULT_RELAY_RATE_LIMIT` | var | `60` requests per window per bucket (`0` disables) |
 | `SOUND_VAULT_RELAY_RATE_WINDOW_SECONDS` | var | `60` |
 

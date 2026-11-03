@@ -1,7 +1,7 @@
 """Guards against the 2026-08-05 relay outage: every route 404'd because the host
 rewrote requests to the serverless entrypoint path.
 
-The relay deploys as a single Vercel function whose entrypoint is ``api/index.py``, and
+The relay used to deploy as a single Vercel function whose entrypoint was ``api/index.py``, and
 ``vercel.json`` used to carry a catch-all rewrite ``/(.*) -> /api/index``. Vercel then
 changed internal-rewrite semantics ("Internal rewrites in backend framework projects now
 route requests using the rewritten destination path"), so FastAPI began receiving the
@@ -24,8 +24,14 @@ client = TestClient(app)
 
 
 def test_vercel_json_has_no_catch_all_rewrite():
-    """A catch-all rewrite to the entrypoint takes the whole relay down on modern Vercel."""
-    config = json.loads((Path(__file__).resolve().parent.parent / "vercel.json").read_text(encoding="utf-8"))
+    """A catch-all rewrite to the entrypoint takes the whole relay down on modern Vercel.
+
+    Production moved to the Cloudflare Worker in relay-worker/ (2026-11-03) and vercel.json
+    was removed; the guard stays so a reintroduced Vercel config can't bring the bug back."""
+    path = Path(__file__).resolve().parent.parent / "vercel.json"
+    if not path.exists():
+        return  # no Vercel config, so no rewrite can exist
+    config = json.loads(path.read_text(encoding="utf-8"))
     for rewrite in config.get("rewrites") or []:
         source = str(rewrite.get("source", ""))
         destination = str(rewrite.get("destination", ""))

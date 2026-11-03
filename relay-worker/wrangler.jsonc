@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "soundcache-relay",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "5caf5559-27ce-42ae-a0d6-37b725a89a7f",
       "migrations_dir": "migrations"
     }
   ],
