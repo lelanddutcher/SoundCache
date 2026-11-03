@@ -86,7 +86,7 @@ from sound_vault.ingest import shortcut_builder, tiktok_auth
 from sound_vault.ingest.errors import humanize_failure
 from sound_vault.ingest.factory import ensure_media_tools_on_path
 from sound_vault.net import ssl_context
-from sound_vault.settings import AppSettings, index_path_for_vault
+from sound_vault.settings import AppSettings, index_path_for_vault, normalize_relay_base_url
 from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.view_model import LibraryViewModel
 from sound_vault.vault.indexer import resolve_vault_root, transcript_state
@@ -1042,9 +1042,17 @@ class SettingsDialog(QDialog):
         actions.addWidget(close)
         layout.addLayout(actions)
 
+    def _relay_field_url(self) -> str:
+        """The relay URL field, with a dead legacy (Vercel) host swapped for the current
+        relay. The field is updated too, so the user sees the URL that is actually used."""
+        url = normalize_relay_base_url(self.relay_url.text())
+        if url != self.relay_url.text():
+            self.relay_url.setText(url)
+        return url
+
     def save_settings(self) -> None:
         self.settings.set_relay_config(
-            base_url=self.relay_url.text(),
+            base_url=self._relay_field_url(),
             pair_code=self.pair_code.text(),
             device_id=self.device_id.text(),
             device_secret=self.device_secret.text(),
@@ -1079,7 +1087,7 @@ class SettingsDialog(QDialog):
             win.retranscribe_entire_library()
 
     def create_pairing_code(self) -> None:
-        base_url = self.relay_url.text().strip().rstrip("/")
+        base_url = self._relay_field_url()
         if not base_url:
             self.result_label.setText("Enter a relay URL first.")
             return
@@ -1107,13 +1115,14 @@ class SettingsDialog(QDialog):
     def open_pair_phone(self) -> None:
         # Persist whatever is in the fields so the QR/export use current values.
         self.save_settings()
-        if not self.relay_url.text().strip() or not self.pair_code.text().strip():
+        relay_url = self._relay_field_url()
+        if not relay_url or not self.pair_code.text().strip():
             self.result_label.setText(
                 "Set a relay URL and pair code first (use “Create pairing code”), then pair your iPhone."
             )
             return
         PairPhoneDialog(
-            relay_url=self.relay_url.text().strip().rstrip("/"),
+            relay_url=relay_url,
             pair_code=self.pair_code.text().strip().upper(),
             parent=self,
         ).exec()

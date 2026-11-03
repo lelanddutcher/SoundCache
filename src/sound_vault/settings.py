@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 APP_DIR_NAME = "sound-vault"
 LEGACY_APP_DIR_NAME = ".sound-vault"
@@ -18,9 +19,26 @@ APP_DISPLAY_NAME = "Sound Cache"
 LEGACY_DISPLAY_NAME = "Sound Vault"
 
 # Public relay used out-of-the-box so a new user can pair without hunting for a
-# URL. Self-hosters can still override it in Settings. (Same backend as the
-# legacy sound-vault-relay.vercel.app host.)
+# URL. Self-hosters can still override it in Settings.
 DEFAULT_RELAY_BASE_URL = "https://api.soundcache.io"
+
+# Hosts the public relay used to run on. The relay moved to a Cloudflare Worker on
+# 2026-11-03 and the Vercel project (sound-vault-relay.vercel.app and its preview
+# hosts) was deleted, so a saved URL on one of these is dead. Self-hosting on Vercel
+# is gone too (the entrypoint was removed), so every *.vercel.app relay is legacy.
+LEGACY_RELAY_HOST_SUFFIXES = (".vercel.app",)
+
+
+def is_legacy_relay_url(url: str) -> bool:
+    """True when ``url`` points at a relay host that no longer exists."""
+    host = urlsplit(str(url or "").strip()).hostname or ""
+    return any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in LEGACY_RELAY_HOST_SUFFIXES)
+
+
+def normalize_relay_base_url(url: str) -> str:
+    """Trim ``url`` and swap a dead legacy relay host for the current public relay."""
+    url = str(url or "").strip().rstrip("/")
+    return DEFAULT_RELAY_BASE_URL if is_legacy_relay_url(url) else url
 
 
 def _named_app_dir(parent: Path) -> Path:
@@ -102,6 +120,27 @@ class AppSettings:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or user_config_dir() / "settings.json"
         self._data: dict[str, Any] = self._read()
+        self._migrate_legacy_relay()
+
+    def _migrate_legacy_relay(self) -> None:
+        """Move a pairing saved against the deleted Vercel relay to the current one.
+
+        The relay URL is saved when a pairing is created, so a user who paired before
+        the move keeps polling the dead host forever, and the Pair iPhone QR keeps
+        handing that host to the phone. The pair code, device id and secret were
+        registered in the old relay's database, which did not carry over, so they are
+        cleared too: the app then shows "Pairing code needed" and a new pairing is made
+        on the current relay."""
+        saved = self._data.get("relay_base_url")
+        if not saved or not is_legacy_relay_url(str(saved)):
+            return
+        self._data["relay_base_url"] = DEFAULT_RELAY_BASE_URL
+        for key in ("relay_pair_code", "relay_device_id", "relay_device_secret"):
+            self._data.pop(key, None)
+        try:
+            self._write()
+        except OSError:
+            pass  # read-only config dir: still use the right relay for this session
 
     def vault_root(self) -> Path:
         value = self._data.get("vault_root")
@@ -156,7 +195,7 @@ class AppSettings:
         device_id: str = "",
         device_secret: str = "",
     ) -> None:
-        self._data["relay_base_url"] = base_url.strip().rstrip("/")
+        self._data["relay_base_url"] = normalize_relay_base_url(base_url)
         self._data["relay_pair_code"] = pair_code.strip().upper()
         if device_id:
             self._data["relay_device_id"] = device_id.strip()
