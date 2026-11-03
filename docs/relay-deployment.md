@@ -2,6 +2,25 @@
 
 The relay is intentionally tiny. It moves share URLs from iOS Shortcut to the desktop app. It does not store media, TikTok credentials, or user libraries.
 
+## Production: Cloudflare Worker (since 2026-11-03)
+
+`https://api.soundcache.io` is served by the Cloudflare Worker `soundcache-relay`
+(source in [`relay-worker/`](../relay-worker/README.md)) with state in the D1 database
+`soundcache-relay`. It is wire-compatible with the FastAPI app below, so the Mac app,
+the iOS Shortcut and the soundcache.io pages did not change.
+
+- Deploy, migrate and secrets: see `relay-worker/README.md`. The only secret is
+  `RELAY_ADMIN_TOKEN` (a Worker secret, set with `wrangler secret put`).
+- `api.soundcache.io` is a Workers custom domain. Cloudflare owns its DNS record and
+  certificate, so don't add a CNAME for `api` by hand.
+- History: until 2026-11 the relay was the FastAPI app on Vercel with Neon Postgres.
+  That Vercel project was deleted and `api.soundcache.io` returned `DEPLOYMENT_NOT_FOUND`.
+  D1 started empty, so pairings made before the move must be created again (Mac app:
+  Settings, Create pairing code, then re-add the code to the Shortcut).
+
+The FastAPI app in `src/sound_vault/relay/` remains the reference implementation and
+local/self-host option, described below.
+
 ## Local run
 
 ```bash

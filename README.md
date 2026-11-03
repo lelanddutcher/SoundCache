@@ -66,7 +66,7 @@ Full [Privacy Policy](https://soundcache.io/privacy/) and [Terms of Use](https:/
 
 ## Tech
 
-Python 3.12 &nbsp;·&nbsp; PySide6 (Qt6) desktop &nbsp;·&nbsp; FastAPI relay on Vercel with Neon Postgres &nbsp;·&nbsp; SQLite FTS5 &nbsp;·&nbsp; yt-dlp and Playwright for ingest &nbsp;·&nbsp; faster-whisper and MLX for transcription.
+Python 3.12 &nbsp;·&nbsp; PySide6 (Qt6) desktop &nbsp;·&nbsp; relay on Cloudflare Workers with D1 &nbsp;·&nbsp; SQLite FTS5 &nbsp;·&nbsp; yt-dlp and Playwright for ingest &nbsp;·&nbsp; faster-whisper and MLX for transcription.
 
 ## Run it (dev)
 
