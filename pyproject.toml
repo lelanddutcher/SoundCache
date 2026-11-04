@@ -58,7 +58,8 @@ dev = [
   "yt-dlp>=2025.1",
   "psycopg[binary]>=3.1",
   "pytest>=8.2",
-  "ruff>=0.6",
+  # Pinned: ruff changes its default rules between minors (0.17 flags ~300 more).
+  "ruff>=0.15,<0.16",
   "uvicorn>=0.30",
 ]
 

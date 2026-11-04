@@ -37,7 +37,7 @@ for _flag in (
 
 # Window sizes: smallest supported → large external display.
 SIZES: list[tuple[str, int, int]] = [
-    ("1024x700", 1024, 700),
+    ("1080x700", 1080, 700),  # the window's minimum size
     ("1280x800", 1280, 800),
     ("1440x900", 1440, 900),
     ("1920x1080", 1920, 1080),

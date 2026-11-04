@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install "ruff>=0.6"
+      - run: python -m pip install "ruff==0.15.12"  # same as the dev extra's pin
       - run: ruff check src tests scripts
 
   test:
@@ -73,7 +73,7 @@ jobs:
         run: python -m pytest -q --no-header -p no:cacheprovider
 
   # Renders the real window headless from the fixture vault at five window sizes
-  # (1024×700 → 2560×1440), fails on layout problems (overlapping or squeezed
+  # (1080×700, the minimum, → 2560×1440), fails on layout problems (overlapping or squeezed
   # filter controls, an empty or sideways-scrolling track list), and uploads the
   # PNGs so a reviewer can see the UI change without building the app.
   screenshots:
