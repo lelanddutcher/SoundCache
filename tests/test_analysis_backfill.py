@@ -86,3 +86,17 @@ def test_worker_stops_between_items_when_interrupted(tmp_path):
     worker.analyzed.connect(analyzed.append)
     worker.run()
     assert analyzed == []
+
+
+def test_cached_search_matches_the_full_query_in_order_and_filters(tmp_path):
+    vm, _ = _vm(tmp_path, count=30)
+    for kwargs in ({}, {"media_filter": "missing_audio"}, {"usage_filter": "over_1k"}, {"duration_filter": "under_30"}):
+        full = [r.music_id for r in vm.db.search("", **kwargs)]
+        assert vm.db.search_ids("", **kwargs) == full
+        assert [r.music_id for r in vm.search("", **kwargs)] == full
+    hits = vm.db.search_ids("phonk")
+    assert hits and [r.music_id for r in vm.search("phonk")] == hits
+    # Cache misses (e.g. a row the view model hasn't seen) are fetched from the DB.
+    vm._records_by_id.clear()
+    assert [r.music_id for r in vm.search("")] == [r.music_id for r in vm.db.search("")]
+    assert {r.music_id for r in vm.db.get_many(hits + ["nope"])} == set(hits)

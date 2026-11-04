@@ -255,8 +255,38 @@ class IndexDatabase:
     def _select_columns(self, prefix: str = "sounds.") -> str:
         return ", ".join(f"{prefix}{column}" for column in _READ_COLUMNS)
 
-    def search(
+    def search(self, query: str, **filters) -> list[SoundRecord]:
+        """Full records matching ``query`` + filters, newest first."""
+        sql, params = self._search_sql(self._select_columns(), query, **filters)
+        with self._connect() as db:
+            rows = db.execute(sql, params).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def search_ids(self, query: str, **filters) -> list[str]:
+        """Just the music IDs ``search`` would return, in the same order.
+
+        Decoding a full row (three JSON blobs + paths) costs ~80 µs; for a 20k-row
+        library that is most of a refresh. Callers with an in-memory record cache (the
+        view model) use this and only decode the IDs they don't have."""
+        sql, params = self._search_sql("sounds.music_id", query, **filters)
+        with self._connect() as db:
+            return [str(row[0]) for row in db.execute(sql, params).fetchall()]
+
+    def get_many(self, music_ids: list[str]) -> list[SoundRecord]:
+        """Full records for ``music_ids`` (any order; missing IDs are skipped)."""
+        out: list[SoundRecord] = []
+        ids = list(dict.fromkeys(str(m) for m in music_ids))
+        with self._connect() as db:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                marks = ", ".join("?" for _ in chunk)
+                sql = f"SELECT {self._select_columns()} FROM sounds WHERE music_id IN ({marks})"
+                out.extend(self._row_to_record(row) for row in db.execute(sql, chunk).fetchall())
+        return out
+
+    def _search_sql(
         self,
+        columns: str,
         query: str,
         *,
         limit: int | None = None,
@@ -264,14 +294,14 @@ class IndexDatabase:
         media_filter: str = "all",
         status_filter: str = "all",
         usage_filter: str = "all",
-    ) -> list[SoundRecord]:
+    ) -> tuple[str, tuple]:
         normalized = query.strip().lower()
         if limit is not None:
             limit = max(1, min(int(limit), 10000))
         else:
             limit = 50000
         fts_query = self._fts_query(normalized)
-        sql = f"SELECT {self._select_columns()} FROM sounds"
+        sql = f"SELECT {columns} FROM sounds"
         clauses: list[str] = []
         params_list: list[object] = []
         if fts_query:
@@ -335,10 +365,7 @@ class IndexDatabase:
                      sounds.title COLLATE NOCASE
             LIMIT ?
         """
-        params = (*params_list, limit)
-        with self._connect() as db:
-            rows = db.execute(sql, params).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        return sql, (*params_list, limit)
 
     @staticmethod
     def _fts_query(query: str) -> str:

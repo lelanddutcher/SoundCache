@@ -165,23 +165,29 @@ class LibraryViewModel:
         status_filter: str = "all",
         usage_filter: str = "all",
     ) -> list[SoundRecord]:
-        records = self.db.search(
+        # IDs only, then records from the in-memory cache: decoding every row on each
+        # keystroke was ~2 s for a 20k-sound library. Only cache misses hit the DB.
+        ids = self.db.search_ids(
             query,
             duration_filter=duration_filter,
             media_filter=media_filter,
             status_filter=status_filter,
             usage_filter=usage_filter,
         )
+        with self._lock:
+            missing = [music_id for music_id in ids if music_id not in self._records_by_id]
+        fetched = {record.music_id: record for record in self.db.get_many(missing)} if missing else {}
         hydrated: list[SoundRecord] = []
         # Under the lock so this read-modify-write can't tear against the indexer's
         # atomic dict rebind or the import worker's record refreshes.
         with self._lock:
-            for record in records:
-                cached = self._records_by_id.get(record.music_id)
-                if cached is not None:
-                    hydrated.append(cached)
-                    continue
-                self._records_by_id[record.music_id] = record
+            for music_id in ids:
+                record = self._records_by_id.get(music_id)
+                if record is None:
+                    record = fetched.get(music_id)
+                    if record is None:
+                        continue
+                    self._records_by_id[music_id] = record
                 hydrated.append(record)
         return hydrated
 
