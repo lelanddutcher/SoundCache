@@ -414,6 +414,34 @@ def draw_icon(painter: QPainter, name: str, rect: QRect | QRectF, color: QColor,
         path.cubicTo(p(5, 18), p(19, 18), p(19, 10))
         path.moveTo(p(12, 17))
         path.lineTo(p(12, 22))
+    elif name == "shuffle":
+        path.moveTo(p(3, 7))
+        path.lineTo(p(7, 7))
+        path.cubicTo(p(12, 7), p(12, 17), p(17, 17))
+        path.lineTo(p(21, 17))
+        path.moveTo(p(3, 17))
+        path.lineTo(p(7, 17))
+        path.cubicTo(p(12, 17), p(12, 7), p(17, 7))
+        path.lineTo(p(21, 7))
+        for y in (7, 17):  # arrowheads
+            path.moveTo(p(18, y - 3))
+            path.lineTo(p(21, y))
+            path.lineTo(p(18, y + 3))
+    elif name == "repeat":
+        path.moveTo(p(4, 12))
+        path.lineTo(p(4, 10))
+        path.cubicTo(p(4, 8), p(5.5, 6.5), p(7.5, 6.5))
+        path.lineTo(p(20, 6.5))
+        path.moveTo(p(17, 3.5))
+        path.lineTo(p(20, 6.5))
+        path.lineTo(p(17, 9.5))
+        path.moveTo(p(20, 12))
+        path.lineTo(p(20, 14))
+        path.cubicTo(p(20, 16), p(18.5, 17.5), p(16.5, 17.5))
+        path.lineTo(p(4, 17.5))
+        path.moveTo(p(7, 14.5))
+        path.lineTo(p(4, 17.5))
+        path.lineTo(p(7, 20.5))
     elif name == "video":
         path.addRoundedRect(QRectF(p(2, 5), p(16, 19)), 2 * s, 2 * s)
         path.moveTo(p(16, 10))
@@ -937,6 +965,11 @@ class IconButton(QToolButton):
                 painter.setBrush(QColor(255, 255, 255, 20))
                 painter.drawEllipse(r.adjusted(2, 2, -2, -2))
             color = INK if self.isEnabled() else WAVE_OFF
+            if self.isCheckable() and self.isChecked():
+                color = CYAN
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(CYAN)
+                painter.drawEllipse(QPointF(r.center().x(), r.bottom() - 6), 2, 2)
         if self.hasFocus():
             painter.setPen(QPen(CYAN, 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -973,12 +1006,19 @@ class ElidedLabel(QLabel):
 
 class NowPlayingBar(QFrame):
     """Bottom bar (design board 1): art, title/artist, previous / play / next, a
-    waveform scrubber with elapsed and total time. Hidden until something plays."""
+    waveform scrubber with elapsed and total time, then repeat (continuous play) and
+    shuffle. It is the app's only transport, so it stays visible; with nothing
+    loaded it shows a hint and Play acts on the selected row."""
+
+    EMPTY_TITLE = "Nothing playing"
+    EMPTY_HINT = "Select a sound and press Space"
 
     previousRequested = Signal()
     toggleRequested = Signal()
     nextRequested = Signal()
     seekRequested = Signal(float)
+    shuffleRequested = Signal()
+    repeatToggled = Signal(bool)
 
     def __init__(self, artwork: ArtworkCache, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1006,7 +1046,7 @@ class NowPlayingBar(QFrame):
         text_box = QWidget()
         text_box.setObjectName("nowPlayingText")
         text_box.setLayout(text)
-        text_box.setMinimumWidth(120)
+        text_box.setMinimumWidth(170)  # room for a real title before it elides
         text_box.setMaximumWidth(280)
         layout.addWidget(text_box, 1)
         self.prev_button = IconButton("prev", "Previous sound")
@@ -1027,14 +1067,48 @@ class NowPlayingBar(QFrame):
         layout.addWidget(self.elapsed)
         layout.addWidget(self.wave, 3)
         layout.addWidget(self.total)
-        self.setVisible(False)
+        self.repeat_button = IconButton("repeat", "Continuous play: keep playing down the list")
+        self.repeat_button.setCheckable(True)
+        self.repeat_button.toggled.connect(self.repeatToggled)
+        self.repeat_button.toggled.connect(lambda _on: self.repeat_button.update())
+        self.shuffle_button = IconButton("shuffle", "Play a random sound from the list")
+        self.shuffle_button.clicked.connect(self.shuffleRequested)
+        layout.addWidget(self.repeat_button)
+        layout.addWidget(self.shuffle_button)
+        self._show_empty()
+
+    COMPACT_BELOW = 720  # px: under this the scrubber and times give way to the title
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        wide = self.width() >= self.COMPACT_BELOW
+        for widget in (self.elapsed, self.wave, self.total):
+            if widget.isVisibleTo(self) != wide:
+                widget.setVisible(wide)
+
+    def _show_empty(self) -> None:
+        self._shown_id = None
+        self.title.setText(self.EMPTY_TITLE)
+        self.artist.setText(self.EMPTY_HINT)
+        pixmap = QPixmap(88, 88)
+        pixmap.fill(RAISED)
+        painter = QPainter(pixmap)
+        draw_icon(painter, "note", pixmap.rect(), MUTED, size=40)
+        painter.end()
+        self.art.setPixmap(pixmap.scaled(44, 44, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.wave.set_peaks(None, playable=False)
+        self.wave.set_progress(0.0)
+        self.elapsed.setText("0:00")
+        self.total.setText("0:00")
+        self.set_playing(False)
 
     def set_track(self, record, peaks: list[float] | None, *, playable: bool) -> None:
-        self._record = record
         if record is None:
-            self.setVisible(False)
+            self._record = None
+            self._show_empty()
             return
-        if self._record is None or getattr(self, "_shown_id", None) != record.music_id:
+        self._record = record
+        if getattr(self, "_shown_id", None) != record.music_id:
             self.wave.set_progress(0.0)
             self.elapsed.setText("0:00")
         self._shown_id = record.music_id
@@ -1057,7 +1131,6 @@ class NowPlayingBar(QFrame):
         self.art.setPixmap(square.scaled(44, 44, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
         self.wave.set_peaks(peaks, playable=playable)
         self.total.setText(format_duration(record.duration_seconds))
-        self.setVisible(True)
 
     def record(self):
         return self._record

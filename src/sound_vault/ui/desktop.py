@@ -2225,6 +2225,7 @@ class SoundVaultWindow(QMainWindow):
         title_box.addWidget(self.vault_label)
         top.addLayout(title_box)
         top.addStretch(1)
+        top.addWidget(self._build_index_status())
         choose = QPushButton("Choose vault")
         choose.clicked.connect(self.choose_vault)
         self.rebuild_button = QPushButton("Rebuild index")
@@ -2233,7 +2234,6 @@ class SoundVaultWindow(QMainWindow):
         top.addWidget(choose)
         top.addWidget(self.rebuild_button)
         main_layout.addLayout(top)
-        main_layout.addWidget(self._build_jukebox_chrome())
 
         self.stack = QStackedWidget()
         self.library_view = self._build_library_view()
@@ -2247,6 +2247,7 @@ class SoundVaultWindow(QMainWindow):
         self.stack.addWidget(self.dedupe_view)
         self.stack.addWidget(self.worker_view)
         main_layout.addWidget(self.stack, 1)
+        main_layout.addWidget(self._build_now_playing_bar())
         shell.addWidget(main, 1)
 
         preview = self._build_preview_panel()
@@ -2403,69 +2404,12 @@ class SoundVaultWindow(QMainWindow):
         self.refresh_library_sidebar()
         self.refresh_table()
 
-    def _build_jukebox_chrome(self) -> QWidget:
-        chrome = QFrame()
-        chrome.setObjectName("chromeHeader")
-        layout = QHBoxLayout(chrome)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(14)
+    def _build_index_status(self) -> QWidget:
+        """Index status pill in the header (dot + INDEXED 1,284 / INDEXING / VAULT OFFLINE).
 
-        transport = QFrame()
-        transport.setObjectName("transportDeck")
-        transport_layout = QHBoxLayout(transport)
-        transport_layout.setContentsMargins(9, 8, 9, 8)
-        transport_layout.setSpacing(7)
-        transport_actions = [
-            ("◀◀", self.select_previous_sound, "Previous sound"),
-            ("▶", self.toggle_play_pause, "Play / pause"),
-            ("▶▶", self.select_next_sound, "Next sound"),
-        ]
-        self.transport_buttons = {}
-        for label, handler, tooltip in transport_actions:
-            button = QToolButton()
-            button.setText(label)
-            button.setObjectName("transportButton")
-            button.setToolTip(tooltip)
-            button.clicked.connect(handler)
-            self.transport_buttons[label] = button
-            transport_layout.addWidget(button)
-        self.transport_play_button = self.transport_buttons["▶"]
-        self.continuous_play_button = QToolButton()
-        self.continuous_play_button.setText("CONT")
-        self.continuous_play_button.setObjectName("transportButton")
-        self.continuous_play_button.setCheckable(True)
-        self.continuous_play_button.setToolTip("Continuous play through the current library order")
-        self.continuous_play_button.clicked.connect(self.toggle_continuous_play)
-        transport_layout.addWidget(self.continuous_play_button)
-        self.random_play_button = QToolButton()
-        self.random_play_button.setText("RND")
-        self.random_play_button.setObjectName("transportButton")
-        self.random_play_button.setToolTip("Play a random sound from the current library")
-        self.random_play_button.clicked.connect(self.play_random_sound)
-        transport_layout.addWidget(self.random_play_button)
-        layout.addWidget(transport)
-
-        display = QFrame()
-        display.setObjectName("capsuleDisplay")
-        display.setFixedHeight(56)
-        # Shrinkable: the now-playing title elides (Ignored hpolicy), so the capsule
-        # can give up width on small windows instead of forcing the whole row wider.
-        display.setMinimumWidth(140)
-        display_layout = QVBoxLayout(display)
-        display_layout.setContentsMargins(18, 8, 18, 8)
-        display_layout.setSpacing(2)
-        now_playing = QLabel("NOW PLAYING")
-        now_playing.setObjectName("displayEyebrow")
-        self.now_playing_title = QLabel("Nothing playing")
-        self.now_playing_title.setObjectName("displayTitle")
-        self.now_playing_title.setWordWrap(False)
-        self.now_playing_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        display_layout.addWidget(now_playing)
-        display_layout.addWidget(self.now_playing_title)
-        layout.addWidget(display, 1)
-
-        self.portal_tabs = {}
-
+        The old jukebox header (transport deck + NOW PLAYING capsule) is gone: the bottom
+        now-playing bar is the one transport for every view (design board 1)."""
+        self.portal_tabs = {}  # refresh_portal_tabs still feeds the archive-health panel
         status = QFrame()
         status.setObjectName("limeStatusPanel")
         status_layout = QHBoxLayout(status)
@@ -2476,8 +2420,41 @@ class SoundVaultWindow(QMainWindow):
         self.index_status_text.setObjectName("statusReadout")
         status_layout.addWidget(self.index_status_dot)
         status_layout.addWidget(self.index_status_text)
-        layout.addWidget(status)
-        return chrome
+        return status
+
+    def _build_now_playing_bar(self) -> QWidget:
+        """Bottom transport for every view: previous / play / next, a waveform scrubber,
+        continuous play (repeat) and shuffle."""
+        self.now_playing_bar = NowPlayingBar(self.track_delegate.artwork)
+        self.now_playing_bar.previousRequested.connect(self.select_previous_sound)
+        self.now_playing_bar.toggleRequested.connect(self._now_playing_toggle)
+        self.now_playing_bar.nextRequested.connect(self.select_next_sound)
+        self.now_playing_bar.seekRequested.connect(
+            lambda fraction: self.track_seek(self.playing_music_id or "", fraction)
+        )
+        self.continuous_play_button = self.now_playing_bar.repeat_button
+        self.random_play_button = self.now_playing_bar.shuffle_button
+        self.transport_play_button = self.now_playing_bar.play_button
+        self.now_playing_bar.repeatToggled.connect(lambda _on: self.toggle_continuous_play())
+        self.now_playing_bar.shuffleRequested.connect(self.play_random_sound)
+        return self.now_playing_bar
+
+    def _sync_transport(self, playing: bool) -> None:
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is not None:
+            bar.set_playing(playing)
+
+    def _cue_now_playing(self, record) -> None:
+        """With nothing playing, the bar shows the selected sound so Play starts it."""
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is None or self.playing_music_id:
+            return
+        bar.set_track(
+            record,
+            self.track_delegate.peaks.get(getattr(record, "waveform_path", None)),
+            playable=self._record_has_playable_pointer(record),
+        )
+        bar.set_playing(False)
 
     def _build_library_view(self) -> QWidget:
         view = QWidget()
@@ -2651,15 +2628,6 @@ class SoundVaultWindow(QMainWindow):
         self.library_stack.addWidget(self.track_list)
         self.library_stack.addWidget(self.table)
         layout.addWidget(self.library_stack, 1)
-        # Bottom now-playing bar (design board 1); hidden until something plays.
-        self.now_playing_bar = NowPlayingBar(self.track_delegate.artwork)
-        self.now_playing_bar.previousRequested.connect(self.select_previous_sound)
-        self.now_playing_bar.toggleRequested.connect(self._now_playing_toggle)
-        self.now_playing_bar.nextRequested.connect(self.select_next_sound)
-        self.now_playing_bar.seekRequested.connect(
-            lambda fraction: self.track_seek(self.playing_music_id or "", fraction)
-        )
-        layout.addWidget(self.now_playing_bar)
         self.set_library_view_mode(self.settings.library_view_mode(), persist=False)
         return view
 
@@ -3248,9 +3216,7 @@ class SoundVaultWindow(QMainWindow):
             self.progress_slider.setValue(self._external_audio_duration_ms)
         write_event("gui.external_audio_finished", target=str(target or ""), returncode=code)
         self._set_playing(None)
-        if hasattr(self, "transport_play_button"):
-            self.transport_play_button.setText("▶")
-            self.transport_play_button.setToolTip("Play selected sound")
+        self._sync_transport(False)
         # afplay reports no EndOfMedia signal, so drive continuous play from here.
         if self.continuous_play_enabled:
             QTimer.singleShot(0, self._play_next_continuous_sound)
@@ -3314,9 +3280,7 @@ class SoundVaultWindow(QMainWindow):
             target = self.external_audio_target
             if self._play_external_audio(target, start_ms=position) and self.current_preview_record is not None:
                 self._set_playing(self.current_preview_record.music_id)
-                if hasattr(self, "transport_play_button"):
-                    self.transport_play_button.setText("▮▮")
-                    self.transport_play_button.setToolTip("Stop playback")
+                self._sync_transport(True)
             return
         if self.audio_player is not None:
             self.audio_player.setPosition(position)
@@ -4212,8 +4176,6 @@ class SoundVaultWindow(QMainWindow):
             self.preview_waveform.set_peaks(None, playable=False)
             self.preview_waveform.set_progress(0.0)
         self._set_preview_stats(None)
-        if hasattr(self, "now_playing_title"):
-            self.now_playing_title.setText("select a sound to inspect waveform, provenance, transcript, and evidence")
         self.preview_meta.setText("Audio, tags, evidence and local paths will show here.")
         self.preview_tags.setText("")
         if hasattr(self, "transcript_text"):
@@ -4287,11 +4249,7 @@ class SoundVaultWindow(QMainWindow):
     def _show_preview_record(self, record) -> None:
         self.current_preview_record = record
         self.preview_title.setText(record.title or record.music_id)
-        if hasattr(self, "now_playing_title"):
-            full = f"{record.title or record.music_id} · {record.artist or 'unknown source'}"
-            if len(full) > 48:
-                full = full[:45] + "…"
-            self.now_playing_title.setText(full)
+        self._cue_now_playing(record)
         self.preview_meta.setText(self._formatted_metadata(record))
         self.preview_tags.setText(" ".join(f"#{tag}" for tag in record.tags) or "no tags yet")
         # Set the state-specific placeholder first, so an empty transcript box
@@ -5007,9 +4965,7 @@ class SoundVaultWindow(QMainWindow):
                 self.audio_player.stop()
             if self._play_external_audio(target):
                 self._set_playing(self.current_preview_record.music_id)
-                if hasattr(self, "transport_play_button"):
-                    self.transport_play_button.setText("▮▮")
-                    self.transport_play_button.setToolTip("Stop playback")
+                self._sync_transport(True)
                 return
         if self.audio_player.source() == source and self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.audio_player.pause()
@@ -5080,9 +5036,7 @@ class SoundVaultWindow(QMainWindow):
         from PySide6.QtMultimedia import QMediaPlayer
 
         playing = state == QMediaPlayer.PlaybackState.PlayingState
-        if hasattr(self, "transport_play_button"):
-            self.transport_play_button.setText("▮▮" if playing else "▶")
-            self.transport_play_button.setToolTip("Pause playback" if playing else "Play selected sound")
+        self._sync_transport(playing)
         if playing and self.current_preview_record is not None:
             self._set_playing(self.current_preview_record.music_id)
         elif not playing:
@@ -5098,8 +5052,7 @@ class SoundVaultWindow(QMainWindow):
         player_error = self.audio_player.errorString() if self.audio_player is not None else ""
         detail = error_string or player_error or "unknown media error"
         self.playback_status.setText(f"Playback error: {detail}")
-        if hasattr(self, "transport_play_button"):
-            self.transport_play_button.setText("▶")
+        self._sync_transport(False)
 
     @staticmethod
     def _format_usage_count(value: int | None) -> str:
@@ -5767,6 +5720,7 @@ class SoundVaultWindow(QMainWindow):
                     table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.review_table.setItem(row_idx, col_idx, table_item)
         self.review_table.setSortingEnabled(True)
+        self.review_table.resizeColumnsToContents()  # queue names were cut to "unre…"
 
     def apply_review_queue_filter(self, item: QTableWidgetItem) -> None:
         payload = item.data(Qt.ItemDataRole.UserRole)
@@ -5902,9 +5856,7 @@ class SoundVaultWindow(QMainWindow):
             if self.audio_player is not None:
                 self.audio_player.stop()
             if self._play_external_audio(target):
-                if hasattr(self, "transport_play_button"):
-                    self.transport_play_button.setText("▮▮")
-                    self.transport_play_button.setToolTip("Stop playback")
+                self._sync_transport(True)
                 return
         if self._ensure_audio_player():
             self.audio_player.setSource(self._playback_source_for(target))
@@ -6367,90 +6319,6 @@ QMainWindow, QWidget {
 #previewTitle { font-family: "Quicksand", sans-serif; font-size: 16px; font-weight: 600; color: #fbedff; background: transparent; }
 #muted { color: #8c7fb5; font-size: 11px; background: transparent; }
 #onboardBody { color: #d9cef0; font-size: 12px; line-height: 150%; background: transparent; }
-
-/* Chrome header strip — glossy holo sheen */
-#chromeHeader {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #1b0f3d, stop:0.5 #2a1860, stop:1 #1b0f3d);
-    border-top: 1px solid #5a3fa0;
-    border-bottom: 1px solid #0a0518;
-    border-left: 1px solid #2a1758;
-    border-right: 1px solid #1a0c33;
-    border-radius: 14px;
-}
-#transportDeck {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #20123f, stop:0.5 #170c33, stop:1 #100826);
-    border-top: 1px solid #4a2f86;
-    border-bottom: 1px solid #050310;
-    border-left: 1px solid #1a0c33;
-    border-right: 1px solid #1a0c33;
-    border-radius: 12px;
-}
-
-/* Transport buttons — dark glass, holo on hover */
-#transportButton {
-    min-width: 34px;
-    min-height: 30px;
-    border-radius: 9px;
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #2a1858, stop:1 #170c33);
-    color: #f0e6ff;
-    border: 1px solid #1a0c33;
-    border-top: 1px solid #4a2f86;
-    padding: 4px;
-    text-align: center;
-    font-weight: 700;
-}
-#transportButton:hover {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #66ecff, stop:1 #b793ff);
-    color: #0a0518;
-    border: 1px solid #66ecff;
-}
-#transportButton:pressed {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #ff6ad5, stop:1 #b793ff);
-    color: #0a0518;
-}
-#transportButton:checked {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #66ecff, stop:1 #ff6ad5);
-    color: #0a0518;
-    border: 1px solid #ffffff;
-    font-weight: 700;
-}
-
-/* Now-Playing HUD capsule */
-#capsuleDisplay {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #100826, stop:0.06 #150a33, stop:1 #1b0f3d);
-    border: 1px solid #0a0518;
-    border-top: 1px solid #5a3fa0;
-    border-radius: 12px;
-}
-#displayEyebrow {
-    color: #66ecff;
-    font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 1.8px;
-    text-transform: uppercase;
-    background: transparent;
-}
-#displayTitle {
-    color: #fbedff;
-    font-family: "Quicksand", "Quicksand", sans-serif;
-    font-size: 14px;
-    font-weight: 600;
-    background: transparent;
-}
-#displaySubtitle {
-    color: #8c7fb5;
-    font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 10px;
-    background: transparent;
-}
 
 /* Portal tabs (vestigial) */
 #libraryTabs {

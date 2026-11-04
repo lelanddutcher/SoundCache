@@ -463,10 +463,10 @@ def test_desktop_retro_chrome_uses_itunes_limewire_early_web_motifs():
     assert "dangerButton" in source
     assert "rowPlayButton" in source
     assert "3px inset" in source
-    assert "self._build_jukebox_chrome" in source
-    assert "chromeHeader" in source
-    assert "transportDeck" in source
-    assert "capsuleDisplay" in source
+    # The jukebox header is gone; the bottom now-playing bar is the one transport.
+    assert "self._build_jukebox_chrome" not in source
+    assert "self._build_now_playing_bar()" in source
+    assert "self._build_index_status()" in source
     assert "sourceGroup" in source
     assert "limeStatusDot" in source
     assert "libraryTabs" in source
@@ -482,7 +482,7 @@ def test_desktop_retro_chrome_uses_itunes_limewire_early_web_motifs():
 def test_desktop_chrome_controls_are_wired_to_real_behavior():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
-    assert "transport_actions" in source
+    assert "self.now_playing_bar.previousRequested.connect(self.select_previous_sound)" in source
     assert "self.select_previous_sound" in source
     assert "self.play_selected_sound" in source
     assert "self.pause_playback" in source
@@ -517,7 +517,7 @@ def test_desktop_inspector_scrolls_and_restores_saved_selection():
     assert "self._pending_selected_music_id" in source
     assert "state.get(\"selected_music_id\")" in source
     assert "selected_music_id = self._selected_music_id() or self._pending_selected_music_id" in source
-    assert "self.now_playing_title.setText" in source
+    assert "self._cue_now_playing(record)" in source
 
 
 def test_desktop_inspector_opens_associated_video_assets_and_normalizes_artwork():

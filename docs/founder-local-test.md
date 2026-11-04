@@ -86,6 +86,8 @@ Keyboard [4]
 
 Now playing [2]
 - [ ] The bottom bar shows the playing sound's art, title and time. Prev/next step through the list, and the bar's waveform seeks.
+- [ ] The bar is on every view (Inbox, Review, Dedupe, Worker too). With nothing playing it shows the selected sound, and its Play starts that sound.
+- [ ] Repeat (continuous play) keeps playing down the list; shuffle plays a random sound. These replace the old CONT / RND buttons in the top header, which is gone.
 - [ ] Starting a different sound resets the bar's progress. Long titles end in "…" rather than pushing the controls.
 
 Sidebar [5]

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from sound_vault.ui.track_list import (  # noqa: E402
     RECORD_ROLE,
+    NowPlayingBar,
     format_bpm,
     format_duration,
     format_uses,
@@ -290,7 +291,7 @@ def test_accessible_text_names_each_row(window):
 
 def test_now_playing_bar_follows_playback(window, monkeypatch):
     bar = window.now_playing_bar
-    assert not bar.isVisible()  # nothing played yet
+    assert bar.isVisible()  # the one transport: always there, even before anything plays
     model = window.table.model()
     record = model.index(1, 2).data(RECORD_ROLE)
 
@@ -311,6 +312,57 @@ def test_now_playing_bar_follows_playback(window, monkeypatch):
     monkeypatch.setattr(window, "play_record_by_id", played.append)
     bar.play_button.click()
     assert played == [record.music_id]  # resumes the bar's track, not the selection
+
+
+def test_now_playing_bar_cues_the_selection_until_something_plays(window, monkeypatch):
+    bar = window.now_playing_bar
+    window._set_playing(None)
+    bar.set_track(None, None, playable=False)
+    assert bar.title.full_text() == NowPlayingBar.EMPTY_TITLE
+    model = window.table.model()
+    first = model.index(0, 2).data(RECORD_ROLE)
+    second = model.index(1, 2).data(RECORD_ROLE)
+
+    window.table.selectRow(0)
+    window.update_preview_from_selection()
+    assert bar.record().music_id == first.music_id
+    assert bar.play_button.accessibleName() == "Play"
+    played = []
+    monkeypatch.setattr(window, "play_record_by_id", played.append)
+    bar.play_button.click()
+    assert played == [first.music_id]
+
+    # While a sound plays, selecting another row must not swap the bar's track.
+    window._set_playing(first.music_id)
+    window.table.selectRow(1)
+    window.update_preview_from_selection()
+    assert bar.record().music_id == first.music_id
+    assert second.music_id != first.music_id
+
+
+def test_now_playing_bar_repeat_and_shuffle(window, monkeypatch):
+    bar = window.now_playing_bar
+    assert window.continuous_play_button is bar.repeat_button
+    bar.repeat_button.click()
+    assert window.continuous_play_enabled is True and bar.repeat_button.isChecked()
+    bar.repeat_button.click()
+    assert window.continuous_play_enabled is False
+    shuffled = []
+    monkeypatch.setattr(window, "_select_library_row", lambda row, play=False: shuffled.append((row, play)))
+    bar.shuffle_button.click()
+    assert len(shuffled) == 1 and shuffled[0][1] is True
+
+
+def test_header_has_no_jukebox_chrome_and_bar_spans_views(window):
+    from PySide6.QtWidgets import QWidget
+
+    assert window.findChild(QWidget, "chromeHeader") is None
+    assert window.findChild(QWidget, "capsuleDisplay") is None
+    assert window.index_status_text.isVisible()
+    for view in ("inbox", "review", "dedupe", "worker", "library"):
+        window.show_view(view)
+        QApplication.processEvents()
+        assert window.now_playing_bar.isVisible(), view
 
 
 def test_status_cards_collapse_on_short_windows(window):
@@ -382,3 +434,18 @@ def test_inbox_tabs_filter_and_count(window):
     assert visible_statuses() == ["pending"]
     window.set_inbox_tab("all")
     assert sorted(visible_statuses()) == ["failed", "pending"]
+
+
+def test_now_playing_bar_goes_compact_on_narrow_widths():
+    _app()
+    from sound_vault.ui.track_list import ArtworkCache
+
+    bar = NowPlayingBar(ArtworkCache())
+    bar.resize(NowPlayingBar.COMPACT_BELOW - 100, 64)
+    bar.show()
+    QApplication.processEvents()
+    assert not bar.wave.isVisible() and not bar.elapsed.isVisible()
+    bar.resize(NowPlayingBar.COMPACT_BELOW + 300, 64)
+    QApplication.processEvents()
+    assert bar.wave.isVisible() and bar.total.isVisible()
+    bar.deleteLater()
