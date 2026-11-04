@@ -397,6 +397,17 @@ def draw_icon(painter: QPainter, name: str, rect: QRect | QRectF, color: QColor,
             path.lineTo(p(20, 18.5))
             path.closeSubpath()
             path.addRect(QRectF(p(5.5, 5), p(8, 19)))
+    elif name == "phone":
+        path.addRoundedRect(QRectF(p(6, 2), p(18, 22)), 3 * s, 3 * s)
+        path.moveTo(p(11, 18))
+        path.lineTo(p(13, 18))
+    elif name == "note":
+        path.moveTo(p(9, 18))
+        path.lineTo(p(9, 5))
+        path.lineTo(p(21, 3))
+        path.lineTo(p(21, 16))
+        path.addEllipse(p(6, 18), 3 * s, 3 * s)
+        path.addEllipse(p(18, 16), 3 * s, 3 * s)
     elif name == "mic":
         path.addRoundedRect(QRectF(p(9, 2), p(15, 14)), 3 * s, 3 * s)
         path.moveTo(p(5, 10))
@@ -1059,3 +1070,22 @@ class NowPlayingBar(QFrame):
         self.elapsed.setText(elapsed)
         if total:
             self.total.setText(total)
+
+
+class StrokeIcon(QWidget):
+    """A fixed-size painted icon from :func:`draw_icon` (replaces emoji glyphs)."""
+
+    def __init__(self, icon: str, size: int = 24, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.icon_name = icon
+        self.color = MUTED
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def set_color(self, color: QColor) -> None:
+        self.color = QColor(color)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        draw_icon(painter, self.icon_name, self.rect(), self.color, size=float(self.width()))

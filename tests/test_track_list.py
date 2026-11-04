@@ -320,3 +320,65 @@ def test_status_cards_collapse_on_short_windows(window):
     window.resize(1440, 900)
     QApplication.processEvents()
     assert window.stats_cards.isVisible()
+
+
+def test_sidebar_counts_match_what_each_row_shows(window):
+    window.refresh_library_sidebar()
+    buttons = window.library_bin_buttons
+    assert buttons["all"].count_text == "24"
+    for target in ("smart:missing_audio", "smart:needs_transcript", "smart:instrumental", "smart:has_videos"):
+        window.apply_library_filter(target)
+        window.refresh_table()
+        assert buttons[target].count_text == f"{len(window.current_rows):,}", target
+    window.apply_library_filter("all")
+    window.toggle_favorite_by_id(window.table.model().music_id_at(0))
+    assert window.library_bin_buttons["favorites"].count_text == "1"
+
+
+def test_connection_badges_use_painted_icons_not_emoji(window):
+    from sound_vault.ui.desktop import PairingBadge
+    from sound_vault.ui.track_list import CYAN, StrokeIcon
+
+    badge = PairingBadge()
+    assert isinstance(badge._phone, StrokeIcon)
+    badge.set_state(paired=True)
+    assert badge._phone.color == CYAN
+
+
+def test_detail_pane_shows_the_selected_sounds_stats(window):
+    model = window.table.model()
+    record = model.index(2, 2).data(RECORD_ROLE)
+    window._show_preview_record(record)
+    stats = window.preview_stat_values
+    from sound_vault.ui.track_list import format_duration, format_uses
+
+    assert stats["uses"].text() == format_uses(record.usage_count)
+    assert stats["length"].text() == format_duration(record.duration_seconds)
+    assert stats["videos"].text() == f"{record.associated_video_count:,}"
+    assert stats["added"].text() != ""
+    window.clear_preview()
+    assert all(label.text() == "—" for label in stats.values())
+
+
+def test_inbox_tabs_filter_and_count(window):
+    store = window.vm.inbox
+    a = store.add_url("https://www.tiktok.com/music/sound-1", source="ios_shortcut")
+    store.add_url("https://www.tiktok.com/music/sound-2", source="manual")
+    store.mark_failed(a.id, "TikTok session missing or expired")
+    window.refresh_inbox()
+    tabs = window.inbox_tabs
+    assert (tabs["all"].text(), tabs["waiting"].text(), tabs["failed"].text()) == ("All 2", "Waiting 1", "Failed 1")
+
+    def visible_statuses():
+        return [
+            window.inbox_table.item(r, 3).text()
+            for r in range(window.inbox_table.rowCount())
+            if not window.inbox_table.isRowHidden(r)
+        ]
+
+    window.set_inbox_tab("failed")
+    assert visible_statuses() == ["failed"]
+    window.set_inbox_tab("waiting")
+    assert visible_statuses() == ["pending"]
+    window.set_inbox_tab("all")
+    assert sorted(visible_statuses()) == ["failed", "pending"]

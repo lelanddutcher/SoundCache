@@ -93,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     app.processEvents()
     window.vm.rebuild_index()
     window.refresh_table()
+    window._update_sidebar_counts()  # what the app's index-finished handler does
     app.processEvents()
 
     problems: list[str] = []

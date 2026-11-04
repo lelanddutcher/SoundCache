@@ -49,6 +49,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -97,9 +98,13 @@ from sound_vault.settings import (
 )
 from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.track_list import (
+    CYAN,
+    MUTED,
     RECORD_ROLE,
+    ElidedLabel,
     FlowLayout,
     NowPlayingBar,
+    StrokeIcon,
     TrackListView,
     TrackRowDelegate,
     WaveformBar,
@@ -371,7 +376,29 @@ class LibraryDropButton(QPushButton):
     def __init__(self, label: str, target_id: str, parent: QWidget | None = None) -> None:
         super().__init__(label, parent)
         self.target_id = target_id
+        self.count_text = ""
         self.setAcceptDrops(True)
+
+    def set_count(self, count: int | None) -> None:
+        """Right-aligned count (design board 5); None hides it (e.g. while indexing)."""
+        self.count_text = "" if count is None else f"{count:,}"
+        self.setAccessibleName(f"{self.text()}, {self.count_text}" if self.count_text else self.text())
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        if not self.count_text:
+            return
+        painter = QPainter(self)
+        painter.setPen(QColor("#c5b3e6"))
+        font = painter.font()
+        font.setPixelSize(12)
+        painter.setFont(font)
+        painter.drawText(
+            self.rect().adjusted(0, 0, -12, 0),
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            self.count_text,
+        )
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt override
         can_drop = self.target_id == "favorites" or self.target_id.startswith("bin:")
@@ -650,8 +677,7 @@ class PairingBadge(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(10)
-        self._phone = QLabel("📱")
-        self._phone.setStyleSheet("font-size:22px;background:transparent;")
+        self._phone = StrokeIcon("phone", 22, self)
         col = QVBoxLayout()
         col.setSpacing(1)
         self._title = QLabel("iPhone paired")
@@ -673,11 +699,11 @@ class PairingBadge(QFrame):
         if paired:
             self._title.setText("iPhone paired")
             self._sub.setText(detail or "ready to catch shares")
-            self._phone.setText("📱")
+            self._phone.set_color(CYAN)
         else:
             self._title.setText("iPhone not paired")
             self._sub.setText("open Settings to pair")
-            self._phone.setText("📱")
+            self._phone.set_color(MUTED)
 
 
 class TikTokStatusBadge(QFrame):
@@ -693,8 +719,7 @@ class TikTokStatusBadge(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(10)
-        self._icon = QLabel("🎵")
-        self._icon.setStyleSheet("font-size:22px;background:transparent;")
+        self._icon = StrokeIcon("note", 22, self)
         col = QVBoxLayout()
         col.setSpacing(1)
         self._title = QLabel("TikTok connected")
@@ -721,11 +746,11 @@ class TikTokStatusBadge(QFrame):
                 self._sub.setText(f"session active · {status.days_left}d left")
             else:
                 self._sub.setText("ready to grab sounds")
-            self._icon.setText("🎵")
+            self._icon.set_color(CYAN)
         else:
             self._title.setText("TikTok not connected")
             self._sub.setText("tap to connect → grab sounds")
-            self._icon.setText("🎵")
+            self._icon.set_color(MUTED)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         if event.button() == Qt.MouseButton.LeftButton:
@@ -2249,7 +2274,7 @@ class SoundVaultWindow(QMainWindow):
         self.library_bin_buttons = {}
         sidebar_rows = [
             ("all", "All sounds", "Show full library"),
-            ("favorites", "★ Favorites", "Show favorited sounds; drop rows here to favorite"),
+            ("favorites", "Favorites", "Show favorited sounds; drop rows here to favorite"),
             ("smart:needs_transcript", "Not transcribed yet", "Sounds with audio that haven't been transcribed"),
             ("smart:instrumental", "Instrumentals", "Transcribed, but no speech was detected"),
             ("smart:missing_audio", "Missing audio", "Sounds with no local audio"),
@@ -2265,7 +2290,7 @@ class SoundVaultWindow(QMainWindow):
             self.library_bin_buttons[target_id] = button
             self.library_section_layout.addWidget(button)
         for bin_row in self.vm.library_bins():
-            button = LibraryDropButton(f"▣ {bin_row.name}", f"bin:{bin_row.id}", self.library_section)
+            button = LibraryDropButton(bin_row.name, f"bin:{bin_row.id}", self.library_section)
             button.setObjectName("libraryBinButton")
             button.setToolTip(f"Sorting bin: {bin_row.name}; drop rows here to add")
             button.clicked.connect(lambda _checked=False, value=f"bin:{bin_row.id}": self.apply_library_filter(value))
@@ -2274,6 +2299,39 @@ class SoundVaultWindow(QMainWindow):
             self.library_section_layout.addWidget(button)
         self.library_section_layout.addStretch(1)
         self._sync_library_sidebar_active_state()
+        self._update_sidebar_counts()
+
+    def _sidebar_counts(self) -> dict[str, int]:
+        """Counts for every sidebar row, from the in-memory records (no disk access:
+        the same stat-free rules the index uses, so 20k sounds take a few ms)."""
+        records = list(getattr(self.vm, "_records_by_id", {}).values())
+        favorites = set(self.vm.favorite_music_ids())
+        counts = {
+            "all": len(records),
+            "favorites": sum(1 for r in records if r.music_id in favorites),
+            "smart:needs_transcript": sum(
+                1 for r in records
+                if not (r.transcript_text or "").strip() and r.transcript_path is None and r.local_audio_path is not None
+            ),
+            "smart:instrumental": sum(
+                1 for r in records if not (r.transcript_text or "").strip() and r.transcript_path is not None
+            ),
+            "smart:missing_audio": sum(1 for r in records if r.local_audio_path is None),
+            "smart:high_popularity": sum(1 for r in records if (r.usage_count or 0) >= 100_000),
+            "smart:has_videos": sum(1 for r in records if r.associated_video_count > 0),
+        }
+        known = {r.music_id for r in records}
+        for bin_row in self.vm.library_bins():
+            counts[f"bin:{bin_row.id}"] = sum(1 for m in self.vm.library_bin_music_ids(bin_row.id) if m in known)
+        return counts
+
+    def _update_sidebar_counts(self) -> None:
+        buttons = getattr(self, "library_bin_buttons", {})
+        if not buttons:
+            return
+        counts = self._sidebar_counts() if getattr(self.vm, "_records_by_id", None) else {}
+        for target_id, button in buttons.items():
+            button.set_count(counts.get(target_id))
 
     def _sync_library_sidebar_active_state(self) -> None:
         for target_id, button in getattr(self, "library_bin_buttons", {}).items():
@@ -2660,6 +2718,26 @@ class SoundVaultWindow(QMainWindow):
         self.inbox_table.customContextMenuRequested.connect(self.open_inbox_context_menu)
         self._prepare_table(self.inbox_table, stretch_column=2)
         self.restore_table_layout("inbox_v2", self.inbox_table)
+        # Status tabs (design board 7): All / Waiting / Failed, with live counts.
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(4)
+        self.inbox_tab_group = QButtonGroup(self)
+        self.inbox_tab_group.setExclusive(True)
+        self.inbox_tabs: dict[str, QToolButton] = {}
+        for key, label in (("all", "All"), ("waiting", "Waiting"), ("failed", "Failed")):
+            tab = QToolButton()
+            tab.setObjectName("inboxTab")
+            tab.setCheckable(True)
+            tab.setText(label)
+            tab.setAccessibleName(f"Show {label.lower()} inbox items")
+            tab.clicked.connect(lambda _checked=False, k=key: self.set_inbox_tab(k))
+            self.inbox_tab_group.addButton(tab)
+            self.inbox_tabs[key] = tab
+            tabs_row.addWidget(tab)
+        tabs_row.addStretch(1)
+        self.inbox_tabs["all"].setChecked(True)
+        self.inbox_tab = "all"
+        layout.addLayout(tabs_row)
         layout.addWidget(self.inbox_table, 1)
         return view
 
@@ -2887,6 +2965,7 @@ class SoundVaultWindow(QMainWindow):
             _btn.setMinimumHeight(32)
         scroll_layout.addWidget(self.artwork_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         scroll_layout.addWidget(self.preview_title)
+        scroll_layout.addWidget(self._build_preview_stats(scroll_body))
         scroll_layout.addWidget(self.preview_waveform)
         scroll_layout.addWidget(self.progress_slider)
         scroll_layout.addWidget(self.time_label)
@@ -3892,6 +3971,7 @@ class SoundVaultWindow(QMainWindow):
             self.refresh_inbox()
             self.refresh_review_queues()
             self.refresh_worker_status()
+            self._update_sidebar_counts()
             write_event("gui.index_rebuild_complete", vault_root=str(self.vault_root), records=count)
             # Kick off a one-time background sweep that transcribes the existing
             # backlog (sounds with audio but no transcript). New imports already
@@ -4131,6 +4211,7 @@ class SoundVaultWindow(QMainWindow):
         if hasattr(self, "preview_waveform"):
             self.preview_waveform.set_peaks(None, playable=False)
             self.preview_waveform.set_progress(0.0)
+        self._set_preview_stats(None)
         if hasattr(self, "now_playing_title"):
             self.now_playing_title.setText("select a sound to inspect waveform, provenance, transcript, and evidence")
         self.preview_meta.setText("Audio, tags, evidence and local paths will show here.")
@@ -4226,6 +4307,7 @@ class SoundVaultWindow(QMainWindow):
         self.open_tiktok_sound.setEnabled(self._sound_url_for_record(record) is not None)
         self.open_spotify.setVisible(self._spotify_url_for_record(record) is not None)
         self.copy_metadata.setEnabled(True)
+        self._set_preview_stats(record)
         target = self.vm.play_target_for(record)
         self.preview_waveform.set_peaks(
             self.track_delegate.peaks.get(getattr(record, "waveform_path", None)),
@@ -4722,6 +4804,58 @@ class SoundVaultWindow(QMainWindow):
                     self.track_list.visualRect(self.track_list.model().index(row, SOUND_COL))
                 )
 
+    # Detail-pane stats grid (design board 6): value over label, three per row.
+    _PREVIEW_STATS = (("uses", "uses"), ("bpm", "BPM"), ("length", "length"),
+                      ("added", "added"), ("videos", "example videos"), ("status", "status"))
+
+    def _build_preview_stats(self, parent: QWidget) -> QWidget:
+        box = QWidget(parent)
+        box.setObjectName("previewStats")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(0, 4, 0, 4)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(8)
+        self.preview_stat_values: dict[str, QLabel] = {}
+        for index, (key, caption) in enumerate(self._PREVIEW_STATS):
+            cell = QVBoxLayout()
+            cell.setSpacing(0)
+            value = ElidedLabel("—", box)
+            value.setObjectName("previewStatValue")
+            label = QLabel(caption, box)
+            label.setObjectName("previewStatLabel")
+            cell.addWidget(value)
+            cell.addWidget(label)
+            grid.addLayout(cell, index // 3, index % 3)
+            self.preview_stat_values[key] = value
+        for column in range(3):
+            grid.setColumnStretch(column, 1)
+        return box
+
+    def _set_preview_stats(self, record) -> None:
+        values = getattr(self, "preview_stat_values", None)
+        if not values:
+            return
+        if record is None:
+            for label in values.values():
+                label.setText("—")
+            return
+        from datetime import date
+
+        from sound_vault.ui.track_list import format_bpm, format_duration, format_uses
+
+        added = (record.added_at or "")[:10]
+        try:
+            day = date.fromisoformat(added) if added else None
+            added = f"{day:%b} {day.day}" if day else "—"
+        except ValueError:
+            added = added or "—"
+        values["uses"].setText(format_uses(record.usage_count))
+        values["bpm"].setText(format_bpm(record.bpm).replace(" BPM", ""))
+        values["length"].setText(format_duration(record.duration_seconds))
+        values["added"].setText(added)
+        values["videos"].setText(f"{record.associated_video_count:,}")
+        values["status"].setText((record.status or "unreviewed").replace("_", " ").capitalize())
+
     def toggle_detail_pane(self) -> None:
         """⌘I: hide or show the detail pane (more room for the track list)."""
         panel = getattr(self, "preview_panel", None)
@@ -5131,6 +5265,32 @@ class SoundVaultWindow(QMainWindow):
                 self.inbox_table.setItem(row_idx, col_idx, table_item)
         self.inbox_table.setSortingEnabled(True)
         self.inbox_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+        self._apply_inbox_tab()
+
+    @staticmethod
+    def _inbox_bucket(status: str) -> str:
+        return "failed" if str(status).lower() in {"failed", "error"} else "waiting"
+
+    def set_inbox_tab(self, key: str) -> None:
+        self.inbox_tab = key if key in {"all", "waiting", "failed"} else "all"
+        if hasattr(self, "inbox_tabs"):
+            self.inbox_tabs[self.inbox_tab].setChecked(True)
+        self._apply_inbox_tab()
+
+    def _apply_inbox_tab(self) -> None:
+        if not hasattr(self, "inbox_tabs"):
+            return
+        rows = getattr(self, "current_inbox_rows", [])
+        counts = {"all": len(rows), "waiting": 0, "failed": 0}
+        for item in rows:
+            counts[self._inbox_bucket(item.status)] += 1
+        for key, label in (("all", "All"), ("waiting", "Waiting"), ("failed", "Failed")):
+            self.inbox_tabs[key].setText(f"{label} {counts[key]:,}")
+        status_col = 3
+        for row in range(self.inbox_table.rowCount()):
+            cell = self.inbox_table.item(row, status_col)
+            bucket = self._inbox_bucket(cell.text() if cell is not None else "")
+            self.inbox_table.setRowHidden(row, self.inbox_tab != "all" and bucket != self.inbox_tab)
 
     def _inbox_item_at(self, pos) -> "ShortcutInboxItem | None":
         """The inbox row under a context-menu position (via the id stashed in UserRole)."""
@@ -6780,6 +6940,15 @@ QLabel#nowPlayingArtist, QLabel#nowPlayingTime { font-size: 12px; color: #c5b3e6
 QLabel#nowPlayingArt { border-radius: 10px; background: transparent; }
 QWidget#nowPlayingText { background: transparent; }
 QWidget#statsCards { background: transparent; }
+QWidget#previewStats { background: transparent; }
+QToolButton#inboxTab {
+    min-height: 32px; padding: 0 14px; border-radius: 16px; border: none;
+    color: #c5b3e6; background: transparent; font-weight: 600;
+}
+QToolButton#inboxTab:checked { background: #1d1042; color: #fbedff; }
+QToolButton#inboxTab:hover { color: #fbedff; }
+QLabel#previewStatValue { font-size: 15px; font-weight: 700; color: #fbedff; background: transparent; }
+QLabel#previewStatLabel { font-size: 12px; color: #c5b3e6; background: transparent; }
 """
 
 
