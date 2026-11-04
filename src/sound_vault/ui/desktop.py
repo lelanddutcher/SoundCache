@@ -1364,6 +1364,38 @@ class _TranscriptionWorker(QThread):
             self.finished_ok.emit(0, exc)
 
 
+class _AnalysisWorker(QThread):
+    """Backfills waveform peaks + BPM for sounds imported before analysis existed.
+
+    Works through a fixed list (one ffmpeg decode per sound, ~0.1–0.3 s each), checks
+    isInterruptionRequested between items so quitting never waits on more than one."""
+
+    analyzed = Signal(str)  # music_id that gained a waveform
+    progress = Signal(int, int)  # done, total
+
+    def __init__(self, vm, targets, parent=None) -> None:
+        super().__init__(parent)
+        self._vm = vm
+        self._targets = list(targets)
+
+    def run(self) -> None:
+        total = len(self._targets)
+        write_event("gui.analysis_backfill_started", count=str(total))
+        done = ok = 0
+        for music_id, folder, audio in self._targets:
+            if self.isInterruptionRequested():
+                break
+            try:
+                if self._vm.analyze_one(music_id, folder, audio):
+                    ok += 1
+                    self.analyzed.emit(str(music_id))
+            except Exception as exc:  # noqa: BLE001 - per-item best-effort
+                write_event("gui.analysis_error", music_id=str(music_id), **exception_fields(exc))
+            done += 1
+            self.progress.emit(done, total)
+        write_event("gui.analysis_backfill_done", done=str(done), analyzed=str(ok))
+
+
 class _TranscriptionQueueWorker(QThread):
     """Persistent ASR consumer: transcribes each sound the moment it finishes
     downloading, so transcription runs concurrently with the (deliberately throttled,
@@ -3213,7 +3245,7 @@ class SoundVaultWindow(QMainWindow):
         # crash Qt with SIGABRT.
         workers = [
             getattr(self, name, None)
-            for name in ("_poll_worker", "_import_worker", "_transcribe_worker", "_transcribe_queue_worker")
+            for name in ("_poll_worker", "_import_worker", "_transcribe_worker", "_transcribe_queue_worker", "_analysis_worker")
         ]
         for worker in workers:
             if worker is not None and worker.isRunning():
@@ -3715,6 +3747,7 @@ class SoundVaultWindow(QMainWindow):
             # transcribe via the live pipeline; this catches everything that landed
             # before transcription was wired up (or in an older build).
             QTimer.singleShot(1500, self._start_backlog_transcription)
+            QTimer.singleShot(2500, self._start_analysis_backfill)
         except Exception as exc:
             self.worker_label.setText(f"Worker\nindex error: {exc}")
             self.stats_label.setText("index failed")
@@ -5074,6 +5107,31 @@ class SoundVaultWindow(QMainWindow):
         """Enrichment cycle tick: quietly queue any sound still missing a transcript.
         Cheap when there's nothing to do; only surfaces a message when it finds work."""
         self._enqueue_pending_transcriptions(announce=False)
+        self._start_analysis_backfill()
+
+    def _start_analysis_backfill(self) -> None:
+        """Compute waveforms + BPM for sounds that don't have them yet. Skips sounds that
+        already failed this session, so an undecodable file isn't retried every cycle."""
+        if _env_flag("SOUND_VAULT_DISABLE_ANALYSIS"):
+            return
+        worker = getattr(self, "_analysis_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        tried = self.__dict__.setdefault("_analysis_tried", set())
+        targets = [t for t in self.vm.analysis_targets() if t[0] not in tried]
+        if not targets:
+            return
+        tried.update(t[0] for t in targets)
+        worker = _AnalysisWorker(self.vm, targets, parent=self)
+        worker.analyzed.connect(self._on_queue_transcribed)  # same coalesced library refresh
+        worker.progress.connect(self._on_analysis_progress)
+        self._analysis_worker = worker
+        worker.start()
+
+    def _on_analysis_progress(self, done: int, total: int) -> None:
+        self._analysis_progress = (done, total)
+        if done < total and done % 25 == 0:
+            self.statusBar().showMessage(f"Drawing waveforms… {done:,}/{total:,}", 3000)
 
     def _on_queue_progress(self, done: int, enqueued: int) -> None:
         if done >= enqueued:

@@ -1208,6 +1208,34 @@ class LibraryViewModel:
         self._reindex_one(Path(folder))
         return status == "ok"
 
+    def analysis_targets(self) -> list[tuple[str, Path, Path]]:
+        """Sounds with local audio but no waveform yet (imported before 0.5, or a failed
+        analysis): ``(music_id, folder, audio_path)``. Drives the background backfill."""
+        with self._lock:
+            records = list(self._records_by_id.values())
+        targets: list[tuple[str, Path, Path]] = []
+        for record in records:
+            if record.waveform_path is not None:
+                continue
+            if record.folder_path is not None and record.local_audio_path is not None:
+                targets.append((record.music_id, Path(record.folder_path), Path(record.local_audio_path)))
+        return targets
+
+    def analyze_one(self, music_id: str, folder: "Path | str", audio: "Path | str") -> bool:
+        """Compute waveform + BPM for one sound and refresh its index row. Best-effort;
+        returns True when new analysis was written."""
+        from sound_vault.vault.analysis import analyze_sound_folder
+
+        try:
+            result = analyze_sound_folder(Path(folder), Path(audio))
+        except Exception as exc:  # noqa: BLE001 - per-item best-effort, never fatal
+            write_event("analysis.error", music_id=str(music_id), **exception_fields(exc))
+            return False
+        if result is None:
+            return False
+        self._reindex_one(Path(folder))
+        return True
+
     def _reindex_one(self, folder: Path) -> None:
         """Rebuild + upsert one sound's index row from its on-disk metadata (used
         after an incremental transcription so the new transcript is queryable without

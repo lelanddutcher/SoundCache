@@ -24,6 +24,9 @@ def _isolate_app_data(tmp_path_factory):
     # real the moment 0.4.0 shipped (manifest 0.4.0 vs the editable install's 0.3.3
     # metadata), and would hit again after every release.
     os.environ.setdefault("SOUND_VAULT_DISABLE_UPDATE_CHECK", "1")
+    # Waveform/BPM analysis shells out to ffmpeg per sound; keep it off for tests that
+    # aren't about it (tests/test_analysis*.py and the ingest analysis test turn it on).
+    os.environ.setdefault("SOUND_VAULT_DISABLE_ANALYSIS", "1")
     yield
 
 

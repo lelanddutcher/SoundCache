@@ -75,23 +75,23 @@ def _png(path: Path, rgb: tuple[int, int, int], size: int = 64) -> None:
 
 
 def click_track(bpm: float, seconds: float, *, seed: int = 0, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
-    """A kick on every beat, a softer hat on the off-beat, a little noise. int16 mono."""
+    """A kick and hat on every beat, accented on the downbeat, a little noise. int16 mono.
+
+    No off-beat hits on purpose: an off-beat hat makes double tempo a defensible
+    answer, and the fixture is the BPM oracle, so it must have exactly one."""
     rng = np.random.default_rng(seed)
     n = int(seconds * sample_rate)
     out = np.zeros(n, dtype=np.float64)
     beat = 60.0 / bpm
     i = np.arange(int(0.06 * sample_rate))
     env = np.exp(-i / (0.012 * sample_rate))
-    hits = {
-        0.0: 0.9 * env * np.sin(2 * np.pi * 90.0 * i / sample_rate),
-        beat / 2: 0.25 * env * np.sin(2 * np.pi * 2400.0 * i / sample_rate),
-    }
-    for t in np.arange(0.0, seconds, beat):
-        for offset, hit in hits.items():
-            start = int((t + offset) * sample_rate)
-            stop = min(n, start + hit.size)
-            if start < stop:
-                out[start:stop] += hit[: stop - start]
+    hit = env * (0.8 * np.sin(2 * np.pi * 90.0 * i / sample_rate) + 0.2 * np.sin(2 * np.pi * 2400.0 * i / sample_rate))
+    for beat_no, t in enumerate(np.arange(0.0, seconds, beat)):
+        accent = 1.0 if beat_no % 4 == 0 else 0.7
+        start = int(t * sample_rate)
+        stop = min(n, start + hit.size)
+        if start < stop:
+            out[start:stop] += accent * hit[: stop - start]
     # A slow swell so waveforms are not flat bars.
     out *= 0.55 + 0.45 * np.sin(np.pi * np.arange(n) / n)
     out += rng.uniform(-0.015, 0.015, n)

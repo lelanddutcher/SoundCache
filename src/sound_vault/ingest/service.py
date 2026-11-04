@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -100,6 +101,26 @@ class IngestService:
         self._now = now or _now_iso
         self._oembed_lookup = oembed_lookup
         self._transcriber = transcriber
+
+    def _analyze_into(self, folder: Path, audio_path: Path | None) -> bool:
+        """Best-effort waveform peaks + BPM for the track list; True if metadata changed.
+
+        Never fatal: a sound without a waveform still imports and shows a flat line until
+        the background backfill retries it."""
+        from sound_vault.diagnostics import exception_fields, write_event
+
+        if audio_path is None or not audio_path.exists() or os.getenv("SOUND_VAULT_DISABLE_ANALYSIS") == "1":
+            return False
+        try:
+            from sound_vault.vault.analysis import analyze_sound_folder
+
+            result = analyze_sound_folder(folder, audio_path)
+        except Exception as exc:  # noqa: BLE001 - analysis is best-effort, never fatal to ingest
+            write_event("ingest.analysis_error", folder=folder.name, **exception_fields(exc))
+            return False
+        if result is not None:
+            write_event("ingest.analysis", folder=folder.name, bpm=result.bpm, confidence=result.bpm_confidence)
+        return result is not None
 
     def _transcribe_into(self, folder: Path, audio_path: Path | None) -> bool:
         """Best-effort transcription of a packaged sound; returns True if metadata changed.
@@ -324,9 +345,10 @@ class IngestService:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-        # Transcribe the freshly-packaged audio (best-effort) so the index row
-        # carries the transcript too.
-        if self._transcribe_into(packaged.folder, packaged.audio_path):
+        # Waveform + BPM, then the transcript (both best-effort) so the index row carries
+        # everything the track list draws.
+        analyzed = self._analyze_into(packaged.folder, packaged.audio_path)
+        if self._transcribe_into(packaged.folder, packaged.audio_path) or analyzed:
             try:
                 packaged = replace(packaged, metadata=read_json_lenient(packaged.metadata_path))
             except (OSError, json.JSONDecodeError):
@@ -496,6 +518,8 @@ class IngestService:
 
         # Transcript is its own gap: transcribe existing audio in place if missing.
         audio = self._existing_audio(folder)
+        if self._analyze_into(folder, audio):
+            filled.append("waveform")
         if self._transcribe_into(folder, audio):
             filled.append("transcript")
 

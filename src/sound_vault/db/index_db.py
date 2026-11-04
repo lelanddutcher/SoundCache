@@ -111,7 +111,7 @@ _COLUMNS = (
     "vault_version", "canonical_url", "source_music_url", "music_page_title",
     "video_manifest_captured_at", "transcript_text", "transcript_language",
     "transcript_path", "duration_seconds", "user_notes", "search_text",
-    "raw_json", "evidence_paths", "associated_videos",
+    "raw_json", "evidence_paths", "associated_videos", "bpm", "waveform_path",
 )
 
 # Columns selected for read (everything except search_text), in _row_to_record order.
@@ -121,7 +121,7 @@ _READ_COLUMNS = (
     "usage_count", "source_provider", "source_confidence", "vault_version",
     "canonical_url", "source_music_url", "music_page_title", "video_manifest_captured_at",
     "transcript_text", "transcript_language", "transcript_path", "duration_seconds",
-    "user_notes", "raw_json", "evidence_paths", "associated_videos",
+    "user_notes", "raw_json", "evidence_paths", "associated_videos", "bpm", "waveform_path",
 )
 
 
@@ -156,6 +156,8 @@ def _record_values(record: SoundRecord) -> tuple:
         _dump_raw(record.raw),
         _dump_paths(record.evidence_images),
         _dump_videos(record.associated_videos),
+        record.bpm,
+        str(record.waveform_path) if record.waveform_path else "",
     )
 
 
@@ -401,6 +403,8 @@ class IndexDatabase:
             raw=_load_raw(row[24] if len(row) > 24 else None),
             evidence_images=_load_paths(row[25] if len(row) > 25 else None),
             associated_videos=_load_videos(row[26] if len(row) > 26 else None),
+            bpm=float(row[27]) if len(row) > 27 and row[27] is not None else None,
+            waveform_path=Path(str(row[28])) if len(row) > 28 and row[28] else None,
         )
 
     def stats(self) -> IndexStats:
@@ -490,6 +494,8 @@ class IndexDatabase:
                 "raw_json": "ALTER TABLE sounds ADD COLUMN raw_json TEXT NOT NULL DEFAULT ''",
                 "evidence_paths": "ALTER TABLE sounds ADD COLUMN evidence_paths TEXT NOT NULL DEFAULT ''",
                 "associated_videos": "ALTER TABLE sounds ADD COLUMN associated_videos TEXT NOT NULL DEFAULT ''",
+                "bpm": "ALTER TABLE sounds ADD COLUMN bpm REAL",
+                "waveform_path": "ALTER TABLE sounds ADD COLUMN waveform_path TEXT NOT NULL DEFAULT ''",
             }
             for column, statement in migrations.items():
                 if column not in columns:
@@ -565,7 +571,9 @@ class IndexDatabase:
                     search_text TEXT NOT NULL,
                     raw_json TEXT NOT NULL DEFAULT '',
                     evidence_paths TEXT NOT NULL DEFAULT '',
-                    associated_videos TEXT NOT NULL DEFAULT ''
+                    associated_videos TEXT NOT NULL DEFAULT '',
+                    bpm REAL,
+                    waveform_path TEXT NOT NULL DEFAULT ''
                 )
                 """
         )
