@@ -21,6 +21,16 @@ Budget: about 30 minutes, plus a build/notarize cycle if it all checks out.
   the old Vercel relay to `api.soundcache.io` and ask for a new pairing (Settings →
   Create pairing code, then scan the QR again).
 
+### Quick look without building (optional)
+
+Every push builds an unsigned Apple Silicon app in the `package` workflow. On the PR, open
+**Checks → package → Summary → Artifacts → SoundCache-unsigned-arm64**, unzip it, then
+right-click `Sound Cache.app` → **Open** (it is not signed, so a double-click is blocked).
+It already passed its own self-test in CI. Run
+`"Sound Cache.app/Contents/MacOS/Sound Cache" --self-test` to repeat that on your Mac.
+The self-test uses a throwaway vault. Opening the app normally uses your real vault, so do the
+backup above first.
+
 ## 1. Get the branch and run the tests
 
 ```bash
@@ -31,7 +41,7 @@ SOUND_VAULT_DISABLE_RELAY_POLL=1 QT_QPA_PLATFORM=offscreen \
   ~/venvs/sound-vault/bin/python -m pytest -q
 ```
 
-Expect about 680 passed, 7 skipped. (The extras add numpy and qrcode.)
+Expect about 690 passed, 7 skipped. (The extras add numpy and qrcode.)
 
 ## 2. Look at the screenshots without your vault
 
@@ -74,8 +84,20 @@ Window sizes [4]
 Keyboard [4]
 - [ ] Space plays/pauses, ↑/↓ moves, F favorites, B opens Add to bin, ⌘1–⌘5 switch views.
 
+Now playing [2]
+- [ ] The bottom bar shows the playing sound's art, title and time. Prev/next step through the list, and the bar's waveform seeks.
+- [ ] Starting a different sound resets the bar's progress. Long titles end in "…" rather than pushing the controls.
+
+Sidebar [5]
+- [ ] Each view (Library, Inbox, Review, Dedupe, Worker) shows its count, and the counts update after an import or a review.
+- [ ] On a short window (under ~860 px tall) the status cards above the list collapse so more rows fit.
+
 Detail pane [6]
 - [ ] The selected sound's waveform shows above the slider; clicking it seeks while playing.
+- [ ] The stats grid (uses, BPM, length, added, example videos, status) matches the row.
+
+Inbox [7]
+- [ ] The Inbox tabs (All / Waiting / Failed) filter the list, and each tab's count matches its rows.
 
 TikTok capture (new browser: Chrome 157, sandbox on)
 - [ ] `npm ci`, then Settings → Connect TikTok opens the login window and signing in works.
