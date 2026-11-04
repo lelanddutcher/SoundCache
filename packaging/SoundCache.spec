@@ -6,12 +6,15 @@ Build:  ~/venvs/sound-vault/bin/pyinstaller packaging/SoundCache.spec \
 Then sign + notarize with packaging/sign_and_notarize.sh.
 """
 import os
+import tomllib
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 ROOT = Path(SPECPATH).resolve().parent          # packaging/ -> repo root
 SRC = ROOT / "src"
+# One version for the bundle, Info.plist and the running app: pyproject's [project].
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 
 datas = []
 binaries = []
@@ -34,6 +37,12 @@ datas += [
 for _cjs in ("tiktok_login.cjs", "capture_tiktok_audio.cjs", "capture_usage_count.cjs", "launch_chromium.cjs"):
     datas += [(str(ROOT / "scripts" / _cjs), "scripts")]
 datas += [(str(ROOT / "package.json"), ".")]
+# Ship our dist-info so importlib.metadata reports the real version in the frozen app
+# (otherwise sound_vault/__init__.py falls back to its literal).
+try:
+    datas += copy_metadata("sound-vault-desktop")
+except Exception as exc:  # not pip-installed in this venv: the literal fallback applies
+    print(f"[spec] copy_metadata skipped: {exc}")
 
 # Chromium is NOT added here. PyInstaller runs every Mach-O it collects through
 # process_collected_binary(), which ad-hoc re-signs it — that fails outright on
@@ -123,12 +132,12 @@ app = BUNDLE(
     name="Sound Cache.app",
     icon=str(SRC / "sound_vault" / "ui" / "assets" / "AppIcon.icns"),
     bundle_identifier="io.soundcache.app",
-    version="0.4.5",
+    version=VERSION,
     info_plist={
         "CFBundleName": "Sound Cache",
         "CFBundleDisplayName": "Sound Cache",
-        "CFBundleShortVersionString": "0.4.5",
-        "CFBundleVersion": "0.4.5",
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": VERSION,
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "12.0",
         "LSApplicationCategoryType": "public.app-category.music",
