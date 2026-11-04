@@ -77,6 +77,11 @@ Keyboard [4]
 Detail pane [6]
 - [ ] The selected sound's waveform shows above the slider; clicking it seeks while playing.
 
+TikTok capture (new browser: Chrome 157, sandbox on)
+- [ ] `npm ci`, then Settings → Connect TikTok opens the login window and signing in works.
+- [ ] Paste a TikTok sound link → it imports with audio. If capture fails, check the log for `[launch] sandboxed Chromium failed` and paste it here.
+- [ ] Building the release: `packaging/add_browser.sh` bundles Chrome for Testing 157 (not Playwright's 156). Run the app from `dist/` and repeat the two checks above.
+
 Pairing (if you paired before November)
 - [ ] Settings shows `https://api.soundcache.io`, and a fresh pairing + QR works from your phone.
 
@@ -87,10 +92,14 @@ If anything is off, note the window size and paste a screenshot into the session
 Only after the checklist passes:
 
 1. Bump the version in `pyproject.toml` and `src/sound_vault/__init__.py` to 0.5.0.
-2. Build, sign, notarize and wrap, as in `packaging/README.md` ("The actual release pipeline").
-3. `gh release create v0.5.0 dist/SoundCache-0.5.0-arm64.dmg` with notes.
-4. In soundcache-web, set `latest.json` to 0.5.0 with short notes (500-character limit) and push to main.
-5. Deploy the relay CORS change: `cd relay-worker && npx wrangler deploy`.
+2. Refresh the Chromium pin: `python packaging/update_chrome_pin.py` (commit if it changed).
+3. Build with the verified pipeline in `packaging/README.md` ("The actual release pipeline"):
+   `fetch_vendor.sh` → `pip install -U -e ".[gui,ingest]"` + `npm ci` → pyinstaller →
+   `check_vendor.sh` → `add_browser.sh` → sign/notarize → DMG. These steps refuse unpatched or
+   unverified node, ffmpeg and Chromium. See `docs/security-dependencies.md`.
+4. `gh release create v0.5.0 dist/SoundCache-0.5.0-arm64.dmg` with notes.
+5. In soundcache-web, set `latest.json` to 0.5.0 with short notes (500-character limit) and push to main.
+6. Deploy the relay: `cd relay-worker && npm ci && npx wrangler deploy` (CORS change and patched tooling).
 
 ## 5. Prompt for a local Claude Code session
 

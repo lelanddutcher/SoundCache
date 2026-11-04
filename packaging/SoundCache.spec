@@ -31,7 +31,7 @@ datas += [
 # cache meant capture broke in two ways: a fresh Mac has no browser at all, and any other
 # tool installing a newer Playwright prunes the exact revision we need. Both surface only
 # as "Executable doesn't exist" at capture time.
-for _cjs in ("tiktok_login.cjs", "capture_tiktok_audio.cjs", "capture_usage_count.cjs"):
+for _cjs in ("tiktok_login.cjs", "capture_tiktok_audio.cjs", "capture_usage_count.cjs", "launch_chromium.cjs"):
     datas += [(str(ROOT / "scripts" / _cjs), "scripts")]
 datas += [(str(ROOT / "package.json"), ".")]
 
