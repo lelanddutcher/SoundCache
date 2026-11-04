@@ -33,7 +33,8 @@ PIN="$ROOT/packaging/chrome-for-testing.json"
 read -r REV PW_MAJOR < <(node -e "
 const b=require('$ROOT/node_modules/playwright-core/browsers.json');
 const c=b.browsers.find(x => x.name === 'chromium');
-process.stdout.write(c.revision + ' ' + String(c.browserVersion).split('.')[0]);
+// Trailing newline: without it \`read\` hits EOF, returns 1, and set -e aborts silently.
+process.stdout.write(c.revision + ' ' + String(c.browserVersion).split('.')[0] + '\\n');
 ")
 read -r VERSION URL SHA < <(python3 -c "
 import json,sys; p=json.load(open('$PIN')); print(p['version'], p['url'], p['sha256'])")
