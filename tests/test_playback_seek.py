@@ -138,7 +138,6 @@ def test_external_progress_anchors_to_seek_offset(tmp_path, monkeypatch):
 
 
 def test_probe_audio_duration_uses_ffprobe_and_caches(tmp_path, monkeypatch):
-    import subprocess as _subprocess
     from types import SimpleNamespace
 
     window = _window(tmp_path, monkeypatch)

@@ -27,7 +27,7 @@ class HttpError extends Error {
 
 // ---------------------------------------------------------------------------- CORS
 // Same origins as server._CORS_ORIGIN_REGEX; only cross-origin GET is allowed.
-export const CORS_ORIGIN_REGEX = /^https:\/\/(www\.)?soundcache\.io$|^https:\/\/[a-z0-9-]+\.vercel\.app$|^http:\/\/localhost(:\d+)?$/;
+export const CORS_ORIGIN_REGEX = /^https:\/\/(www\.)?soundcache\.io$|^http:\/\/localhost(:\d+)?$/;
 
 function corsPreflight(request: Request): Response {
   const origin = request.headers.get("origin") || "";

@@ -25,10 +25,10 @@ def test_count_usage_at_least(tmp_path):
 # ---- GUI fixes (offscreen) ----
 
 pytest.importorskip("PySide6")
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication  # noqa: E402 - after importorskip
 
-import sound_vault.ui.desktop as desktop_module
-from sound_vault.ui.desktop import SoundVaultWindow
+import sound_vault.ui.desktop as desktop_module  # noqa: E402 - after importorskip
+from sound_vault.ui.desktop import SoundVaultWindow  # noqa: E402 - after importorskip
 
 
 def _app() -> QApplication:
@@ -36,12 +36,14 @@ def _app() -> QApplication:
 
 
 def _seed(vault, music_id="s1", title="Hook", playable=True):
-    catalog = vault / "catalog"; catalog.mkdir(parents=True, exist_ok=True)
+    catalog = vault / "catalog"
+    catalog.mkdir(parents=True, exist_ok=True)
     sound_dir = vault / "sounds" / music_id
     sound_dir.mkdir(parents=True, exist_ok=True)
     paths = {"folder": str(sound_dir)}
     if playable:
-        audio = sound_dir / f"{music_id}.m4a"; audio.write_bytes(b"\x00a")
+        audio = sound_dir / f"{music_id}.m4a"
+        audio.write_bytes(b"\x00a")
         paths["audio"] = str(audio)
     md = {"tiktok_music_id": music_id, "tiktok_visible_title": title, "source_artist": "Creator",
           "usage_count": 5, "duration": 30, "paths": paths}
@@ -58,8 +60,11 @@ def _window(tmp_path, monkeypatch):
     _seed(vault)
     app = _app()
     w = SoundVaultWindow(vault_root=vault)
-    w.show(); app.processEvents()
-    w.vm.rebuild_index(); w.refresh_table(); app.processEvents()
+    w.show()
+    app.processEvents()
+    w.vm.rebuild_index()
+    w.refresh_table()
+    app.processEvents()
     return w
 
 
@@ -111,8 +116,10 @@ def test_continuous_play_advances_to_next_playable_row(tmp_path, monkeypatch):
     _seed(vault, "a", "Alpha")
     # add a second playable sound to the same catalog
     catalog = vault / "catalog"
-    d = vault / "sounds" / "b"; d.mkdir(parents=True)
-    audio = d / "b.m4a"; audio.write_bytes(b"\x00a")
+    d = vault / "sounds" / "b"
+    d.mkdir(parents=True)
+    audio = d / "b.m4a"
+    audio.write_bytes(b"\x00a")
     md = {"tiktok_music_id": "b", "tiktok_visible_title": "Beta", "source_artist": "C",
           "usage_count": 5, "duration": 30, "paths": {"folder": str(d), "audio": str(audio)}}
     (d / "metadata.json").write_text(json.dumps(md))
@@ -121,8 +128,11 @@ def test_continuous_play_advances_to_next_playable_row(tmp_path, monkeypatch):
     )
     app = _app()
     w = SoundVaultWindow(vault_root=vault)
-    w.show(); app.processEvents()
-    w.vm.rebuild_index(); w.refresh_table(); app.processEvents()
+    w.show()
+    app.processEvents()
+    w.vm.rebuild_index()
+    w.refresh_table()
+    app.processEvents()
     try:
         assert w.table.rowCount() == 2
         w.continuous_play_enabled = True

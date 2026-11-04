@@ -16,6 +16,7 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { chromium } = require("playwright");
+const { launchChromium } = require("./launch_chromium.cjs");
 
 // Scrape sound metadata + cover from the loaded music page; write the sidecar.
 // Best-effort: never throws out — returns true/false.
@@ -158,7 +159,7 @@ async function scrapeAndWriteMeta(page, outFolder, musicId, url, knownSoundId = 
     contextOptions.storageState = storageState;
   }
 
-  const browser = await chromium.launch({ headless: true, channel: "chromium" });
+  const browser = await launchChromium(chromium, { headless: true, channel: "chromium" });
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
 

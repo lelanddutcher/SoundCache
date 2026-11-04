@@ -69,11 +69,18 @@ def _print_diagnostics(vault_root: Path) -> None:
 def main() -> None:
     # macOS/CLI may hand us a `soundcache://…` deep link as an argv item; pull it out
     # before argparse (which would reject the unknown positional) and forward it to the GUI.
+    # Before anything touches settings, the index or Qt: a build smoke test for CI and
+    # releases (see sound_vault.selftest). Handled ahead of argparse so it stays cheap.
+    if "--self-test" in sys.argv[1:]:
+        from sound_vault.selftest import run_self_test
+
+        raise SystemExit(run_self_test())
     deeplink_urls = [a for a in sys.argv[1:] if a.startswith("soundcache://")]
     if deeplink_urls:
         sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if not a.startswith("soundcache://")]
     parser = argparse.ArgumentParser(description="Sound Cache desktop app")
     parser.add_argument("--vault", type=Path, default=None, help="Path to a Sound Cache folder")
+    parser.add_argument("--self-test", action="store_true", help="Check this build works (imports, bundled tools, analysis, window) and exit")
     parser.add_argument("--cli", action="store_true", help="Print index count instead of opening the GUI")
     parser.add_argument("--diagnose", action="store_true", help="Print launch diagnostics without importing Qt")
     parser.add_argument(

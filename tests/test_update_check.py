@@ -47,3 +47,18 @@ def test_check_for_update_rejects_non_https_download_url():
     )
     assert info is not None
     assert info.url == "https://soundcache.io/#download"  # unsafe url replaced with fallback
+
+
+def test_fallback_version_literal_matches_pyproject():
+    """A frozen app without dist-info reports sound_vault/__init__.py's literal; if it
+    drifts from pyproject, a new release calls itself the old version and the update
+    check nags forever. Bump both together (packaging/SoundCache.spec reads pyproject)."""
+    import re
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    init = (root / "src" / "sound_vault" / "__init__.py").read_text()
+    literals = set(re.findall(r'__version__ = "([^"]+)"', init))
+    assert literals == {project}, (literals, project)

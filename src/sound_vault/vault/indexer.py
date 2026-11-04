@@ -79,6 +79,9 @@ class SoundRecord:
     transcript_path: Path | None = None
     duration_seconds: float | None = None
     user_notes: str = ""
+    # From sound_vault.vault.analysis: tempo (None = unknown) and the waveform.json path.
+    bpm: float | None = None
+    waveform_path: Path | None = None
 
     @property
     def search_text(self) -> str:
@@ -793,7 +796,17 @@ def _record_from_data(
         transcript_path=transcript_context.get("path"),
         duration_seconds=_duration_from_data_or_audio(data, audio),
         user_notes=str(data.get("user_notes") or ""),
+        bpm=_optional_float(data.get("bpm")),
+        waveform_path=_waveform_from_data(folder, data, validate=read_full),
     )
+
+
+def _waveform_from_data(folder: Path | None, data: dict[str, Any], *, validate: bool) -> Path | None:
+    paths = data.get("paths")
+    raw = paths.get("waveform") if isinstance(paths, dict) else None
+    if not raw:
+        return None
+    return _existing_or_rebased_path(raw, folder) if validate else _rebased_path_no_validate(raw, folder)
 
 
 def _data_from_record(record: SoundRecord) -> dict[str, Any]:
@@ -813,6 +826,8 @@ def _data_from_record(record: SoundRecord) -> dict[str, Any]:
     data.setdefault("vault_version", record.vault_version)
     data.setdefault("canonical_url", record.canonical_url)
     data.setdefault("user_notes", record.user_notes)
+    if record.bpm is not None:
+        data.setdefault("bpm", record.bpm)
     paths = dict(data.get("paths") if isinstance(data.get("paths"), dict) else {})
     if record.folder_path is not None:
         paths.setdefault("folder", str(record.folder_path))
@@ -822,6 +837,8 @@ def _data_from_record(record: SoundRecord) -> dict[str, Any]:
         paths.setdefault("artwork", str(record.artwork_path))
     if record.transcript_path is not None:
         paths.setdefault("transcript", str(record.transcript_path))
+    if record.waveform_path is not None:
+        paths.setdefault("waveform", str(record.waveform_path))
     if paths:
         data["paths"] = paths
     return data

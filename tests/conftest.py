@@ -24,4 +24,38 @@ def _isolate_app_data(tmp_path_factory):
     # real the moment 0.4.0 shipped (manifest 0.4.0 vs the editable install's 0.3.3
     # metadata), and would hit again after every release.
     os.environ.setdefault("SOUND_VAULT_DISABLE_UPDATE_CHECK", "1")
+    # Waveform/BPM analysis shells out to ffmpeg per sound; keep it off for tests that
+    # aren't about it (tests/test_analysis*.py and the ingest analysis test turn it on).
+    os.environ.setdefault("SOUND_VAULT_DISABLE_ANALYSIS", "1")
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _tear_down_qt_before_exit():
+    """Destroy every leftover window while the QApplication still exists.
+
+    The GUI tests leave windows, dialogs and media players alive. Without this, the
+    interpreter destroys them during shutdown in whatever order its garbage collector
+    picks, after Qt has begun tearing down. With PySide6 6.12 that order sometimes
+    deletes a shared QObject twice ("QObject: shared QObject was deleted directly")
+    and the process segfaults after every test has passed, so the run exits 139."""
+    yield
+    import sys
+
+    if "PySide6.QtWidgets" not in sys.modules:
+        return  # no GUI test ran in this session
+    import gc
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    # deleteLater, not close(): close() runs each window's closeEvent, which reaches into
+    # the fake workers tests swapped in. Deletion is all the teardown needs.
+    for widget in app.topLevelWidgets():
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    gc.collect()

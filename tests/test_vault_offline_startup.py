@@ -40,11 +40,11 @@ def test_duplicate_decision_store_does_not_mkdir_on_init(tmp_path):
 
 
 pytest.importorskip("PySide6")
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication  # noqa: E402 - after importorskip
 
-from sound_vault.settings import index_path_for_vault
-from sound_vault.ui.view_model import LibraryViewModel
-from sound_vault.ui.desktop import SoundVaultWindow
+from sound_vault.settings import index_path_for_vault  # noqa: E402 - after importorskip
+from sound_vault.ui.view_model import LibraryViewModel  # noqa: E402 - after importorskip
+from sound_vault.ui.desktop import SoundVaultWindow  # noqa: E402 - after importorskip
 
 
 def _app() -> QApplication:

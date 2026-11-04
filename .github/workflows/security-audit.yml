@@ -1,0 +1,94 @@
+name: security-audit
+
+# Keeps what we ship on patched versions:
+# - pip-audit on the installed app (Linux, and macOS for the Mac-only extras),
+# - npm audit for the capture scripts' Playwright and the relay worker's tooling,
+# - on macOS, the exact release inputs: fetch + sha256-verify the pinned node/ffmpeg,
+#   bundle the pinned Chrome for Testing, then launch it through Playwright with the
+#   sandbox on and decode audio with the bundled ffmpeg.
+# Runs on every PR and push to main, and weekly so a newly published CVE shows up
+# even when nobody is changing code.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 9 * * 1"  # Mondays 09:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: pip-audit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the app as it ships (gui extras on macOS)
+        run: |
+          python -m pip install --upgrade pip
+          if [ "$RUNNER_OS" = "macOS" ]; then extras="gui,ingest,dev"; else extras="dev"; fi
+          python -m pip install -e ".[$extras]" "pip-audit>=2.9"
+      - name: pip-audit
+        run: pip-audit --progress-spinner off --skip-editable
+
+  npm:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "^22.23.4"
+      - name: Capture scripts (Playwright ships in the app)
+        run: npm audit --audit-level=high
+      - name: Relay worker tooling
+        working-directory: relay-worker
+        run: npm audit --audit-level=high
+
+  release-inputs:
+    name: release inputs (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "^24.22.2"
+      - name: Install Playwright (no browser download; we bundle our own)
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci
+      - name: Fetch + verify pinned node / ffmpeg / ffprobe
+        run: packaging/fetch_vendor.sh
+      - name: Bundle the pinned Chrome for Testing into a stub app
+        run: |
+          mkdir -p "stub/Sound Cache.app/Contents/Resources"
+          packaging/add_browser.sh "stub/Sound Cache.app"
+      - name: Launch it through Playwright with the sandbox on
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/stub/Sound Cache.app/Contents/Resources/ms-playwright
+        run: |
+          version="$(python3 -c "import json; print(json.load(open('packaging/chrome-for-testing.json'))['version'])")"
+          node scripts/verify_bundled_browser.cjs "$version"
+      - name: Bundled node runs the capture scripts' Playwright
+        run: packaging/vendor/bin/node -e "require('playwright'); console.log(process.version)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bundled ffmpeg decodes audio
+        run: |
+          python -m pip install "numpy>=1.26"
+          python tests/fixtures/fixture_vault.py fx --count 2
+          packaging/vendor/bin/ffmpeg -v error -i "$(ls fx/sounds/*/audio.wav | head -1)" -f null -

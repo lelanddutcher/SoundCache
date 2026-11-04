@@ -1,0 +1,153 @@
+name: app-ci
+
+# Desktop app tests on Linux and macOS. Both runners are free for public repos.
+# The GUI tests run headless (QT_QPA_PLATFORM=offscreen), so no display is needed.
+
+on:
+  pull_request:
+    paths-ignore: ["relay-worker/**", "docs/**", "*.md"]
+  push:
+    branches: [main]
+    paths-ignore: ["relay-worker/**", "docs/**", "*.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "ruff==0.15.12"  # same as the dev extra's pin
+      - run: ruff check src tests scripts
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple Silicon, the platform the app ships for.
+        os: [ubuntu-latest, macos-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      SOUND_VAULT_DISABLE_RELAY_POLL: "1"
+      SOUND_VAULT_DISABLE_TRANSCRIBE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # PySide6 wheels need these shared libraries on a bare Ubuntu runner; without
+      # libEGL every Qt test fails to import.
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 ffmpeg
+
+      - name: System tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Test
+        run: python -m pytest -q --no-header -p no:cacheprovider
+
+  # Renders the real window headless from the fixture vault at five window sizes
+  # (1080×700, the minimum, → 2560×1440), fails on layout problems (overlapping or squeezed
+  # filter controls, an empty or sideways-scrolling track list), and uploads the
+  # PNGs so a reviewer can see the UI change without building the app.
+  screenshots:
+    name: screenshots (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 ffmpeg
+      - name: System tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Render and check
+        run: python scripts/render_screenshots.py screenshots --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: screenshots/
+          retention-days: 14
+
+  # 20k-sound library: refresh, search keystroke, sort change, first paint and
+  # scroll-frame time against budgets (scripts/bench_library.py). Catches an O(n²)
+  # or a disk hit on the paint path before anyone with a big vault does.
+  perf:
+    name: perf 20k (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Benchmark
+        run: python scripts/bench_library.py --count 20000 --check --out bench.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench.json
+          retention-days: 14

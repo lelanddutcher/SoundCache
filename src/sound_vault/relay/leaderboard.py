@@ -2,8 +2,8 @@
 
 Records anonymized save events (sound id + platform + title/artist, no PII, no
 device secret) and aggregates a top-N leaderboard. In-memory for tests/dev; the
-same interface is backed by SQLite when a storage path is set (and by Postgres in
-the hosted Vercel deployment).
+same interface is backed by SQLite when a storage path is set, or by Postgres when
+DATABASE_URL is set. The hosted relay is the Cloudflare Worker in relay-worker/.
 """
 from __future__ import annotations
 

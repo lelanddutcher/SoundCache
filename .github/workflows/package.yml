@@ -1,0 +1,84 @@
+name: package
+
+# Builds the real Sound Cache.app (unsigned) on Apple Silicon exactly the way a release
+# is built — pinned + verified node/ffmpeg/ffprobe, PyInstaller, the pinned Chrome for
+# Testing — then runs the frozen app's --self-test: GUI stack imports, bundled tools
+# present and runnable, waveform/BPM analysis through the bundled ffmpeg, and the main
+# window building offscreen. Signing and notarization stay on the founder's Mac.
+#
+# The zipped unsigned app is uploaded so it can be tried without building locally:
+#   unzip, then `xattr -dr com.apple.quarantine "Sound Cache.app"` (it is not notarized).
+
+on:
+  pull_request:
+    paths-ignore: ["docs/**", "*.md", "relay-worker/**"]
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "*.md", "relay-worker/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  macos-app:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "^24.22.2"
+      - name: Python deps (what the release venv holds)
+        run: python -m pip install -e ".[gui,ingest]" "pyinstaller>=6.10"
+      - name: Playwright driver (no browser download; we bundle our own)
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci
+      - name: Pinned + verified node / ffmpeg / ffprobe
+        run: packaging/fetch_vendor.sh
+      - name: PyInstaller
+        run: |
+          pyinstaller packaging/SoundCache.spec --distpath dist --workpath build/pyi --noconfirm
+          chmod +x "dist/Sound Cache.app/Contents/Frameworks/bin/"*
+      - name: Pinned + verified Chrome for Testing
+        run: packaging/add_browser.sh "dist/Sound Cache.app"
+      - name: Self-test the frozen app
+        run: |
+          set -o pipefail
+          "dist/Sound Cache.app/Contents/MacOS/Sound Cache" --self-test | tee selftest.json
+          python - <<'PY'
+          import json, tomllib
+          report = json.load(open("selftest.json"))
+          want = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          assert report["ok"], "self-test failed"
+          assert report["version"] == want, f"frozen app reports {report['version']}, pyproject says {want}"
+          assert report["bundled_tools"]["detail"]["frozen"] == "True"
+          print("frozen app OK:", report["version"])
+          PY
+      - name: Info.plist version matches pyproject
+        run: |
+          plist="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "dist/Sound Cache.app/Contents/Info.plist")"
+          want="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          test "$plist" = "$want" || { echo "Info.plist says $plist, pyproject says $want"; exit 1; }
+          du -sh "dist/Sound Cache.app"
+      - name: Zip the unsigned app
+        run: ditto -c -k --keepParent "dist/Sound Cache.app" SoundCache-unsigned-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SoundCache-unsigned-arm64
+          path: |
+            SoundCache-unsigned-arm64.zip
+            selftest.json
+          retention-days: 7
