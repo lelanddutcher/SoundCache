@@ -99,6 +99,7 @@ from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.track_list import (
     RECORD_ROLE,
     FlowLayout,
+    NowPlayingBar,
     TrackListView,
     TrackRowDelegate,
     WaveformBar,
@@ -2542,7 +2543,13 @@ class SoundVaultWindow(QMainWindow):
         stats_grid.addWidget(self.inbox_label, 0, 1)
         stats_grid.addWidget(self.worker_label, 0, 2)
         stats_grid.addWidget(self.catalog_label, 0, 3)
-        layout.addLayout(stats_grid)
+        # Status cards collapse on short windows so the track list keeps its rows
+        # (at the 700 px minimum they left room for about two). See resizeEvent.
+        self.stats_cards = QWidget()
+        self.stats_cards.setObjectName("statsCards")
+        stats_grid.setContentsMargins(0, 0, 0, 0)
+        self.stats_cards.setLayout(stats_grid)
+        layout.addWidget(self.stats_cards)
         self.table = SoundTableView()
         library_model = self.table.library_model()
         library_model.audio_path_resolver = self._drag_audio_path
@@ -2586,6 +2593,15 @@ class SoundVaultWindow(QMainWindow):
         self.library_stack.addWidget(self.track_list)
         self.library_stack.addWidget(self.table)
         layout.addWidget(self.library_stack, 1)
+        # Bottom now-playing bar (design board 1); hidden until something plays.
+        self.now_playing_bar = NowPlayingBar(self.track_delegate.artwork)
+        self.now_playing_bar.previousRequested.connect(self.select_previous_sound)
+        self.now_playing_bar.toggleRequested.connect(self._now_playing_toggle)
+        self.now_playing_bar.nextRequested.connect(self.select_next_sound)
+        self.now_playing_bar.seekRequested.connect(
+            lambda fraction: self.track_seek(self.playing_music_id or "", fraction)
+        )
+        layout.addWidget(self.now_playing_bar)
         self.set_library_view_mode(self.settings.library_view_mode(), persist=False)
         return view
 
@@ -3252,6 +3268,19 @@ class SoundVaultWindow(QMainWindow):
                 self.table.viewport().update()
         if hasattr(self, "track_list"):
             self.track_list.viewport().update()
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is not None:
+            if music_id:
+                record = self.records_by_id.get(music_id) or (
+                    self.current_preview_record
+                    if self.current_preview_record is not None and self.current_preview_record.music_id == music_id
+                    else None
+                )
+                if record is not None:
+                    bar.set_track(record, self.track_delegate.peaks.get(getattr(record, "waveform_path", None)), playable=True)
+            bar.set_playing(bool(music_id))
+            if music_id:
+                self._on_progress_value(self.progress_slider.value())  # show where we are now
 
     def _drag_audio_path(self, music_id: str) -> Path | None:
         """Local audio file for a dragged row, so dragging out copies the real sound."""
@@ -4519,6 +4548,15 @@ class SoundVaultWindow(QMainWindow):
 
     # ---- track list (0.5) -------------------------------------------------------
 
+    # Below this window height the status cards above the Library list are hidden.
+    STATS_CARDS_MIN_HEIGHT = 860
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        cards = getattr(self, "stats_cards", None)
+        if cards is not None:
+            cards.setVisible(self.height() >= self.STATS_CARDS_MIN_HEIGHT)
+
     def _library_view(self):
         """The library view currently on screen (track list or classic table)."""
         stack = getattr(self, "library_stack", None)
@@ -4650,10 +4688,29 @@ class SoundVaultWindow(QMainWindow):
         else:
             self.play_selected_sound()
 
-    def _on_progress_value(self, _value: int) -> None:
+    def _now_playing_toggle(self) -> None:
+        """Play/pause on the bar acts on the bar's track, not whatever row is selected."""
+        if self.playing_music_id:
+            self.pause_playback()
+            return
+        record = self.now_playing_bar.record()
+        if record is not None:
+            self.play_record_by_id(record.music_id)
+        else:
+            self.toggle_play_pause()
+
+    def _on_progress_value(self, value: int) -> None:
         playing = self.playing_music_id
         if not playing:
             return
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is not None:
+            maximum = self.progress_slider.maximum()
+            bar.set_progress(
+                self.track_progress(playing),
+                self._format_ms(int(value)),
+                self._format_ms(maximum) if maximum > 0 else None,
+            )
         record = self.current_preview_record
         if record is not None and record.music_id == playing and hasattr(self, "preview_waveform"):
             self.preview_waveform.set_progress(self.track_progress(playing))
@@ -6715,6 +6772,14 @@ QCheckBox#vocalsOnly {
 QCheckBox#vocalsOnly:checked { border-color: #b793ff; background: #1d1042; }
 QToolButton#viewModeButton { min-width: 56px; }
 QWidget#previewWaveform { background: transparent; }
+QFrame#nowPlayingBar {
+    background: #150a33; border-top: 1px solid rgba(255, 255, 255, 0.12); border-radius: 0;
+}
+QLabel#nowPlayingTrack { font-size: 14px; font-weight: 700; color: #fbedff; background: transparent; }
+QLabel#nowPlayingArtist, QLabel#nowPlayingTime { font-size: 12px; color: #c5b3e6; background: transparent; }
+QLabel#nowPlayingArt { border-radius: 10px; background: transparent; }
+QWidget#nowPlayingText { background: transparent; }
+QWidget#statsCards { background: transparent; }
 """
 
 

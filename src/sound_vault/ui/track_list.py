@@ -36,8 +36,14 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
     QLayout,
     QListView,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -240,9 +246,10 @@ class RowLayout:
 def row_layout(rect: QRect, density: str = "comfortable") -> RowLayout:
     """Place every cell of a row inside ``rect``.
 
-    Breakpoints (row width, after the 16 px inner padding): tags drop under 1000,
-    uses under 860, the action strip shrinks to favorite + more under 720, the
-    waveform drops under 600, and the icons and length under 460. Cells never overlap and
+    Breakpoints (row width, after the 16 px inner padding), chosen so the waveform keeps
+    roughly 200 px+ before any optional column appears: tags need 1150, the full action
+    strip 1000 (else favorite + more), uses 860; the waveform drops under 600, and the
+    icons and length under 460. Cells never overlap and
     always stay inside ``rect``.
     """
     pad, gap = 16, 14
@@ -262,7 +269,9 @@ def row_layout(rect: QRect, density: str = "comfortable") -> RowLayout:
     play = box(x, 44, 44)
     x += 44 + gap
 
-    actions_order = ACTIONS if width >= 720 else ("favorite", "more")
+    # Full action strip only on wide rows; below that the waveform matters more
+    # (everything is still in the ⋮ menu).
+    actions_order = ACTIONS if width >= 1000 else ("favorite", "more")
     actions_w = 40 * len(actions_order)
     right = inner.right() + 1
     actions: dict[str, QRect] = {}
@@ -277,8 +286,8 @@ def row_layout(rect: QRect, density: str = "comfortable") -> RowLayout:
         uses = box(right - 64, 64)
         right -= 64 + gap
     available = right - x
-    if width >= 1000:
-        tags_w = max(140, int(available * 0.18))
+    if width >= 1150:
+        tags_w = max(140, int(available * 0.16))
         tags = box(right - tags_w, tags_w)
         right -= tags_w + gap
     if width >= 460:
@@ -373,6 +382,21 @@ def draw_icon(painter: QPainter, name: str, rect: QRect | QRectF, color: QColor,
         painter.setBrush(color)
         for y in (5, 12, 19):
             path.addEllipse(p(12, y), 1.8 * s, 1.8 * s)
+    elif name in ("prev", "next"):
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        if name == "next":
+            path.moveTo(p(4, 5.5))
+            path.lineTo(p(15, 12))
+            path.lineTo(p(4, 18.5))
+            path.closeSubpath()
+            path.addRect(QRectF(p(16, 5), p(18.5, 19)))
+        else:
+            path.moveTo(p(20, 5.5))
+            path.lineTo(p(9, 12))
+            path.lineTo(p(20, 18.5))
+            path.closeSubpath()
+            path.addRect(QRectF(p(5.5, 5), p(8, 19)))
     elif name == "mic":
         path.addRoundedRect(QRectF(p(9, 2), p(15, 14)), 3 * s, 3 * s)
         path.moveTo(p(5, 10))
@@ -865,3 +889,173 @@ class FlowLayout(QLayout):
                 x += hint.width() + self._spacing
             y += height + self._spacing
         return max(0, y - self._spacing - rect.y()) + margins.bottom()
+
+
+# ---------------------------------------------------------------- now-playing bar
+class IconButton(QToolButton):
+    """A 44×44 button that paints one of the design's stroke icons."""
+
+    def __init__(self, icon: str, label: str, parent: QWidget | None = None, *, filled_disc: bool = False) -> None:
+        super().__init__(parent)
+        self.icon_name = icon
+        self.filled_disc = filled_disc
+        self.setAccessibleName(label)
+        self.setToolTip(label)
+        self.setFixedSize(QSize(48, 48) if filled_disc else QSize(44, 44))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_icon_name(self, icon: str, label: str) -> None:
+        self.icon_name = icon
+        self.setAccessibleName(label)
+        self.setToolTip(label)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        if self.filled_disc:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(INK)
+            painter.drawEllipse(r.adjusted(1, 1, -1, -1))
+            color = NIGHT
+        else:
+            if self.underMouse():
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 255, 255, 20))
+                painter.drawEllipse(r.adjusted(2, 2, -2, -2))
+            color = INK if self.isEnabled() else WAVE_OFF
+        if self.hasFocus():
+            painter.setPen(QPen(CYAN, 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(r.adjusted(1, 1, -1, -1))
+        draw_icon(painter, self.icon_name, self.rect(), color, size=18)
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that ends in "…" instead of clipping mid-glyph."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        self._full = text or ""
+        self.setAccessibleName(self._full)
+        self._refresh()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        elided = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, max(0, self.width()))
+        super().setText(elided)
+        self.setToolTip(self._full if elided != self._full else "")
+
+
+class NowPlayingBar(QFrame):
+    """Bottom bar (design board 1): art, title/artist, previous / play / next, a
+    waveform scrubber with elapsed and total time. Hidden until something plays."""
+
+    previousRequested = Signal()
+    toggleRequested = Signal()
+    nextRequested = Signal()
+    seekRequested = Signal(float)
+
+    def __init__(self, artwork: ArtworkCache, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("nowPlayingBar")
+        self.setAccessibleName("Now playing")
+        self._artwork = artwork
+        self._record = None
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(14)
+        self.art = QLabel()
+        self.art.setFixedSize(44, 44)
+        self.art.setObjectName("nowPlayingArt")
+        layout.addWidget(self.art)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        self.title = ElidedLabel("Nothing playing")
+        self.title.setObjectName("nowPlayingTrack")
+        self.artist = ElidedLabel("")
+        self.artist.setObjectName("nowPlayingArtist")
+        for label in (self.title, self.artist):
+            label.setMinimumWidth(80)
+        text.addWidget(self.title)
+        text.addWidget(self.artist)
+        text_box = QWidget()
+        text_box.setObjectName("nowPlayingText")
+        text_box.setLayout(text)
+        text_box.setMinimumWidth(120)
+        text_box.setMaximumWidth(280)
+        layout.addWidget(text_box, 1)
+        self.prev_button = IconButton("prev", "Previous sound")
+        self.play_button = IconButton("pause", "Pause", filled_disc=True)
+        self.next_button = IconButton("next", "Next sound")
+        self.prev_button.clicked.connect(self.previousRequested)
+        self.play_button.clicked.connect(self.toggleRequested)
+        self.next_button.clicked.connect(self.nextRequested)
+        for button in (self.prev_button, self.play_button, self.next_button):
+            layout.addWidget(button)
+        self.elapsed = QLabel("0:00")
+        self.elapsed.setObjectName("nowPlayingTime")
+        self.wave = WaveformBar(bar_height=32)
+        self.wave.setAccessibleName("Seek in the playing sound")
+        self.wave.seekRequested.connect(self.seekRequested)
+        self.total = QLabel("0:00")
+        self.total.setObjectName("nowPlayingTime")
+        layout.addWidget(self.elapsed)
+        layout.addWidget(self.wave, 3)
+        layout.addWidget(self.total)
+        self.setVisible(False)
+
+    def set_track(self, record, peaks: list[float] | None, *, playable: bool) -> None:
+        self._record = record
+        if record is None:
+            self.setVisible(False)
+            return
+        if self._record is None or getattr(self, "_shown_id", None) != record.music_id:
+            self.wave.set_progress(0.0)
+            self.elapsed.setText("0:00")
+        self._shown_id = record.music_id
+        self.title.setText(record.title or record.music_id)
+        self.artist.setText(record.artist or "")
+        pixmap = self._artwork.get(record.artwork_path, 88)
+        if pixmap is None:
+            pixmap = QPixmap(88, 88)
+            pixmap.fill(tile_color(record.music_id))
+            painter = QPainter(pixmap)
+            f = QFont("Unbounded")
+            f.setPixelSize(28)
+            f.setWeight(QFont.Weight.Bold)
+            painter.setFont(f)
+            painter.setPen(INK)
+            painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, initials(record.title))
+            painter.end()
+        side = min(pixmap.width(), pixmap.height())
+        square = pixmap.copy((pixmap.width() - side) // 2, (pixmap.height() - side) // 2, side, side)
+        self.art.setPixmap(square.scaled(44, 44, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.wave.set_peaks(peaks, playable=playable)
+        self.total.setText(format_duration(record.duration_seconds))
+        self.setVisible(True)
+
+    def record(self):
+        return self._record
+
+    def set_playing(self, playing: bool) -> None:
+        self.play_button.set_icon_name("pause" if playing else "play", "Pause" if playing else "Play")
+
+    def set_progress(self, fraction: float, elapsed: str, total: str | None = None) -> None:
+        self.wave.set_progress(fraction)
+        self.elapsed.setText(elapsed)
+        if total:
+            self.total.setText(total)

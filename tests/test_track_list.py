@@ -101,8 +101,11 @@ def test_columns_drop_out_in_the_documented_order():
     assert no_tags.tags is None and no_tags.uses is not None
     no_uses = row_layout(QRect(0, 0, 820, 76))
     assert no_uses.uses is None and no_uses.wave is not None
-    slim_actions = row_layout(QRect(0, 0, 700, 76))
+    slim_actions = row_layout(QRect(0, 0, 960, 76))
     assert set(slim_actions.actions) == {"favorite", "more"}
+    # The waveform keeps real width before optional columns appear.
+    for width in (900, 1000, 1060, 1200, 1400):
+        assert row_layout(QRect(0, 0, width, 76)).wave.width() >= 220, width
     no_wave = row_layout(QRect(0, 0, 560, 76))
     assert no_wave.wave is None and no_wave.length is not None
     phone = row_layout(QRect(0, 0, 360, 76))
@@ -180,11 +183,14 @@ def test_row_buttons_route_to_the_right_actions(window, monkeypatch):
     monkeypatch.setattr(window, "play_record_by_id", lambda mid: calls.append(("play", mid)))
     monkeypatch.setattr(window, "toggle_favorite_by_id", lambda mid: calls.append(("fav", mid)))
     monkeypatch.setattr(window, "track_copy_link", lambda mid: calls.append(("link", mid)))
+    window.resize(1920, 1000)  # wide enough for the full action strip (row ≥ 1000 px)
+    QApplication.processEvents()
     view = window.track_list
     model = view.model()
     index = model.index(0, 2)
     record = index.data(RECORD_ROLE)
     lay = window.track_delegate.layout_for(view.visualRect(index))
+    assert "link" in lay.actions, view.visualRect(index).width()
     _click(view, index, at=lay.play.center())
     _click(view, index, at=lay.actions["favorite"].center())
     _click(view, index, at=lay.actions["link"].center())
@@ -280,3 +286,37 @@ def test_accessible_text_names_each_row(window):
     text = model.index(0, 2).data(Qt.ItemDataRole.AccessibleTextRole)
     record = model.index(0, 2).data(RECORD_ROLE)
     assert record.title in text and "uses" in text or record.usage_count is None
+
+
+def test_now_playing_bar_follows_playback(window, monkeypatch):
+    bar = window.now_playing_bar
+    assert not bar.isVisible()  # nothing played yet
+    model = window.table.model()
+    record = model.index(1, 2).data(RECORD_ROLE)
+
+    window._set_playing(record.music_id)
+    QApplication.processEvents()
+    assert bar.isVisible()
+    assert bar.title.full_text() == (record.title or record.music_id)
+    assert bar.play_button.accessibleName() == "Pause"
+
+    window.progress_slider.setRange(0, 30_000)
+    window.progress_slider.setValue(12_000)
+    assert bar.elapsed.text() == "0:12"
+    assert abs(bar.wave.progress() - 0.4) < 0.01
+
+    window._set_playing(None)  # paused: the bar stays, showing Play
+    assert bar.isVisible() and bar.play_button.accessibleName() == "Play"
+    played = []
+    monkeypatch.setattr(window, "play_record_by_id", played.append)
+    bar.play_button.click()
+    assert played == [record.music_id]  # resumes the bar's track, not the selection
+
+
+def test_status_cards_collapse_on_short_windows(window):
+    window.resize(1440, 700)
+    QApplication.processEvents()
+    assert not window.stats_cards.isVisible()
+    window.resize(1440, 900)
+    QApplication.processEvents()
+    assert window.stats_cards.isVisible()
