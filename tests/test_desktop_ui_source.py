@@ -389,7 +389,8 @@ def test_desktop_preserves_selection_scroll_and_sort_when_refreshing_library():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
     assert "selected_music_id = self._selected_music_id()" in source
-    assert "scroll_value = self.table.verticalScrollBar().value()" in source
+    # Scroll position of whichever library view is showing (track list or table).
+    assert "scroll_value = self._library_view().verticalScrollBar().value()" in source
     assert "sort_column = self.library_sort_column" in source
     assert "sort_order = self.library_sort_order" in source
     assert "self._restore_library_selection(selected_music_id, scroll_value)" in source

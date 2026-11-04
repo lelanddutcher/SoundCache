@@ -34,6 +34,7 @@ from PySide6.QtCore import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QBrush,
     QColor,
     QDesktopServices,
@@ -95,6 +96,14 @@ from sound_vault.settings import (
     normalize_relay_base_url,
 )
 from sound_vault.telemetry.reporter import SaveEventReporter
+from sound_vault.ui.track_list import (
+    RECORD_ROLE,
+    FlowLayout,
+    TrackListView,
+    TrackRowDelegate,
+    WaveformBar,
+    accessible_row_text,
+)
 from sound_vault.ui.view_model import LibraryViewModel
 from sound_vault.vault.indexer import resolve_vault_root, transcript_state
 
@@ -146,6 +155,24 @@ VIDEOS_COL = 8
 LOCAL_AUDIO_COL = 9
 CONTEXT_COL = 10
 DEFAULT_HIDDEN_LIBRARY_COLUMNS: tuple[int, ...] = (ADDED_COL, LOCAL_AUDIO_COL, CONTEXT_COL)
+# Sort keys that have no table column (chosen from the Sort menu, not a header click).
+BPM_SORT_KEY = 100
+# Sort menu: label -> (sort column, order).
+LIBRARY_SORTS: tuple[tuple[str, int, "Qt.SortOrder"], ...] = (
+    ("Most used", POPULARITY_COL, Qt.SortOrder.DescendingOrder),
+    ("Recently cached", ADDED_COL, Qt.SortOrder.DescendingOrder),
+    ("Title A–Z", SOUND_COL, Qt.SortOrder.AscendingOrder),
+    ("BPM", BPM_SORT_KEY, Qt.SortOrder.AscendingOrder),
+)
+# BPM chip: value -> (label, low, high); "unknown" = no confident tempo.
+BPM_FILTERS: tuple[tuple[str, str], ...] = (
+    ("all", "Any BPM"),
+    ("under_90", "Under 90 BPM"),
+    ("90_120", "90–120 BPM"),
+    ("120_150", "120–150 BPM"),
+    ("over_150", "150+ BPM"),
+    ("unknown", "BPM unknown"),
+)
 
 
 _LIBRARY_HEADERS = (
@@ -170,6 +197,7 @@ class LibraryTableModel(QAbstractTableModel):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._rows: list = []
+        self._row_of: dict[str, int] = {}
         self._favorites: set[str] = set()
         self._playable: set[str] = set()
 
@@ -177,6 +205,7 @@ class LibraryTableModel(QAbstractTableModel):
     def set_rows(self, rows: list, *, favorites: set[str], playable: set[str]) -> None:
         self.beginResetModel()
         self._rows = rows
+        self._row_of = {record.music_id: idx for idx, record in enumerate(rows)}
         self._favorites = favorites
         self._playable = playable
         self.endResetModel()
@@ -191,6 +220,10 @@ class LibraryTableModel(QAbstractTableModel):
                 idx = self.index(row, FAVORITE_COL)
                 self.dataChanged.emit(idx, idx, [FAVORITE_ROLE])
                 break
+
+    def row_of(self, music_id: str) -> int:
+        """Row of ``music_id`` in the current rows, or -1 (O(1))."""
+        return self._row_of.get(str(music_id), -1)
 
     def music_id_at(self, row: int) -> str | None:
         if 0 <= row < len(self._rows):
@@ -223,6 +256,10 @@ class LibraryTableModel(QAbstractTableModel):
         record = self._rows[row]
         if role == Qt.ItemDataRole.UserRole:
             return record.music_id
+        if role == RECORD_ROLE:
+            return record
+        if role == Qt.ItemDataRole.AccessibleTextRole:
+            return accessible_row_text(record)
         if role == FAVORITE_ROLE:
             return record.music_id in self._favorites
         if role == PLAYABLE_ROLE:
@@ -2187,6 +2224,7 @@ class SoundVaultWindow(QMainWindow):
         shell.addWidget(main, 1)
 
         preview = self._build_preview_panel()
+        self.preview_panel = preview
         shell.addWidget(preview)
         _assets = Path(__file__).resolve().parent / "assets"
         styled = STYLESHEET.replace(
@@ -2443,17 +2481,54 @@ class SoundVaultWindow(QMainWindow):
             _combo.setMinimumWidth(92)
         self.result_count_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         search_bar.addWidget(self.search_box, 1)
-        filter_bar = QHBoxLayout()
-        filter_bar.setSpacing(8)
-        filter_bar.addWidget(self.duration_filter)
-        filter_bar.addWidget(self.media_filter)
-        filter_bar.addWidget(self.status_filter)
-        filter_bar.addWidget(self.usage_filter)
-        filter_bar.addWidget(columns_button)
-        filter_bar.addStretch(1)
-        filter_bar.addWidget(self.result_count_label)
+        # 0.5 track-list controls. Sort, the View menu and the List/Table switch sit on
+        # the search row; the filter chips wrap onto as many lines as the width needs
+        # (FlowLayout) instead of squeezing and overlapping at small window sizes.
+        self.sort_combo = QComboBox()
+        self.sort_combo.setObjectName("sortCombo")
+        self.sort_combo.setAccessibleName("Sort")
+        for label, _column, _order in LIBRARY_SORTS:
+            self.sort_combo.addItem(f"Sort: {label}")
+        self.sort_combo.currentIndexChanged.connect(self._apply_sort_choice)
+        self.view_mode_button = QToolButton()
+        self.view_mode_button.setObjectName("viewModeButton")
+        self.view_mode_button.setCheckable(True)
+        self.view_mode_button.setToolTip("Switch between the track list and the classic table")
+        self.view_mode_button.toggled.connect(lambda table: self.set_library_view_mode("table" if table else "list"))
+        columns_button.setText("View ▾")
+        columns_button.setToolTip("Row density and table columns")
+        search_bar.addWidget(self.sort_combo)
+        search_bar.addWidget(columns_button)
+        search_bar.addWidget(self.view_mode_button)
+        self.bpm_filter = QComboBox()
+        self.bpm_filter.setObjectName("bpmFilter")
+        self.bpm_filter.setAccessibleName("BPM filter")
+        for value, label in BPM_FILTERS:
+            self.bpm_filter.addItem(label, value)
+        self.bpm_filter.currentIndexChanged.connect(self.schedule_refresh_table)
+        self.vocals_only = QCheckBox("Vocals only")
+        self.vocals_only.setObjectName("vocalsOnly")
+        self.vocals_only.setToolTip("Only sounds with a transcript (someone is talking or singing)")
+        self.vocals_only.toggled.connect(self.schedule_refresh_table)
+        self.filter_chips = QWidget()
+        self.filter_chips.setObjectName("filterChips")
+        chips_policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        chips_policy.setHeightForWidth(True)
+        self.filter_chips.setSizePolicy(chips_policy)
+        filter_bar = FlowLayout(self.filter_chips, spacing=8)
+        for chip in (
+            self.duration_filter, self.media_filter, self.status_filter, self.usage_filter,
+            self.bpm_filter, self.vocals_only, self.result_count_label,
+        ):
+            if isinstance(chip, QComboBox):
+                # Size to the longest label so text is never cut off ("All duratic").
+                chip.setMinimumWidth(0)
+                chip.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            filter_bar.addWidget(chip)
+        for combo in (self.sort_combo,):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         layout.addLayout(search_bar)
-        layout.addLayout(filter_bar)
+        layout.addWidget(self.filter_chips)
         stats_grid = QGridLayout()
         self.stats_label = QLabel("index not built")
         self.stats_label.setObjectName("statCard")
@@ -2491,7 +2566,27 @@ class SoundVaultWindow(QMainWindow):
         self.table.horizontalHeader().sectionClicked.connect(self.handle_library_header_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_library_context_menu)
-        layout.addWidget(self.table, 1)
+        # Track list: paints the same model and shares the table's selection model, so
+        # every handler above (preview, context menu, drag-out, play) serves both views.
+        self.track_delegate = TrackRowDelegate(self)
+        self.track_list = TrackListView(self.track_delegate)
+        self.track_list.setModel(self.table.model())
+        self.track_list.setModelColumn(SOUND_COL)
+        self.track_list.setSelectionModel(self.table.selectionModel())
+        self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.track_list.customContextMenuRequested.connect(
+            lambda point: self.open_library_context_menu(point, view=self.track_list)
+        )
+        self.track_list.doubleClicked.connect(lambda _index: self.play_selected_sound())
+        self.track_list.playRequested.connect(self.toggle_play_pause)
+        self.track_list.favoriteRequested.connect(self._favorite_current_track)
+        self.track_list.binRequested.connect(self._bin_menu_for_current_track)
+        self.track_list.set_density(self.settings.library_density())
+        self.library_stack = QStackedWidget()
+        self.library_stack.addWidget(self.track_list)
+        self.library_stack.addWidget(self.table)
+        layout.addWidget(self.library_stack, 1)
+        self.set_library_view_mode(self.settings.library_view_mode(), persist=False)
         return view
 
     def _build_inbox_view(self) -> QWidget:
@@ -2692,6 +2787,12 @@ class SoundVaultWindow(QMainWindow):
         self.progress_slider.sliderMoved.connect(self._preview_seek_time)
         self.progress_slider.sliderReleased.connect(self._commit_slider_seek)
         self.progress_slider.seekRequested.connect(self.seek_playback)
+        # The waveform is the primary scrubber (design board 6); it mirrors the slider.
+        self.preview_waveform = WaveformBar(scroll_body)
+        self.preview_waveform.setObjectName("previewWaveform")
+        self.preview_waveform.seekRequested.connect(self._seek_from_waveform)
+        self.progress_slider.valueChanged.connect(self._on_progress_value)
+        self.progress_slider.rangeChanged.connect(lambda *_: self._on_progress_value(self.progress_slider.value()))
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setObjectName("muted")
         self._make_label_selectable(self.time_label)
@@ -2770,6 +2871,7 @@ class SoundVaultWindow(QMainWindow):
             _btn.setMinimumHeight(32)
         scroll_layout.addWidget(self.artwork_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         scroll_layout.addWidget(self.preview_title)
+        scroll_layout.addWidget(self.preview_waveform)
         scroll_layout.addWidget(self.progress_slider)
         scroll_layout.addWidget(self.time_label)
         scroll_layout.addLayout(action_col)
@@ -2790,6 +2892,12 @@ class SoundVaultWindow(QMainWindow):
         play_shortcut.activated.connect(self.play_selected_sound)
         escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         escape_shortcut.activated.connect(self.clear_search)
+        # ⌘1–⌘5 jump between the main views (design board 4, "Keyboard").
+        for number, view_name in enumerate(("library", "inbox", "review", "dedupe", "worker"), start=1):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{number}"), self)
+            shortcut.activated.connect(lambda name=view_name: self.show_view(name))
+        detail_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
+        detail_shortcut.activated.connect(self.toggle_detail_pane)
 
     def focus_search(self) -> None:
         self.search_box.setFocus()
@@ -3142,6 +3250,8 @@ class SoundVaultWindow(QMainWindow):
             delegate.playing_music_id = music_id
             if hasattr(self, "table"):
                 self.table.viewport().update()
+        if hasattr(self, "track_list"):
+            self.track_list.viewport().update()
 
     def _drag_audio_path(self, music_id: str) -> Path | None:
         """Local audio file for a dragged row, so dragging out copies the real sound."""
@@ -3193,6 +3303,18 @@ class SoundVaultWindow(QMainWindow):
 
     def configure_column_menu(self) -> None:
         self.column_menu.clear()
+        density_header = self.column_menu.addSection("Density")
+        density_header.setEnabled(False)
+        density_group = QActionGroup(self)
+        current_density = self.settings.library_density()
+        for value, label in (("comfortable", "Comfortable"), ("compact", "Compact")):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(value == current_density)
+            action.triggered.connect(lambda _checked=False, d=value: (self.set_library_density(d), self.configure_column_menu()))
+            density_group.addAction(action)
+            self.column_menu.addAction(action)
+        self.column_menu.addSection("Table columns")
         for column in range(self.table.columnCount()):
             label = str(
                 self.table.model().headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or ""
@@ -3765,7 +3887,7 @@ class SoundVaultWindow(QMainWindow):
         search_cursor_position = self.search_box.cursorPosition()
         selected_music_id = self._selected_music_id() or self._pending_selected_music_id
         self._pending_selected_music_id = None
-        scroll_value = self.table.verticalScrollBar().value()
+        scroll_value = self._library_view().verticalScrollBar().value()
         duration_filter = self.duration_filter.currentData() if hasattr(self, "duration_filter") else "all"
         media_filter = self.media_filter.currentData() if hasattr(self, "media_filter") else "all"
         status_filter = self.status_filter.currentData() if hasattr(self, "status_filter") else "all"
@@ -3778,6 +3900,7 @@ class SoundVaultWindow(QMainWindow):
             usage_filter=str(usage_filter or "all"),
         )
         self.current_rows = self._apply_library_collection_filter(self.current_rows)
+        self.current_rows = self._apply_track_filters(self.current_rows)
         self._sort_library_rows()
         self.records_by_id = {record.music_id: record for record in self.current_rows}
         total = self.vm.db.stats().total_sounds
@@ -3897,6 +4020,8 @@ class SoundVaultWindow(QMainWindow):
                     return 1 if self._record_has_playable_pointer(record) else 0
                 case 10:
                     return (", ".join(record.tags[:3]) or record.status or "").lower()
+                case 100:  # BPM_SORT_KEY; unknown tempos sort last
+                    return record.bpm if record.bpm is not None else float("inf")
                 case _:
                     return (record.title or record.music_id or "").lower()
 
@@ -3962,7 +4087,7 @@ class SoundVaultWindow(QMainWindow):
                     break
         self.table.clearSelection()
         self.table.selectRow(target_row)
-        self.table.verticalScrollBar().setValue(scroll_value)
+        self._library_view().verticalScrollBar().setValue(scroll_value)
         self.update_preview_from_selection()
 
     def clear_preview(self, title: str = "Select a sound") -> None:
@@ -3974,6 +4099,9 @@ class SoundVaultWindow(QMainWindow):
             self._loading_notes = False
         self.current_preview_record = None
         self.preview_title.setText(title)
+        if hasattr(self, "preview_waveform"):
+            self.preview_waveform.set_peaks(None, playable=False)
+            self.preview_waveform.set_progress(0.0)
         if hasattr(self, "now_playing_title"):
             self.now_playing_title.setText("select a sound to inspect waveform, provenance, transcript, and evidence")
         self.preview_meta.setText("Audio, tags, evidence and local paths will show here.")
@@ -4070,6 +4198,11 @@ class SoundVaultWindow(QMainWindow):
         self.open_spotify.setVisible(self._spotify_url_for_record(record) is not None)
         self.copy_metadata.setEnabled(True)
         target = self.vm.play_target_for(record)
+        self.preview_waveform.set_peaks(
+            self.track_delegate.peaks.get(getattr(record, "waveform_path", None)),
+            playable=target is not None,
+        )
+        self.preview_waveform.set_progress(self.track_progress(record.music_id))
         duration_ms = self._duration_ms_for_record(record)
         if duration_ms <= 0 and isinstance(target, Path):
             # ~3% of sounds have no stored duration. Reuse a duration we already probed
@@ -4384,8 +4517,176 @@ class SoundVaultWindow(QMainWindow):
         # Repaint just the toggled row's star (model emits dataChanged for it).
         self.table.library_model().set_favorite(str(music_id), is_favorite)
 
-    def open_library_context_menu(self, point) -> None:
-        index = self.table.indexAt(point)
+    # ---- track list (0.5) -------------------------------------------------------
+
+    def _library_view(self):
+        """The library view currently on screen (track list or classic table)."""
+        stack = getattr(self, "library_stack", None)
+        if stack is not None and stack.currentWidget() is not None:
+            return stack.currentWidget()
+        return self.table
+
+    def set_library_view_mode(self, mode: str, *, persist: bool = True) -> None:
+        mode = "table" if mode == "table" else "list"
+        view = self.table if mode == "table" else self.track_list
+        scroll = self._library_view().verticalScrollBar().value() if hasattr(self, "library_stack") else 0
+        self.library_stack.setCurrentWidget(view)
+        self.view_mode_button.blockSignals(True)
+        self.view_mode_button.setChecked(mode == "table")
+        self.view_mode_button.setText("Table" if mode == "table" else "List")
+        self.view_mode_button.setAccessibleName(f"Library view: {'table' if mode == 'table' else 'track list'}")
+        self.view_mode_button.blockSignals(False)
+        current = self.table.currentIndex()
+        if current.isValid():
+            view.scrollTo(self.table.model().index(current.row(), SOUND_COL))
+        elif scroll:
+            view.verticalScrollBar().setValue(scroll)
+        if persist:
+            self.settings.set_library_view_mode(mode)
+
+    def set_library_density(self, density: str) -> None:
+        self.track_list.set_density(density)
+        self.settings.set_library_density(density)
+
+    def _apply_sort_choice(self, index: int) -> None:
+        if not (0 <= index < len(LIBRARY_SORTS)):
+            return
+        _label, column, order = LIBRARY_SORTS[index]
+        self.library_sort_column = column
+        self.library_sort_order = order
+        self.table.horizontalHeader().setSortIndicator(column if column < self.table.columnCount() else -1, order)
+        QTimer.singleShot(0, self.refresh_table)
+
+    def _apply_track_filters(self, rows: list) -> list:
+        bpm = self.bpm_filter.currentData() if hasattr(self, "bpm_filter") else "all"
+        if bpm and bpm != "all":
+            def in_range(record) -> bool:
+                value = record.bpm
+                if bpm == "unknown":
+                    return value is None
+                if value is None:
+                    return False
+                return {
+                    "under_90": value < 90,
+                    "90_120": 90 <= value < 120,
+                    "120_150": 120 <= value < 150,
+                    "over_150": value >= 150,
+                }.get(str(bpm), True)
+
+            rows = [record for record in rows if in_range(record)]
+        if getattr(self, "vocals_only", None) is not None and self.vocals_only.isChecked():
+            rows = [record for record in rows if (record.transcript_text or "").strip()]
+        return rows
+
+    def _row_for_music_id(self, music_id: str) -> int:
+        return self.table.library_model().row_of(music_id)
+
+    # TrackListHost: callbacks the row painter uses -------------------------------
+    def track_is_playing(self, music_id: str) -> bool:
+        return bool(self.playing_music_id) and self.playing_music_id == str(music_id)
+
+    def track_progress(self, music_id: str) -> float:
+        if not self.track_is_playing(music_id):
+            return 0.0
+        maximum = self.progress_slider.maximum()
+        return self.progress_slider.value() / maximum if maximum > 0 else 0.0
+
+    def track_play(self, music_id: str) -> None:
+        if self.track_is_playing(music_id):
+            self.pause_playback()
+        else:
+            self.play_record_by_id(str(music_id))
+
+    def track_favorite(self, music_id: str) -> None:
+        self.toggle_favorite_by_id(str(music_id))
+
+    def track_add_to_bin(self, music_id: str, global_pos) -> None:
+        ids = self._selected_library_music_ids()
+        if str(music_id) not in ids:
+            ids = (str(music_id),)
+        menu = QMenu(self)
+        favorites = menu.addAction("Favorites")
+        favorites.triggered.connect(lambda: self.add_music_ids_to_library_target("favorites", ids))
+        for bin_row in self.vm.library_bins():
+            action = menu.addAction(bin_row.name)
+            action.triggered.connect(
+                lambda _checked=False, bin_id=bin_row.id: self.add_music_ids_to_library_target(f"bin:{bin_id}", ids)
+            )
+        menu.addSeparator()
+        new_bin = menu.addAction("New sorting bin…")
+        new_bin.triggered.connect(lambda: self.create_sorting_bin(seed_music_ids=ids))
+        menu.exec(global_pos)
+
+    def track_reveal(self, music_id: str) -> None:
+        record = self.records_by_id.get(str(music_id))
+        folder = getattr(record, "folder_path", None)
+        if folder is not None and Path(folder).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def track_copy_link(self, music_id: str) -> None:
+        record = self.records_by_id.get(str(music_id))
+        url = (self._sound_url_for_record(record) if record is not None else None) or ""
+        if not url:
+            self.statusBar().showMessage("This sound has no source link", 3000)
+            return
+        QApplication.clipboard().setText(url)
+        self.statusBar().showMessage("Source link copied", 2000)
+
+    def track_more(self, global_pos) -> None:
+        point = self.track_list.viewport().mapFromGlobal(global_pos)
+        self.open_library_context_menu(point, view=self.track_list)
+
+    def track_seek(self, music_id: str, fraction: float) -> None:
+        maximum = self.progress_slider.maximum()
+        if self.track_is_playing(music_id) and maximum > 0:
+            self.seek_playback(int(maximum * max(0.0, min(1.0, fraction))))
+
+    def _seek_from_waveform(self, fraction: float) -> None:
+        record = self.current_preview_record
+        if record is None:
+            return
+        if self.track_is_playing(record.music_id):
+            self.track_seek(record.music_id, fraction)
+        else:
+            self.play_selected_sound()
+
+    def _on_progress_value(self, _value: int) -> None:
+        playing = self.playing_music_id
+        if not playing:
+            return
+        record = self.current_preview_record
+        if record is not None and record.music_id == playing and hasattr(self, "preview_waveform"):
+            self.preview_waveform.set_progress(self.track_progress(playing))
+        # Repaint only the playing row of the track list (cheap; ~10 Hz from the player).
+        if hasattr(self, "track_list") and self.library_stack.currentWidget() is self.track_list:
+            row = self._row_for_music_id(playing)
+            if row >= 0:
+                self.track_list.viewport().update(
+                    self.track_list.visualRect(self.track_list.model().index(row, SOUND_COL))
+                )
+
+    def toggle_detail_pane(self) -> None:
+        """⌘I: hide or show the detail pane (more room for the track list)."""
+        panel = getattr(self, "preview_panel", None)
+        if panel is not None:
+            panel.setVisible(not panel.isVisible())
+
+    def _favorite_current_track(self) -> None:
+        music_id = self._selected_music_id()
+        if music_id:
+            self.toggle_favorite_by_id(music_id)
+
+    def _bin_menu_for_current_track(self) -> None:
+        music_id = self._selected_music_id()
+        if not music_id:
+            return
+        row = self._row_for_music_id(music_id)
+        rect = self.track_list.visualRect(self.track_list.model().index(row, SOUND_COL))
+        self.track_add_to_bin(music_id, self.track_list.viewport().mapToGlobal(rect.center()))
+
+    def open_library_context_menu(self, point, view=None) -> None:
+        view = view or self.table
+        index = view.indexAt(point)
         if index.isValid():
             selected_rows = {i.row() for i in self.table.selectionModel().selectedRows()}
             if index.row() not in selected_rows:
@@ -4445,7 +4746,7 @@ class SoundVaultWindow(QMainWindow):
         menu.addAction(folder_action)
         menu.addSeparator()
         menu.addAction(retranscribe_action)
-        menu.exec(self.table.viewport().mapToGlobal(point))
+        menu.exec(view.viewport().mapToGlobal(point))
 
     def mark_selected_library_as_duplicate(self, music_ids: tuple[str, ...] | list[str] | None = None) -> None:
         selected_ids = self._dedupe_music_ids(list(music_ids or self._selected_library_music_ids()))
@@ -6397,6 +6698,23 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
     font-weight: 600;
     background: transparent;
 }
+
+/* ---- 0.5 track list (design boards 1-4) ---- */
+QListView#trackList { background: transparent; border: none; outline: none; }
+QCheckBox { color: #fbedff; spacing: 8px; background: transparent; }
+QCheckBox::indicator {
+    width: 16px; height: 16px; border-radius: 5px;
+    border: 2px solid #8a7bb0; background: transparent;
+}
+QCheckBox::indicator:checked { background: #b793ff; border-color: #b793ff; }
+QCheckBox::indicator:focus { border-color: #66ecff; }
+QCheckBox#vocalsOnly {
+    padding: 6px 12px; border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+}
+QCheckBox#vocalsOnly:checked { border-color: #b793ff; background: #1d1042; }
+QToolButton#viewModeButton { min-width: 56px; }
+QWidget#previewWaveform { background: transparent; }
 """
 
 

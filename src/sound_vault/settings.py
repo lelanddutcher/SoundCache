@@ -371,6 +371,24 @@ class AppSettings:
                 continue
         return sorted(set(hidden))
 
+    # Library track list (0.5): "list" (painted rows) or "table" (the classic grid),
+    # and the row density.
+    def library_view_mode(self) -> str:
+        value = self._data.get("library_view_mode")
+        return value if value in ("list", "table") else "list"
+
+    def set_library_view_mode(self, mode: str) -> None:
+        self._data["library_view_mode"] = "table" if mode == "table" else "list"
+        self._write()
+
+    def library_density(self) -> str:
+        value = self._data.get("library_density")
+        return value if value in ("comfortable", "compact") else "comfortable"
+
+    def set_library_density(self, density: str) -> None:
+        self._data["library_density"] = "compact" if density == "compact" else "comfortable"
+        self._write()
+
     def set_hidden_table_columns(self, table_name: str, columns: list[int]) -> None:
         tables = self._data.setdefault("hidden_table_columns", {})
         if not isinstance(tables, dict):
