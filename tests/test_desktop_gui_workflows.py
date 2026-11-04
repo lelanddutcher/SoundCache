@@ -233,7 +233,7 @@ def test_desktop_smart_transcript_filters_use_4_state_classifier(tmp_path, monke
         rec("pend", transcript_text="", transcript_path=None, local_audio_path=tmp_path / "b.m4a"),
     ]
 
-    app = _app()
+    _app()
     window = SoundVaultWindow(vault_root=vault)
     try:
         window.active_library_filter = "smart:needs_transcript"
@@ -1013,7 +1013,7 @@ def test_transcription_enrichment_cycle_dedups_across_runs(tmp_path, monkeypatch
     monkeypatch.setattr(window, "_ensure_transcribe_queue_worker", lambda: worker)
 
     first = window._enqueue_pending_transcriptions(announce=False)
-    second = window._run_transcription_cycle() or window._enqueue_pending_transcriptions(announce=False)
+    window._run_transcription_cycle() or window._enqueue_pending_transcriptions(announce=False)
     assert first == 2  # first pass queues both pending sounds
     # The cycle re-checked (still pending on disk) but the worker deduped → 0 new.
     assert window._enqueue_pending_transcriptions(announce=False) == 0
@@ -1070,7 +1070,7 @@ def test_eta_rolling_estimate_and_duration_format():
     assert fmt(3700) == "1h 1m"
 
     # Rolling-rate ETA: 10 items in 10s → 1/s → 50 remaining ≈ 50s.
-    app = _app()
+    _app()
     vault_unused = SoundVaultWindow.__new__(SoundVaultWindow)  # math-only; avoid full init
     from collections import deque
 

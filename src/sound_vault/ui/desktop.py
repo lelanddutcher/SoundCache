@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Callable
+
 from collections import deque
 from pathlib import Path
 import getpass
@@ -86,10 +88,18 @@ from sound_vault.ingest import shortcut_builder, tiktok_auth
 from sound_vault.ingest.errors import humanize_failure
 from sound_vault.ingest.factory import ensure_media_tools_on_path
 from sound_vault.net import ssl_context
-from sound_vault.settings import AppSettings, index_path_for_vault, normalize_relay_base_url
+from sound_vault.settings import (
+    AppSettings,
+    inbox_path_for_vault,
+    index_path_for_vault,
+    normalize_relay_base_url,
+)
 from sound_vault.telemetry.reporter import SaveEventReporter
 from sound_vault.ui.view_model import LibraryViewModel
 from sound_vault.vault.indexer import resolve_vault_root, transcript_state
+
+if TYPE_CHECKING:
+    from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem
 
 DESIGN_LANGUAGE = """
 Sound Cache visual direction: tactile retro-futurist control-room dashboard — brushed metal chrome, dark graphite inset panels, Aqua bevels, physical knobs/sliders/toggles, dense archive/evidence modules.
@@ -4899,8 +4909,6 @@ class SoundVaultWindow(QMainWindow):
         # whole-batch crash), so surface them explicitly — otherwise a run where
         # every link failed reads as "Imported 0 sound(s)." and looks like success.
         if failures:
-            sample = failures[0]
-            reason = getattr(sample, "reason", "") or "unknown error"
             # If the failures look like a missing/expired TikTok session, route the
             # user straight to the fix instead of showing a dead-end error.
             tiktok_failures = [o for o in failures if self._looks_like_tiktok_auth_failure(o)]
@@ -5175,8 +5183,8 @@ class SoundVaultWindow(QMainWindow):
         rows = self.vm.review_queue_rows()
         self.review_table.setSortingEnabled(False)
         self.review_table.setRowCount(len(rows))
-        for row_idx, (queue, count, action, status_filter, media_filter) in enumerate(rows):
-            for col_idx, value in enumerate([queue, f"{count:,}", action]):
+        for row_idx, (queue_name, count, action, status_filter, media_filter) in enumerate(rows):
+            for col_idx, value in enumerate([queue_name, f"{count:,}", action]):
                 table_item = QTableWidgetItem(str(value))
                 table_item.setData(Qt.ItemDataRole.UserRole, {"status_filter": status_filter, "media_filter": media_filter})
                 if col_idx == 1:

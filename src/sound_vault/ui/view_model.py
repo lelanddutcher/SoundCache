@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import shutil
 from threading import Lock
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from sound_vault.diagnostics import exception_fields, write_event
 from sound_vault.db.index_db import IndexDatabase
@@ -17,6 +17,9 @@ from sound_vault.importers.tiktok_archive import (
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
 from sound_vault.relay.client import RelayClient, RelayInboxItem, _default_get_json
 from sound_vault.settings import inbox_path_for_vault
+
+if TYPE_CHECKING:
+    from sound_vault.ingest.service import ReconcileReport
 from sound_vault.vault.metadata_io import atomic_write_json, read_json_lenient
 from sound_vault.vault.indexer import (
     CatalogStats,
@@ -532,7 +535,6 @@ class LibraryViewModel:
         a platform host allowlist before queuing — no file:// / internal-IP /
         off-platform links reach the ingest path. Returns a summary dict.
         """
-        import json as _json
         from urllib.parse import urlparse
 
         from sound_vault.url_safety import is_safe_public_url
@@ -625,7 +627,6 @@ class LibraryViewModel:
     def set_user_notes(self, music_id: str, notes: str) -> bool:
         """Persist a sound's user notes to metadata.json (file-native truth) + the
         index (so notes are searchable). Returns False if the sound is unknown."""
-        import json as _json
 
         record = self.db.get(music_id)
         if record is None:

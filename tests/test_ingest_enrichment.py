@@ -246,12 +246,14 @@ def test_transcribe_sound_folder_writes_transcript(tmp_path):
 
 
 def test_ingest_runs_transcription_on_import(tmp_path):
-    cover = tmp_path / "c.jpg"; cover.write_bytes(b"\xff\xd8jpg")
+    cover = tmp_path / "c.jpg"
+    cover.write_bytes(b"\xff\xd8jpg")
 
     class _Dl:
         def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
             Path(dest_dir).mkdir(parents=True, exist_ok=True)
-            audio = Path(dest_dir) / f"{basename}.m4a"; audio.write_bytes(b"\x00audio")
+            audio = Path(dest_dir) / f"{basename}.m4a"
+            audio.write_bytes(b"\x00audio")
             from sound_vault.ingest.download import DownloadResult
             return DownloadResult(ok=True, audio_path=audio, method="playwright",
                                   info={"id": source_id, "title": "t", "uploader": "creator"})
@@ -286,13 +288,16 @@ def test_reenrich_adds_transcript_when_missing(tmp_path):
 
 def test_composite_downloader_metadata_only_delegates(tmp_path):
     from sound_vault.ingest.download import CompositeDownloader, PlaywrightCaptureDownloader, YtDlpDownloader
-    node_script = tmp_path / "c.cjs"; node_script.write_text("//")
-    state = tmp_path / "s.json"; state.write_text("{}")
+    node_script = tmp_path / "c.cjs"
+    node_script.write_text("//")
+    state = tmp_path / "s.json"
+    state.write_text("{}")
 
     def fake_runner(cmd, cwd=None):
         # meta-only mode → last arg is "meta-only"; write only the sidecar + cover
         assert cmd[-1] == "meta-only"
-        dest = Path(cmd[3]); mid = cmd[4]
+        dest = Path(cmd[3])
+        mid = cmd[4]
         (dest / f"{mid}_cover.jpg").write_bytes(b"\xff\xd8c")
         (dest / f"{mid}_meta.json").write_text(json.dumps({"author": "creator", "coverPath": f"{mid}_cover.jpg", "usageCount": 42}))
         return (0, str(dest / f"{mid}_meta.json"), "")
