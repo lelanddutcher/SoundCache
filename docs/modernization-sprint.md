@@ -7,6 +7,25 @@ https://claude.ai/artifact/H1EcXjYznBaPx8Z8jMR58q. It has two boards: the Librar
 (interactive) and a row anatomy that maps each column to its data.
 Reference screenshots: [`docs/design/reference/`](design/reference/README.md).
 
+### Design boards
+
+The canvas covers every screen, dialog, menu and state the app has today
+(`src/sound_vault/ui/desktop.py`), redrawn in one system. Labels are the app's real
+ones. Anything marked **(new)** does not exist yet.
+
+| Board | Covers | Today's code |
+|-------|--------|--------------|
+| 1 Library | track list, filter bar, now-playing bar (interactive) | `_build_library_view`, `_build_jukebox_chrome` |
+| 2 Foundations | colors, type, buttons, inputs, chips, status pills, toasts, banners, progress, spacing | stylesheet strings in `desktop.py` |
+| 3 Row anatomy | each column and the index field it reads | `LibraryTableModel` |
+| 4 Library states | 11 row states, context menu, View options (replaces Columns ▾), empty/loading, menu bar, keyboard | `_build_menu_bar`, row context menu |
+| 5 Sidebar | smart lists, sorting bins, drop targets, archive health, iPhone/TikTok badges, narrow rail | `ArchiveHealthPanel`, `PairingBadge`, `TikTokStatusBadge` |
+| 6 Detail pane | selected / none / multi-select, transcript states, playback states | `_build_preview_panel` |
+| 7 Inbox | status tabs, import progress, reconcile banner, failure + fix rows, menus | `_build_inbox_view` |
+| 8 Maintenance | review queues, duplicate review, worker status | `_build_review_view`, `_build_dedupe_view`, `_build_worker_view` |
+| 9 Onboarding, Connect TikTok | all 4 setup steps; TikTok not connected / waiting / connected | `OnboardingDialog`, `TikTokConnectDialog` |
+| 10 Settings and alerts | tabbed Settings, Pair iPhone, Add links, imports failed, update, re-transcribe, repair names, vault info | `SettingsDialog`, `PairPhoneDialog`, `AddSoundDialog` |
+
 ## Goal
 
 Replace the spreadsheet-style Library table with a dense track list: one row per sound
