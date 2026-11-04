@@ -16,6 +16,8 @@ dependencies = [
 gui = [
   "PySide6>=6.7",
   "qrcode>=7.4",
+  # Waveform peaks and BPM estimates for the track list (sound_vault.vault.waveform/tempo).
+  "numpy>=1.26",
   # macOS: lets us set the app menu name to "Sound Cache" instead of "Python"
   # (the launcher runs a loose venv python not associated with the .app bundle).
   "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
@@ -51,6 +53,7 @@ dev = [
   "httpx>=0.27",
   "PySide6>=6.7",
   "qrcode>=7.4",
+  "numpy>=1.26",
   "faster-whisper>=1.1.0",
   "yt-dlp>=2025.1",
   "psycopg[binary]>=3.1",
