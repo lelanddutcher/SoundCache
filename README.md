@@ -47,6 +47,7 @@ The app pairs through the public relay at `https://api.soundcache.io`. If you pa
 ![Sound Cache library](docs/images/app-screenshot.png)
 
 - **File-native vault.** A `metadata.json` per sound is the source of truth; SQLite is a disposable, rebuildable full-text cache. Everything stays browsable in Finder or on a NAS even if the app never runs.
+- **Audition in one click.** Every sound gets a loudness waveform and BPM. Click anywhere on a waveform to play from that spot, so a beat drop or a quiet break is easy to find. Rows show the real song name, not just the creator.
 - **Search by anything.** Title, artist, music ID, tags, spoken phrase (transcript), usage and popularity, status, or local-media state.
 - **Rich ingest.** Multi-platform (TikTok, Instagram, YouTube) via yt-dlp with a Playwright capture fallback; pulls artwork, popularity, transcript, and example videos. A shared TikTok video resolves back to its underlying sound so you cache the clean full track, not the trimmed clip.
 - **GPU transcripts.** On-device speech-to-text via Whisper, accelerated on your hardware: Apple's MLX runs it on the Apple-Silicon GPU, NVIDIA cards get CUDA automatically, and everything else falls back to a fast CPU path. A background enrichment cycle quietly fills in anything still missing a transcript.
