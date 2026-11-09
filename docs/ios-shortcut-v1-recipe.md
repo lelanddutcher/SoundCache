@@ -9,7 +9,7 @@ also generated as a reference at `web/shortcut/SoundCache.unsigned.plist`
 (`python scripts/build_ios_shortcut.py`).
 
 ## Prerequisites
-- The relay URL (your `*.vercel.app` URL once deployed, or `http://<mac-ip>:43117` on LAN for testing).
+- The relay URL: `https://api.soundcache.io` (the public relay), or `http://<mac-ip>:43117` on LAN for testing.
 - A pairing code from the desktop app: **Settings → Create pairing code** (e.g. `RIVER-7421`).
 
 ## Build it (Shortcuts app → ＋ New Shortcut)

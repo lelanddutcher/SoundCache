@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Callable
+
 from collections import deque
 from pathlib import Path
 import getpass
@@ -23,6 +25,8 @@ from PySide6.QtCore import (
     QMimeData,
     QModelIndex,
     QObject,
+    QPoint,
+    QRectF,
     Qt,
     QThread,
     QTimer,
@@ -32,13 +36,16 @@ from PySide6.QtCore import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QBrush,
     QColor,
     QDesktopServices,
+    QFont,
     QIcon,
     QKeySequence,
     QLinearGradient,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QShortcut,
@@ -46,6 +53,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -86,10 +94,33 @@ from sound_vault.ingest import shortcut_builder, tiktok_auth
 from sound_vault.ingest.errors import humanize_failure
 from sound_vault.ingest.factory import ensure_media_tools_on_path
 from sound_vault.net import ssl_context
-from sound_vault.settings import AppSettings, index_path_for_vault
+from sound_vault.settings import (
+    AppSettings,
+    inbox_path_for_vault,
+    index_path_for_vault,
+    normalize_relay_base_url,
+)
 from sound_vault.telemetry.reporter import SaveEventReporter
+from sound_vault.ui.track_list import (
+    CYAN,
+    MUTED,
+    RECORD_ROLE,
+    ElidedLabel,
+    FlowLayout,
+    NowPlayingBar,
+    StrokeIcon,
+    TrackListView,
+    TrackRowDelegate,
+    WaveformBar,
+    accessible_row_text,
+    user_tags,
+)
+from sound_vault.ui.table_items import _QUEUE_LABELS, _SOURCE_LABELS, _friendly_time, _SortableItem
 from sound_vault.ui.view_model import LibraryViewModel
-from sound_vault.vault.indexer import resolve_vault_root, transcript_state
+from sound_vault.vault.indexer import display_title, has_speech, resolve_vault_root, transcript_state
+
+if TYPE_CHECKING:
+    from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem
 
 DESIGN_LANGUAGE = """
 Sound Cache visual direction: tactile retro-futurist control-room dashboard — brushed metal chrome, dark graphite inset panels, Aqua bevels, physical knobs/sliders/toggles, dense archive/evidence modules.
@@ -136,6 +167,24 @@ VIDEOS_COL = 8
 LOCAL_AUDIO_COL = 9
 CONTEXT_COL = 10
 DEFAULT_HIDDEN_LIBRARY_COLUMNS: tuple[int, ...] = (ADDED_COL, LOCAL_AUDIO_COL, CONTEXT_COL)
+# Sort keys that have no table column (chosen from the Sort menu, not a header click).
+BPM_SORT_KEY = 100
+# Sort menu: label -> (sort column, order).
+LIBRARY_SORTS: tuple[tuple[str, int, "Qt.SortOrder"], ...] = (
+    ("Most used", POPULARITY_COL, Qt.SortOrder.DescendingOrder),
+    ("Recently cached", ADDED_COL, Qt.SortOrder.DescendingOrder),
+    ("Title A–Z", SOUND_COL, Qt.SortOrder.AscendingOrder),
+    ("BPM", BPM_SORT_KEY, Qt.SortOrder.AscendingOrder),
+)
+# BPM chip: value -> (label, low, high); "unknown" = no confident tempo.
+BPM_FILTERS: tuple[tuple[str, str], ...] = (
+    ("all", "Any BPM"),
+    ("under_90", "Under 90 BPM"),
+    ("90_120", "90–120 BPM"),
+    ("120_150", "120–150 BPM"),
+    ("over_150", "150+ BPM"),
+    ("unknown", "BPM unknown"),
+)
 
 
 _LIBRARY_HEADERS = (
@@ -160,6 +209,7 @@ class LibraryTableModel(QAbstractTableModel):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._rows: list = []
+        self._row_of: dict[str, int] = {}
         self._favorites: set[str] = set()
         self._playable: set[str] = set()
 
@@ -167,6 +217,7 @@ class LibraryTableModel(QAbstractTableModel):
     def set_rows(self, rows: list, *, favorites: set[str], playable: set[str]) -> None:
         self.beginResetModel()
         self._rows = rows
+        self._row_of = {record.music_id: idx for idx, record in enumerate(rows)}
         self._favorites = favorites
         self._playable = playable
         self.endResetModel()
@@ -181,6 +232,10 @@ class LibraryTableModel(QAbstractTableModel):
                 idx = self.index(row, FAVORITE_COL)
                 self.dataChanged.emit(idx, idx, [FAVORITE_ROLE])
                 break
+
+    def row_of(self, music_id: str) -> int:
+        """Row of ``music_id`` in the current rows, or -1 (O(1))."""
+        return self._row_of.get(str(music_id), -1)
 
     def music_id_at(self, row: int) -> str | None:
         if 0 <= row < len(self._rows):
@@ -213,6 +268,10 @@ class LibraryTableModel(QAbstractTableModel):
         record = self._rows[row]
         if role == Qt.ItemDataRole.UserRole:
             return record.music_id
+        if role == RECORD_ROLE:
+            return record
+        if role == Qt.ItemDataRole.AccessibleTextRole:
+            return accessible_row_text(record)
         if role == FAVORITE_ROLE:
             return record.music_id in self._favorites
         if role == PLAYABLE_ROLE:
@@ -323,7 +382,44 @@ class LibraryDropButton(QPushButton):
     def __init__(self, label: str, target_id: str, parent: QWidget | None = None) -> None:
         super().__init__(label, parent)
         self.target_id = target_id
+        self.count_text = ""
         self.setAcceptDrops(True)
+
+    def set_count(self, count: int | None) -> None:
+        """Right-aligned count (design board 5); None hides it (e.g. while indexing)."""
+        self.count_text = "" if count is None else f"{count:,}"
+        self.setAccessibleName(f"{self.text()}, {self.count_text}" if self.count_text else self.text())
+        self.update()
+
+    def sizeHint(self):  # noqa: N802 - Qt override
+        # The stylesheet reserves right padding for the count. Without a cap, that padding
+        # raises the width hint and pushes the sidebar column wider than its viewport.
+        # (QPushButton's minimumSizeHint derives from this, so one override covers both.)
+        hint = super().sizeHint()
+        hint.setWidth(min(hint.width(), 96))
+        return hint
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        if not self.count_text:
+            return
+        painter = QPainter(self)
+        active = bool(self.property("active"))
+        if active:
+            painter.setPen(QColor("#fbedff"))
+        elif self.count_text.strip() == "0":
+            painter.setPen(QColor(169, 147, 214, 110))  # empty collections recede
+        else:
+            painter.setPen(QColor("#a993d6"))
+        font = painter.font()
+        font.setPixelSize(12)
+        font.setFeature(QFont.Tag("tnum"), 1)  # digits line up on the right edge
+        painter.setFont(font)
+        painter.drawText(
+            self.rect().adjusted(0, 0, -11, 0),
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            self.count_text,
+        )
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt override
         can_drop = self.target_id == "favorites" or self.target_id.startswith("bin:")
@@ -522,8 +618,8 @@ class ArchiveHealthPanel(QFrame):
         super().__init__(parent)
         self.setObjectName("archiveHealthPanel")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(3)
 
         title = QLabel("ARCHIVE HEALTH")
         title.setObjectName("archiveHealthTitle")
@@ -533,12 +629,12 @@ class ArchiveHealthPanel(QFrame):
         self._bars: dict[str, HealthBar] = {}
         self._values: dict[str, QLabel] = {}
         for label_text, missing_key in self.ROWS:
+            # Label row first, its bar directly under it, then a gap: each bar clearly
+            # belongs to the label above it.
             bar = HealthBar(self)
             self._bars[missing_key] = bar
-            layout.addWidget(bar)
-
             row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 4)
+            row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(0)
             label = QLabel(label_text)
             label.setObjectName("archiveHealthLabel")
@@ -549,6 +645,8 @@ class ArchiveHealthPanel(QFrame):
             row.addWidget(label, 1)
             row.addWidget(value)
             layout.addLayout(row)
+            layout.addWidget(bar)
+            layout.addSpacing(6)
 
     def update_from_counts(self, counts: dict[str, int]) -> None:
         total = int(counts.get("total", 0) or 0)
@@ -600,36 +698,35 @@ class PairingBadge(QFrame):
         super().__init__(parent)
         self.setObjectName("pairingCard")
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(10)
-        self._phone = QLabel("📱")
-        self._phone.setStyleSheet("font-size:22px;background:transparent;")
+        self._phone = StrokeIcon("phone", 18, self)
         col = QVBoxLayout()
         col.setSpacing(1)
         self._title = QLabel("iPhone paired")
         self._title.setWordWrap(True)
-        self._title.setStyleSheet("font-weight:700;color:#fbedff;background:transparent;")
+        self._title.setStyleSheet("font-size:12px;font-weight:700;color:#fbedff;background:transparent;")
         self._sub = QLabel("ready to catch shares")
         self._sub.setWordWrap(True)
         self._sub.setStyleSheet("font-size:11px;color:#c5b3e6;background:transparent;")
         col.addWidget(self._title)
         col.addWidget(self._sub)
-        self._check = GradientCheck(self, 26)
+        self._check = GradientCheck(self, 20)
         self._check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        lay.addWidget(self._phone, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self._phone, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(col, 1)
-        lay.addWidget(self._check, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self._check, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_state(self, *, paired: bool, detail: str = "") -> None:
         self._check.setVisible(paired)
         if paired:
             self._title.setText("iPhone paired")
             self._sub.setText(detail or "ready to catch shares")
-            self._phone.setText("📱")
+            self._phone.set_color(CYAN)
         else:
             self._title.setText("iPhone not paired")
             self._sub.setText("open Settings to pair")
-            self._phone.setText("📱")
+            self._phone.set_color(MUTED)
 
 
 class TikTokStatusBadge(QFrame):
@@ -643,25 +740,24 @@ class TikTokStatusBadge(QFrame):
         self.setObjectName("pairingCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(10)
-        self._icon = QLabel("🎵")
-        self._icon.setStyleSheet("font-size:22px;background:transparent;")
+        self._icon = StrokeIcon("note", 18, self)
         col = QVBoxLayout()
         col.setSpacing(1)
         self._title = QLabel("TikTok connected")
         self._title.setWordWrap(True)
-        self._title.setStyleSheet("font-weight:700;color:#fbedff;background:transparent;")
+        self._title.setStyleSheet("font-size:12px;font-weight:700;color:#fbedff;background:transparent;")
         self._sub = QLabel("ready to grab sounds")
         self._sub.setWordWrap(True)
         self._sub.setStyleSheet("font-size:11px;color:#c5b3e6;background:transparent;")
         col.addWidget(self._title)
         col.addWidget(self._sub)
-        self._check = GradientCheck(self, 26)
+        self._check = GradientCheck(self, 20)
         self._check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        lay.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(col, 1)
-        lay.addWidget(self._check, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self._check, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_status(self, status: "tiktok_auth.TikTokAuthStatus") -> None:
         self._check.setVisible(status.connected)
@@ -673,11 +769,11 @@ class TikTokStatusBadge(QFrame):
                 self._sub.setText(f"session active · {status.days_left}d left")
             else:
                 self._sub.setText("ready to grab sounds")
-            self._icon.setText("🎵")
+            self._icon.set_color(CYAN)
         else:
-            self._title.setText("TikTok not connected")
-            self._sub.setText("tap to connect → grab sounds")
-            self._icon.setText("🎵")
+            self._title.setText("Connect TikTok")
+            self._sub.setText("tap to sign in")
+            self._icon.set_color(MUTED)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         if event.button() == Qt.MouseButton.LeftButton:
@@ -758,24 +854,25 @@ class TikTokConnectDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Connect TikTok")
-        self.setMinimumWidth(520)
+        self.setFixedWidth(520)
         self._worker: _TikTokLoginWorker | None = None
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
 
         lead = QLabel("Connect your TikTok account")
         lead.setObjectName("previewTitle")
         layout.addWidget(lead)
 
         why = QLabel(
-            "Sound Cache saves the <b>real audio</b> of a TikTok sound — the actual track, "
-            "not a screen recording.<br><br>"
-            "• TikTok only hands that audio to a <b>logged-in browser</b>, so Sound Cache "
-            "borrows your TikTok session to grab the sounds you save.<br>"
-            "• You'll sign in on <b>TikTok's own page</b> — Sound Cache never sees your "
-            "password. Only the session is saved, and only on this Mac.<br>"
-            "• Disconnect anytime. Sessions expire after a while; just reconnect when they do."
+            "Sound Cache saves the real audio of a TikTok sound, not a screen recording."
+            "<ul style='margin-left:0; -qt-list-indent:1'>"
+            "<li style='margin-bottom:6px'>TikTok only gives that audio to a logged-in "
+            "browser, so Sound Cache uses your TikTok session to fetch the sounds you save.</li>"
+            "<li style='margin-bottom:6px'>You sign in on TikTok's own page. Sound Cache "
+            "<b>never sees your password</b>. Only the session is saved, on this Mac.</li>"
+            "<li>Sessions expire after a while. Reconnect when they do.</li></ul>"
         )
         why.setWordWrap(True)
         why.setObjectName("onboardBody")
@@ -789,38 +886,65 @@ class TikTokConnectDialog(QDialog):
         self.detail.setObjectName("muted")
         layout.addWidget(self.detail)
 
+        # Destructive on the left, away from the primary action; Done on the right.
         actions = QHBoxLayout()
-        self.import_btn = QPushButton("Import login file…")
-        self.import_btn.setToolTip("Advanced: use an existing Playwright storageState.json")
-        self.import_btn.clicked.connect(self.import_state)
         self.disconnect_btn = QPushButton("Disconnect")
-        self.disconnect_btn.clicked.connect(self.disconnect_state)
+        self.disconnect_btn.setObjectName("cautionButton")
+        self.disconnect_btn.clicked.connect(self._confirm_disconnect)
         self.connect_btn = QPushButton("Connect TikTok account →")
         self.connect_btn.setObjectName("primaryButton")
         self.connect_btn.clicked.connect(self.start_login)
-        close = QPushButton("Close")
+        close = QPushButton("Done")
         close.clicked.connect(self.accept)
-        actions.addWidget(self.import_btn)
+        self.done_btn = close
         actions.addWidget(self.disconnect_btn)
         actions.addStretch(1)
         actions.addWidget(self.connect_btn)
         actions.addWidget(close)
         layout.addLayout(actions)
 
-        privacy = QLabel(
-            f"Saved at {tiktok_auth.state_path()} (file-private). "
-            "Used only to fetch the sounds you save — never shared."
-        )
+        footer = QHBoxLayout()
+        privacy = QLabel("Saved only on this Mac, readable only by you.")
         privacy.setWordWrap(True)
         privacy.setObjectName("muted")
-        layout.addWidget(privacy)
+        privacy.setToolTip(str(tiktok_auth.state_path()))
+        self.import_btn = QToolButton()
+        self.import_btn.setObjectName("linkButton")
+        self.import_btn.setText("Import a login file…")
+        self.import_btn.setToolTip("Advanced: use an existing Playwright storageState.json")
+        self.import_btn.clicked.connect(self.import_state)
+        footer.addWidget(privacy, 1, Qt.AlignmentFlag.AlignVCenter)
+        footer.addWidget(self.import_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(footer)
 
         self._refresh()
+
+    def _say(self, text: str) -> None:
+        self.detail.setText(text)
+        self.detail.setVisible(bool(text))
+
+    def _confirm_disconnect(self) -> None:
+        answer = QMessageBox.question(
+            self, "Disconnect TikTok?",
+            "Sound Cache won't be able to fetch new sounds until you reconnect.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.disconnect_state()
 
     def _refresh(self) -> None:
         status = tiktok_auth.connection_status()
         self.status_badge.set_status(status)
-        self.detail.setText(status.reason)
+        # The card already says "session active"; the line below only carries news.
+        self.detail.setText("" if status.connected else status.reason)
+        self.detail.setVisible(bool(self.detail.text()))
+        # The gradient marks the next step: Connect when signed out, Done when signed in.
+        done = getattr(self, "done_btn", None)
+        if done is not None:
+            self.connect_btn.setObjectName("" if status.connected else "primaryButton")
+            done.setObjectName("primaryButton" if status.connected else "")
+            for button in (self.connect_btn, done):
+                button.style().unpolish(button)
+                button.style().polish(button)
         self.disconnect_btn.setEnabled(status.connected)
         self.connect_btn.setText("Reconnect TikTok →" if status.connected else "Connect TikTok account →")
 
@@ -829,13 +953,13 @@ class TikTokConnectDialog(QDialog):
             return
         self.connect_btn.setEnabled(False)
         self.import_btn.setEnabled(False)
-        self.detail.setText(
+        self._say(
             "Opening a TikTok login window… sign in there, then come back. "
             "This window updates automatically."
         )
         self._worker = _TikTokLoginWorker(self)
         self._worker.loginFinished.connect(self._on_login_finished)
-        self._worker.progress.connect(self.detail.setText)
+        self._worker.progress.connect(self._say)
         self._worker.start()
 
     def _on_login_finished(self, connected: bool, message: str) -> None:
@@ -844,9 +968,9 @@ class TikTokConnectDialog(QDialog):
         self.import_btn.setEnabled(True)
         self._refresh()
         if connected:
-            self.detail.setText("✓ TikTok connected. You can close this and import your sounds.")
+            self._say("✓ TikTok connected. You can close this and import your sounds.")
         elif message:
-            self.detail.setText(message)
+            self._say(message)
 
     def import_state(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -856,7 +980,7 @@ class TikTokConnectDialog(QDialog):
             return
         src = Path(path)
         if not tiktok_auth.is_valid_state_file(src):
-            self.detail.setText("That file isn't a valid logged-in TikTok session.")
+            self._say("That file isn't a valid logged-in TikTok session.")
             return
         dst = tiktok_auth.state_path()
         try:
@@ -864,15 +988,15 @@ class TikTokConnectDialog(QDialog):
             shutil.copy2(src, dst)
             os.chmod(dst, 0o600)
         except OSError as exc:
-            self.detail.setText(f"Could not import: {exc}")
+            self._say(f"Could not import: {exc}")
             return
         self._refresh()
-        self.detail.setText("✓ Imported a TikTok session.")
+        self._say("✓ Imported a TikTok session.")
 
     def disconnect_state(self) -> None:
         tiktok_auth.disconnect()
         self._refresh()
-        self.detail.setText("Disconnected. Reconnect whenever you want to grab more sounds.")
+        self._say("Disconnected. Reconnect whenever you want to grab more sounds.")
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         worker = self._worker
@@ -948,29 +1072,67 @@ class SettingsDialog(QDialog):
     def __init__(self, *, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("Shortcut Relay")
-        self.setMinimumWidth(520)
+        self.setWindowTitle("Settings")
+        self.setFixedWidth(580)
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
         self.relay_url = QLineEdit(settings.relay_base_url())
         self.relay_url.setPlaceholderText("https://api.soundcache.io")
         self.pair_code = QLineEdit(settings.relay_pair_code())
-        self.pair_code.setPlaceholderText("VAULT-1234")
+        self.pair_code.setPlaceholderText("CLIP-XXXX-XXXX")
         self.device_id = QLineEdit(settings.relay_device_id())
         self.device_secret = QLineEdit(settings.relay_device_secret())
         self.device_secret.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("Relay URL", self.relay_url)
-        form.addRow("Pair code", self.pair_code)
-        form.addRow("Device ID", self.device_id)
-        form.addRow("Device secret", self.device_secret)
-        layout.addLayout(form)
+        for field in (self.pair_code, self.device_id, self.device_secret):
+            field.setObjectName("monoField")  # machine values: tell l, I and 1 apart
+        eye = QPixmap(36, 36)
+        eye.fill(Qt.GlobalColor.transparent)
+        eye_painter = QPainter(eye)
+        eye_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        from sound_vault.ui.track_list import draw_icon
 
-        self.telemetry_checkbox = QCheckBox(
-            "Share anonymized save events to the public leaderboard (sound id, platform, title — no account)"
+        draw_icon(eye_painter, "eye", eye.rect(), MUTED, size=28)
+        eye_painter.end()
+        reveal = QAction(QIcon(eye), "Show", self)
+        self.device_secret.addAction(reveal, QLineEdit.ActionPosition.TrailingPosition)
+        reveal.setToolTip("Show or hide the device secret")
+        reveal.triggered.connect(
+            lambda: self.device_secret.setEchoMode(
+                QLineEdit.EchoMode.Normal
+                if self.device_secret.echoMode() == QLineEdit.EchoMode.Password
+                else QLineEdit.EchoMode.Password
+            )
         )
+
+        phone_group = QGroupBox("IPHONE SHORTCUT")
+        phone_layout = QVBoxLayout(phone_group)
+        phone_layout.setSpacing(10)
+        form = self._settings_form()
+        for label, field in (
+            ("Relay URL", self.relay_url), ("Pair code", self.pair_code),
+            ("Device ID", self.device_id), ("Device secret", self.device_secret),
+        ):
+            form.addRow(self._form_label(label), field)
+        phone_layout.addLayout(form)
+        self.result_label = QLabel("Create a pairing code, then pair your iPhone to add it to the Shortcut.")
+        self.result_label.setWordWrap(True)
+        self.result_label.setObjectName("muted")
+        phone_actions = QHBoxLayout()
+        phone_actions.addWidget(self.result_label, 1)
+        create_pairing = QPushButton("Create pairing code")
+        create_pairing.clicked.connect(self.create_pairing_code)
+        pair_phone = QPushButton("Pair iPhone…")
+        pair_phone.setToolTip("Scan-to-set-up QR + export the Save to Sound Cache shortcut")
+        pair_phone.clicked.connect(self.open_pair_phone)
+        phone_actions.addWidget(create_pairing)
+        phone_actions.addWidget(pair_phone)
+        phone_layout.addLayout(phone_actions)
+        layout.addWidget(phone_group)
+
+        self.telemetry_checkbox = QCheckBox("Share my saves on the public leaderboard")
         self.telemetry_checkbox.setChecked(settings.telemetry_enabled())
-        layout.addWidget(self.telemetry_checkbox)
 
         # Transcription (lyrics) engine. `base` stays the default; the others are opt-in
         # and download their model on first use. Label each with its *actual* cache state
@@ -979,9 +1141,9 @@ class SettingsDialog(QDialog):
         from sound_vault.workers.transcription import asr_model_is_cached
 
         _asr_specs = [
-            ("Whisper — base (fast, weak on sung lyrics)", "mlx-whisper", "base", ""),
-            ("Whisper — large-v3-turbo (much better accuracy)", "mlx-whisper", "large-v3-turbo", "~1.6 GB"),
-            ("Qwen3-ASR — best for sung lyrics", "qwen3-asr", "qwen3-asr-1.7b", "~3.8 GB"),
+            ("Whisper base · fast", "mlx-whisper", "base", ""),
+            ("Whisper large-v3-turbo · accurate", "mlx-whisper", "large-v3-turbo", "1.6 GB"),
+            ("Qwen3-ASR · best for sung lyrics", "qwen3-asr", "qwen3-asr-1.7b", "3.8 GB"),
         ]
         self._asr_presets = []
         for _base_label, _engine, _model, _size in _asr_specs:
@@ -990,13 +1152,16 @@ class SettingsDialog(QDialog):
             except Exception:  # noqa: BLE001
                 _cached = False
             if _cached:
-                _suffix = "  ✓ downloaded"
+                _suffix = " · downloaded"
             elif _size:
-                _suffix = f"  · downloads {_size} on first use"
+                _suffix = f" · {_size} download"
             else:
                 _suffix = ""
             self._asr_presets.append((_base_label + _suffix, _engine, _model))
         self.asr_engine = QComboBox()
+        # Long engine names must not widen the field past the form (that dropped its label).
+        self.asr_engine.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.asr_engine.setMinimumContentsLength(20)
         for label, engine, model in self._asr_presets:
             self.asr_engine.addItem(label, userData=(engine, model))
         _tcfg = settings.transcription_config()
@@ -1005,46 +1170,96 @@ class SettingsDialog(QDialog):
             if (_e, _m) == _cur:
                 self.asr_engine.setCurrentIndex(_i)
                 break
-        asr_form = QFormLayout()
-        asr_form.addRow("Transcription (lyrics)", self.asr_engine)
-        layout.addLayout(asr_form)
-        retranscribe_all = QPushButton("Re-transcribe entire library…")
+        asr_group = QGroupBox("TRANSCRIPTION")
+        asr_layout = QVBoxLayout(asr_group)
+        asr_layout.setSpacing(10)
+        asr_form = self._settings_form()
+        asr_form.addRow(self._form_label("Lyrics engine"), self.asr_engine)
+        asr_layout.addLayout(asr_form)
+        retranscribe_row = QHBoxLayout()
+        retranscribe_row.addStretch(1)
+        retranscribe_all = QPushButton("Re-transcribe library with this engine…")
+        retranscribe_all.setObjectName("cautionButton")  # big, slow, overwrites transcripts
         retranscribe_all.setToolTip(
             "Re-run speech recognition on EVERY sound with the selected engine, overwriting "
             "existing transcripts. You'll be asked to confirm first (it's a big, slow job)."
         )
         retranscribe_all.clicked.connect(self._retranscribe_library)
-        layout.addWidget(retranscribe_all)
+        retranscribe_row.addWidget(retranscribe_all)
+        asr_layout.addLayout(retranscribe_row)
+        layout.addWidget(asr_group)
 
-        self.result_label = QLabel("Create pairing code on the relay, then add it to the iOS Shortcut.")
-        self.result_label.setWordWrap(True)
-        layout.addWidget(self.result_label)
-
-        actions = QHBoxLayout()
-        create_pairing = QPushButton("Create pairing code")
-        create_pairing.clicked.connect(self.create_pairing_code)
-        pair_phone = QPushButton("Pair iPhone…")
-        pair_phone.setToolTip("Scan-to-set-up QR + export the Save to Sound Cache shortcut")
-        pair_phone.clicked.connect(self.open_pair_phone)
+        account_group = QGroupBox("TIKTOK AND PRIVACY")
+        account_layout = QVBoxLayout(account_group)
+        account_layout.setSpacing(6)
+        tiktok_row = QHBoxLayout()
+        tiktok_note = QLabel("Sound Cache uses your TikTok login to fetch the sounds you save.")
+        tiktok_note.setObjectName("muted")
+        tiktok_note.setWordWrap(True)
         connect_tiktok = QPushButton("Connect TikTok…")
         connect_tiktok.setToolTip("Sign in so Sound Cache can grab the real audio of saved sounds")
         connect_tiktok.clicked.connect(lambda: TikTokConnectDialog(parent=self).exec())
-        save = QPushButton("Save relay settings")
-        save.setObjectName("primaryButton")
-        save.clicked.connect(self.save_settings)
-        close = QPushButton("Close")
-        close.clicked.connect(self.accept)
-        actions.addWidget(create_pairing)
-        actions.addWidget(pair_phone)
-        actions.addWidget(connect_tiktok)
+        tiktok_row.addWidget(tiktok_note, 1)
+        tiktok_row.addWidget(connect_tiktok)
+        account_layout.addLayout(tiktok_row)
+        account_layout.addSpacing(6)
+        account_layout.addWidget(self.telemetry_checkbox)
+        telemetry_note = QLabel("Sends the sound ID, platform and title. No account information.")
+        telemetry_note.setObjectName("muted")
+        telemetry_note.setContentsMargins(26, 0, 0, 0)  # under the checkbox label, not its box
+        account_layout.addWidget(telemetry_note)
+        layout.addWidget(account_group)
+
+        # Footer: Cancel discards, Save keeps. ("Close" used to drop checkbox and engine
+        # changes without saying so.)
+        actions = QHBoxLayout()
         actions.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("Save settings")
+        save.setObjectName("primaryButton")
+        save.setDefault(True)
+        save.clicked.connect(self._save_and_close)
+        actions.addWidget(cancel)
         actions.addWidget(save)
-        actions.addWidget(close)
         layout.addLayout(actions)
+
+    @staticmethod
+    def _settings_form() -> QFormLayout:
+        """Every form in Settings shares one label column and lets fields fill the row
+        (macOS otherwise keeps fields at their natural width and truncates values)."""
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        return form
+
+    @staticmethod
+    def _form_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setFixedWidth(110)
+        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        label.setObjectName("formLabel")
+        return label
+
+    def _save_and_close(self) -> None:
+        self.save_settings()
+        self.accept()
+
+    def _relay_field_url(self) -> str:
+        """The relay URL field, with a dead legacy (Vercel) host swapped for the current
+        relay. The field is updated too, so the user sees the URL that is actually used."""
+        url = normalize_relay_base_url(self.relay_url.text())
+        if url != self.relay_url.text():
+            self.relay_url.setText(url)
+        return url
 
     def save_settings(self) -> None:
         self.settings.set_relay_config(
-            base_url=self.relay_url.text(),
+            base_url=self._relay_field_url(),
             pair_code=self.pair_code.text(),
             device_id=self.device_id.text(),
             device_secret=self.device_secret.text(),
@@ -1079,7 +1294,7 @@ class SettingsDialog(QDialog):
             win.retranscribe_entire_library()
 
     def create_pairing_code(self) -> None:
-        base_url = self.relay_url.text().strip().rstrip("/")
+        base_url = self._relay_field_url()
         if not base_url:
             self.result_label.setText("Enter a relay URL first.")
             return
@@ -1107,13 +1322,14 @@ class SettingsDialog(QDialog):
     def open_pair_phone(self) -> None:
         # Persist whatever is in the fields so the QR/export use current values.
         self.save_settings()
-        if not self.relay_url.text().strip() or not self.pair_code.text().strip():
+        relay_url = self._relay_field_url()
+        if not relay_url or not self.pair_code.text().strip():
             self.result_label.setText(
                 "Set a relay URL and pair code first (use “Create pairing code”), then pair your iPhone."
             )
             return
         PairPhoneDialog(
-            relay_url=self.relay_url.text().strip().rstrip("/"),
+            relay_url=relay_url,
             pair_code=self.pair_code.text().strip().upper(),
             parent=self,
         ).exec()
@@ -1343,6 +1559,50 @@ class _TranscriptionWorker(QThread):
             self.finished_ok.emit(count, None)
         except Exception as exc:  # noqa: BLE001 - surface to UI thread
             self.finished_ok.emit(0, exc)
+
+
+class _AnalysisWorker(QThread):
+    """Backfills waveform levels + BPM for sounds with no analysis or an older one.
+
+    Works through a fixed list, one ffmpeg decode per sound (~0.1–0.3 s each, more on a
+    network vault). ANALYSIS_THREADS decodes run at once: each is mostly a subprocess
+    and file I/O, so threads overlap well. Checks isInterruptionRequested before each
+    item, so quitting waits only for the decodes already running."""
+
+    ANALYSIS_THREADS = 4
+
+    analyzed = Signal(str)  # music_id that gained a waveform
+    progress = Signal(int, int)  # done, total
+
+    def __init__(self, vm, targets, parent=None) -> None:
+        super().__init__(parent)
+        self._vm = vm
+        self._targets = list(targets)
+
+    def _analyze(self, target) -> tuple[str, bool]:
+        music_id, folder, audio = target
+        if self.isInterruptionRequested():
+            return str(music_id), False
+        try:
+            return str(music_id), bool(self._vm.analyze_one(music_id, folder, audio))
+        except Exception as exc:  # noqa: BLE001 - per-item best-effort
+            write_event("gui.analysis_error", music_id=str(music_id), **exception_fields(exc))
+            return str(music_id), False
+
+    def run(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        total = len(self._targets)
+        write_event("gui.analysis_backfill_started", count=str(total))
+        done = ok = 0
+        with ThreadPoolExecutor(max_workers=self.ANALYSIS_THREADS, thread_name_prefix="sound-vault-analysis") as pool:
+            for music_id, analyzed in pool.map(self._analyze, self._targets):
+                if analyzed:
+                    ok += 1
+                    self.analyzed.emit(music_id)
+                done += 1
+                self.progress.emit(done, total)
+        write_event("gui.analysis_backfill_done", done=str(done), analyzed=str(ok))
 
 
 class _TranscriptionQueueWorker(QThread):
@@ -2043,13 +2303,16 @@ class SoundVaultWindow(QMainWindow):
         nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
         nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         nav_body = QWidget()
+        nav_body.setObjectName("navBody")
+        nav_body.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         nav_layout = QVBoxLayout(nav_body)
         nav_layout.setContentsMargins(0, 0, 4, 0)
-        nav_layout.setSpacing(10)
+        nav_layout.setSpacing(2)  # every row repeats on the same 30 px rhythm
         library_row = QHBoxLayout()
         library_row.setSpacing(6)
         self.library_toggle = QPushButton("▾ Library")
         self.library_toggle.setObjectName("navButton")
+        self.library_toggle.setProperty("section", True)  # a header, never the active row
         self.library_toggle.clicked.connect(self.toggle_library_section)
         self.nav_buttons["library"] = self.library_toggle
         self.add_bin_button = QToolButton()
@@ -2061,12 +2324,17 @@ class SoundVaultWindow(QMainWindow):
         library_row.addWidget(self.add_bin_button)
         nav_layout.addLayout(library_row)
         self.library_section = QWidget()
+        self.library_section.setObjectName("librarySection")
         self.library_section_layout = QVBoxLayout(self.library_section)
-        self.library_section_layout.setContentsMargins(10, 0, 0, 4)
-        self.library_section_layout.setSpacing(5)
+        self.library_section_layout.setContentsMargins(12, 0, 0, 4)  # one deliberate child indent
+        self.library_section_layout.setSpacing(2)
         nav_layout.addWidget(self.library_section)
         self.library_bin_buttons = {}
         self.refresh_library_sidebar()
+        nav_layout.addSpacing(12)
+        workspace = QLabel("WORKSPACE")
+        workspace.setObjectName("sourceGroup")
+        nav_layout.addWidget(workspace)
         for label, view_name in [
             ("Ingest inbox", "inbox"),
             ("Review queues", "review"),
@@ -2081,6 +2349,7 @@ class SoundVaultWindow(QMainWindow):
             nav_layout.addWidget(btn)
         nav_layout.addStretch(1)
         nav_scroll.setWidget(nav_body)
+        nav_scroll.setMinimumHeight(260)  # navigation never scrolls out of sight
         side.addWidget(nav_scroll, 1)
         self.archive_health_panel = ArchiveHealthPanel()
         side.addWidget(self.archive_health_panel)
@@ -2103,23 +2372,26 @@ class SoundVaultWindow(QMainWindow):
         self.title_label = QLabel("Library")
         self.title_label.setObjectName("title")
         vault_str = str(self.vault_root)
-        compact = "/".join(self.vault_root.parts[-3:]) if len(self.vault_root.parts) > 3 else vault_str
+        compact = "…/" + "/".join(self.vault_root.parts[-2:]) if len(self.vault_root.parts) > 3 else vault_str
         self.vault_label = QLabel(compact)
-        self.vault_label.setObjectName("muted")
+        self.vault_label.setObjectName("vaultPath")
         self.vault_label.setToolTip(vault_str)
+        title_box.setSpacing(2)
         title_box.addWidget(self.title_label)
         title_box.addWidget(self.vault_label)
+        top.setSpacing(8)
         top.addLayout(title_box)
         top.addStretch(1)
+        top.addWidget(self._build_index_status())
         choose = QPushButton("Choose vault")
         choose.clicked.connect(self.choose_vault)
-        self.rebuild_button = QPushButton("Rebuild index")
-        self.rebuild_button.setObjectName("primaryButton")
+        self.rebuild_button = QPushButton("Rebuild index")  # maintenance: not the loudest control
         self.rebuild_button.clicked.connect(self.rebuild_index)
+        for button in (choose, self.rebuild_button):
+            button.setFixedHeight(32)
         top.addWidget(choose)
         top.addWidget(self.rebuild_button)
         main_layout.addLayout(top)
-        main_layout.addWidget(self._build_jukebox_chrome())
 
         self.stack = QStackedWidget()
         self.library_view = self._build_library_view()
@@ -2133,14 +2405,18 @@ class SoundVaultWindow(QMainWindow):
         self.stack.addWidget(self.dedupe_view)
         self.stack.addWidget(self.worker_view)
         main_layout.addWidget(self.stack, 1)
+        main_layout.addWidget(self._build_now_playing_bar())
         shell.addWidget(main, 1)
 
         preview = self._build_preview_panel()
+        self.preview_panel = preview
         shell.addWidget(preview)
         _assets = Path(__file__).resolve().parent / "assets"
         styled = STYLESHEET.replace(
             "__DECK_BG__", (_assets / "deck-bg.png").as_posix()
-        ).replace("__SIDEBAR_BG__", (_assets / "sidebar-bg.png").as_posix())
+        ).replace("__SIDEBAR_BG__", (_assets / "sidebar-bg.png").as_posix()).replace(
+            "__CHEVRON__", (_assets / "chevron-down@2x.png").as_posix()
+        ).replace("__CHECK__", (_assets / "check@2x.png").as_posix())
         self.setStyleSheet(styled)
         self.show_view("library")
 
@@ -2159,7 +2435,7 @@ class SoundVaultWindow(QMainWindow):
         self.library_bin_buttons = {}
         sidebar_rows = [
             ("all", "All sounds", "Show full library"),
-            ("favorites", "★ Favorites", "Show favorited sounds; drop rows here to favorite"),
+            ("favorites", "Favorites", "Show favorited sounds; drop rows here to favorite"),
             ("smart:needs_transcript", "Not transcribed yet", "Sounds with audio that haven't been transcribed"),
             ("smart:instrumental", "Instrumentals", "Transcribed, but no speech was detected"),
             ("smart:missing_audio", "Missing audio", "Sounds with no local audio"),
@@ -2175,7 +2451,7 @@ class SoundVaultWindow(QMainWindow):
             self.library_bin_buttons[target_id] = button
             self.library_section_layout.addWidget(button)
         for bin_row in self.vm.library_bins():
-            button = LibraryDropButton(f"▣ {bin_row.name}", f"bin:{bin_row.id}", self.library_section)
+            button = LibraryDropButton(bin_row.name, f"bin:{bin_row.id}", self.library_section)
             button.setObjectName("libraryBinButton")
             button.setToolTip(f"Sorting bin: {bin_row.name}; drop rows here to add")
             button.clicked.connect(lambda _checked=False, value=f"bin:{bin_row.id}": self.apply_library_filter(value))
@@ -2184,6 +2460,40 @@ class SoundVaultWindow(QMainWindow):
             self.library_section_layout.addWidget(button)
         self.library_section_layout.addStretch(1)
         self._sync_library_sidebar_active_state()
+        self._update_sidebar_counts()
+
+    def _sidebar_counts(self) -> dict[str, int]:
+        """Counts for every sidebar row, from the in-memory records (no disk access:
+        the same stat-free rules the index uses, so 20k sounds take a few ms)."""
+        records = list(getattr(self.vm, "_records_by_id", {}).values())
+        favorites = set(self.vm.favorite_music_ids())
+        counts = {
+            "all": len(records),
+            "favorites": sum(1 for r in records if r.music_id in favorites),
+            "smart:needs_transcript": sum(
+                1 for r in records
+                if not (r.transcript_text or "").strip() and r.transcript_path is None and r.local_audio_path is not None
+            ),
+            "smart:instrumental": sum(
+                1 for r in records
+                if not has_speech(r.transcript_text) and ((r.transcript_text or "").strip() or r.transcript_path is not None)
+            ),
+            "smart:missing_audio": sum(1 for r in records if r.local_audio_path is None),
+            "smart:high_popularity": sum(1 for r in records if (r.usage_count or 0) >= 100_000),
+            "smart:has_videos": sum(1 for r in records if r.associated_video_count > 0),
+        }
+        known = {r.music_id for r in records}
+        for bin_row in self.vm.library_bins():
+            counts[f"bin:{bin_row.id}"] = sum(1 for m in self.vm.library_bin_music_ids(bin_row.id) if m in known)
+        return counts
+
+    def _update_sidebar_counts(self) -> None:
+        buttons = getattr(self, "library_bin_buttons", {})
+        if not buttons:
+            return
+        counts = self._sidebar_counts() if getattr(self.vm, "_records_by_id", None) else {}
+        for target_id, button in buttons.items():
+            button.set_count(counts.get(target_id))
 
     def _sync_library_sidebar_active_state(self) -> None:
         for target_id, button in getattr(self, "library_bin_buttons", {}).items():
@@ -2255,81 +2565,56 @@ class SoundVaultWindow(QMainWindow):
         self.refresh_library_sidebar()
         self.refresh_table()
 
-    def _build_jukebox_chrome(self) -> QWidget:
-        chrome = QFrame()
-        chrome.setObjectName("chromeHeader")
-        layout = QHBoxLayout(chrome)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(14)
+    def _build_index_status(self) -> QWidget:
+        """Index status pill in the header (dot + INDEXED 1,284 / INDEXING / VAULT OFFLINE).
 
-        transport = QFrame()
-        transport.setObjectName("transportDeck")
-        transport_layout = QHBoxLayout(transport)
-        transport_layout.setContentsMargins(9, 8, 9, 8)
-        transport_layout.setSpacing(7)
-        transport_actions = [
-            ("◀◀", self.select_previous_sound, "Previous sound"),
-            ("▶", self.toggle_play_pause, "Play / pause"),
-            ("▶▶", self.select_next_sound, "Next sound"),
-        ]
-        self.transport_buttons = {}
-        for label, handler, tooltip in transport_actions:
-            button = QToolButton()
-            button.setText(label)
-            button.setObjectName("transportButton")
-            button.setToolTip(tooltip)
-            button.clicked.connect(handler)
-            self.transport_buttons[label] = button
-            transport_layout.addWidget(button)
-        self.transport_play_button = self.transport_buttons["▶"]
-        self.continuous_play_button = QToolButton()
-        self.continuous_play_button.setText("CONT")
-        self.continuous_play_button.setObjectName("transportButton")
-        self.continuous_play_button.setCheckable(True)
-        self.continuous_play_button.setToolTip("Continuous play through the current library order")
-        self.continuous_play_button.clicked.connect(self.toggle_continuous_play)
-        transport_layout.addWidget(self.continuous_play_button)
-        self.random_play_button = QToolButton()
-        self.random_play_button.setText("RND")
-        self.random_play_button.setObjectName("transportButton")
-        self.random_play_button.setToolTip("Play a random sound from the current library")
-        self.random_play_button.clicked.connect(self.play_random_sound)
-        transport_layout.addWidget(self.random_play_button)
-        layout.addWidget(transport)
-
-        display = QFrame()
-        display.setObjectName("capsuleDisplay")
-        display.setFixedHeight(56)
-        # Shrinkable: the now-playing title elides (Ignored hpolicy), so the capsule
-        # can give up width on small windows instead of forcing the whole row wider.
-        display.setMinimumWidth(140)
-        display_layout = QVBoxLayout(display)
-        display_layout.setContentsMargins(18, 8, 18, 8)
-        display_layout.setSpacing(2)
-        now_playing = QLabel("NOW PLAYING")
-        now_playing.setObjectName("displayEyebrow")
-        self.now_playing_title = QLabel("Nothing playing")
-        self.now_playing_title.setObjectName("displayTitle")
-        self.now_playing_title.setWordWrap(False)
-        self.now_playing_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        display_layout.addWidget(now_playing)
-        display_layout.addWidget(self.now_playing_title)
-        layout.addWidget(display, 1)
-
-        self.portal_tabs = {}
-
+        The old jukebox header (transport deck + NOW PLAYING capsule) is gone: the bottom
+        now-playing bar is the one transport for every view (design board 1)."""
+        self.portal_tabs = {}  # refresh_portal_tabs still feeds the archive-health panel
         status = QFrame()
         status.setObjectName("limeStatusPanel")
         status_layout = QHBoxLayout(status)
-        status_layout.setContentsMargins(10, 7, 10, 7)
+        status_layout.setContentsMargins(12, 0, 12, 0)
+        status.setFixedHeight(32)  # same height as the header buttons
         status_layout.setSpacing(7)
         self.index_status_dot = StatusDot()
         self.index_status_text = QLabel("INDEX WAITING")
         self.index_status_text.setObjectName("statusReadout")
         status_layout.addWidget(self.index_status_dot)
         status_layout.addWidget(self.index_status_text)
-        layout.addWidget(status)
-        return chrome
+        return status
+
+    def _build_now_playing_bar(self) -> QWidget:
+        """Bottom transport for every view: previous / play / next, a waveform scrubber,
+        continuous play (repeat) and shuffle."""
+        self.now_playing_bar = NowPlayingBar(self.track_delegate.artwork)
+        self.now_playing_bar.previousRequested.connect(self.select_previous_sound)
+        self.now_playing_bar.toggleRequested.connect(self._now_playing_toggle)
+        self.now_playing_bar.nextRequested.connect(self.select_next_sound)
+        self.now_playing_bar.seekRequested.connect(self._seek_from_now_playing)
+        self.continuous_play_button = self.now_playing_bar.repeat_button
+        self.random_play_button = self.now_playing_bar.shuffle_button
+        self.transport_play_button = self.now_playing_bar.play_button
+        self.now_playing_bar.repeatToggled.connect(lambda _on: self.toggle_continuous_play())
+        self.now_playing_bar.shuffleRequested.connect(self.play_random_sound)
+        return self.now_playing_bar
+
+    def _sync_transport(self, playing: bool) -> None:
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is not None:
+            bar.set_playing(playing)
+
+    def _cue_now_playing(self, record) -> None:
+        """With nothing playing, the bar shows the selected sound so Play starts it."""
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is None or self.playing_music_id:
+            return
+        bar.set_track(
+            record,
+            self.track_delegate.peaks.get(getattr(record, "waveform_path", None)),
+            playable=self._record_has_playable_pointer(record),
+        )
+        bar.set_playing(False)
 
     def _build_library_view(self) -> QWidget:
         view = QWidget()
@@ -2340,6 +2625,7 @@ class SoundVaultWindow(QMainWindow):
         self.search_box = QLineEdit()
         self.search_box.setObjectName("searchBox")
         self.search_box.setPlaceholderText("Search title, artist, tag, music ID, spoken phrase…")
+        self.search_box.setClearButtonEnabled(True)
         self.search_box.textChanged.connect(self.schedule_refresh_table)
         self.duration_filter = QComboBox()
         self.duration_filter.addItem("All durations", "all")
@@ -2386,23 +2672,98 @@ class SoundVaultWindow(QMainWindow):
         # Two rows so the controls collapse gracefully at small widths instead of
         # forcing the whole window wide: search box on top (fills width), filters +
         # column picker + count below (shrink to their minimums, count pinned right).
-        self.search_box.setMinimumWidth(150)
+        self.search_box.setMinimumWidth(120)
         self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         for _combo in (self.duration_filter, self.media_filter, self.status_filter, self.usage_filter):
             _combo.setMinimumWidth(92)
         self.result_count_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         search_bar.addWidget(self.search_box, 1)
-        filter_bar = QHBoxLayout()
-        filter_bar.setSpacing(8)
-        filter_bar.addWidget(self.duration_filter)
-        filter_bar.addWidget(self.media_filter)
-        filter_bar.addWidget(self.status_filter)
-        filter_bar.addWidget(self.usage_filter)
-        filter_bar.addWidget(columns_button)
-        filter_bar.addStretch(1)
-        filter_bar.addWidget(self.result_count_label)
+        # 0.5 track-list controls. Sort, the View menu and the List/Table switch sit on
+        # the search row; the filter chips wrap onto as many lines as the width needs
+        # (FlowLayout) instead of squeezing and overlapping at small window sizes.
+        self.sort_combo = QComboBox()
+        self.sort_combo.setObjectName("sortCombo")
+        self.sort_combo.setAccessibleName("Sort")
+        for label, _column, _order in LIBRARY_SORTS:
+            self.sort_combo.addItem(f"Sort: {label}")
+        self.sort_combo.currentIndexChanged.connect(self._apply_sort_choice)
+        self.view_mode_button = QToolButton()
+        self.view_mode_button.setObjectName("viewModeButton")
+        self.view_mode_button.setCheckable(True)
+        self.view_mode_button.setToolTip("Switch between the track list and the classic table")
+        self.view_mode_button.toggled.connect(lambda table: self.set_library_view_mode("table" if table else "list"))
+        columns_button.setText("View ▾")
+        columns_button.setToolTip("Row density and table columns")
+        # Filters fold away behind one button; its label counts the active ones, so a
+        # narrowed library is never a surprise.
+        self.filters_button = QToolButton()
+        self.filters_button.setObjectName("filtersButton")
+        self.filters_button.setCheckable(True)
+        self.filters_button.setText("Filters")
+        self.filters_button.setToolTip("Show or hide the duration, media, status, usage, BPM and vocals filters")
+        self.filters_button.toggled.connect(lambda shown: self.filter_chips.setVisible(shown))
+        search_bar.addWidget(self.filters_button)
+        search_bar.addWidget(self.sort_combo)
+        search_bar.addWidget(columns_button)
+        search_bar.setSpacing(8)
+        for control in (self.search_box, self.filters_button, self.sort_combo, columns_button, self.view_mode_button):
+            control.setFixedHeight(32)  # one height and top edge for the whole row
+        search_bar.addWidget(self.view_mode_button)
+        self.bpm_filter = QComboBox()
+        self.bpm_filter.setObjectName("bpmFilter")
+        self.bpm_filter.setAccessibleName("BPM filter")
+        for value, label in BPM_FILTERS:
+            self.bpm_filter.addItem(label, value)
+        self.bpm_filter.currentIndexChanged.connect(self.schedule_refresh_table)
+        self.vocals_only = QCheckBox("Vocals only")
+        self.vocals_only.setObjectName("vocalsOnly")
+        self.vocals_only.setToolTip("Only sounds with a transcript (someone is talking or singing)")
+        self.vocals_only.toggled.connect(self.schedule_refresh_table)
+        self.filter_chips = QWidget()
+        self.filter_chips.setObjectName("filterChips")
+        chips_policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        chips_policy.setHeightForWidth(True)
+        self.filter_chips.setSizePolicy(chips_policy)
+        filter_bar = FlowLayout(self.filter_chips, spacing=8)
+        for chip in (
+            self.duration_filter, self.media_filter, self.status_filter, self.usage_filter,
+            self.bpm_filter, self.vocals_only,
+        ):
+            if isinstance(chip, QComboBox):
+                # Size to the selected label, not the longest option, so a chip has no
+                # dead fill ("All media" was sized for "Missing transcript (any)").
+                chip.setMinimumWidth(0)
+                chip.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                chip.setMinimumContentsLength(len(chip.currentText()) + 1)
+                chip.currentIndexChanged.connect(
+                    lambda _i, c=chip: c.setMinimumContentsLength(len(c.currentText()) + 1)
+                )
+            filter_bar.addWidget(chip)
+        for combo in (self.sort_combo,):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         layout.addLayout(search_bar)
-        layout.addLayout(filter_bar)
+        self.filter_chips.setVisible(False)
+        layout.addWidget(self.filter_chips)
+        # "10 displayed / 2,187 indexed · Clear": shown only while a search or filter
+        # narrows the library.
+        self.narrowed_bar = QWidget()
+        self.narrowed_bar.setObjectName("narrowedBar")
+        narrowed = QHBoxLayout(self.narrowed_bar)
+        narrowed.setContentsMargins(16, 0, 0, 4)  # aligns with row content
+        narrowed.setSpacing(6)
+        clear_filters = QToolButton()
+        clear_filters.setObjectName("linkButton")
+        clear_filters.setText("Clear")
+        clear_filters.setToolTip("Clear the search and every filter")
+        clear_filters.clicked.connect(self.clear_library_search_and_filters)
+        narrowed.addWidget(self.result_count_label)
+        dot = QLabel("·")
+        dot.setObjectName("muted")
+        narrowed.addWidget(dot)
+        narrowed.addWidget(clear_filters)
+        narrowed.addStretch(1)
+        self.narrowed_bar.setVisible(False)
+        layout.addWidget(self.narrowed_bar)
         stats_grid = QGridLayout()
         self.stats_label = QLabel("index not built")
         self.stats_label.setObjectName("statCard")
@@ -2416,7 +2777,12 @@ class SoundVaultWindow(QMainWindow):
         stats_grid.addWidget(self.inbox_label, 0, 1)
         stats_grid.addWidget(self.worker_label, 0, 2)
         stats_grid.addWidget(self.catalog_label, 0, 3)
-        layout.addLayout(stats_grid)
+        # Status cards collapse on short windows so the track list keeps its rows
+        # (at the 700 px minimum they left room for about two). See resizeEvent.
+        self.stats_cards = QWidget()
+        self.stats_cards.setObjectName("statsCards")
+        stats_grid.setContentsMargins(0, 0, 0, 0)
+        self.stats_cards.setLayout(stats_grid)  # shown on the Worker status page
         self.table = SoundTableView()
         library_model = self.table.library_model()
         library_model.audio_path_resolver = self._drag_audio_path
@@ -2440,14 +2806,33 @@ class SoundVaultWindow(QMainWindow):
         self.table.horizontalHeader().sectionClicked.connect(self.handle_library_header_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_library_context_menu)
-        layout.addWidget(self.table, 1)
+        # Track list: paints the same model and shares the table's selection model, so
+        # every handler above (preview, context menu, drag-out, play) serves both views.
+        self.track_delegate = TrackRowDelegate(self)
+        self.track_list = TrackListView(self.track_delegate)
+        self.track_list.setModel(self.table.model())
+        self.track_list.setModelColumn(SOUND_COL)
+        self.track_list.setSelectionModel(self.table.selectionModel())
+        self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.track_list.customContextMenuRequested.connect(
+            lambda point: self.open_library_context_menu(point, view=self.track_list)
+        )
+        self.track_list.doubleClicked.connect(lambda _index: self.play_selected_sound())
+        self.track_list.playRequested.connect(self.toggle_play_pause)
+        self.track_list.favoriteRequested.connect(self._favorite_current_track)
+        self.track_list.binRequested.connect(self._bin_menu_for_current_track)
+        self.track_list.set_density(self.settings.library_density())
+        self.library_stack = QStackedWidget()
+        self.library_stack.addWidget(self.track_list)
+        self.library_stack.addWidget(self.table)
+        layout.addWidget(self.library_stack, 1)
+        self.set_library_view_mode(self.settings.library_view_mode(), persist=False)
         return view
 
     def _build_inbox_view(self) -> QWidget:
         view = QWidget()
         layout = QVBoxLayout(view)
         layout.setContentsMargins(0, 0, 0, 0)
-        header = QHBoxLayout()
         inbox_title = QLabel("Shortcut inbox")
         inbox_title.setObjectName("sectionTitle")
         refresh_inbox = QPushButton("Refresh inbox")
@@ -2481,23 +2866,65 @@ class SoundVaultWindow(QMainWindow):
             "(e.g. after an upstream fix). Failed items always stay in the queue with their error."
         )
         retry_failed.clicked.connect(self.retry_failed_inbox)
-        header.addWidget(inbox_title)
-        header.addStretch(1)
-        header.addWidget(add_link)
-        header.addWidget(download_import)
-        header.addWidget(import_pack)
-        header.addWidget(import_export)
-        header.addWidget(poll_relay)
-        header.addWidget(refresh_inbox)
-        header.addWidget(mark_imported)
-        header.addWidget(retry_failed)
-        layout.addLayout(header)
+        # The page title already says "Shortcut inbox"; the header holds the tabs on the
+        # left and three actions on the right, with the rest one click away under More.
+        inbox_title.setVisible(False)
+        more = QToolButton()
+        more.setText("More ▾")
+        more.setObjectName("moreButton")
+        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more_menu = QMenu(more)
+        for group in ((import_pack, import_export), (poll_relay, refresh_inbox), (mark_imported, retry_failed)):
+            if more_menu.actions():
+                more_menu.addSeparator()
+            for button in group:
+                action = more_menu.addAction(button.text().replace("&&", "&"))
+                action.setToolTip(button.toolTip())
+                action.triggered.connect(button.click)
+        more_menu.setToolTipsVisible(True)
+        more.setMenu(more_menu)
+        self.inbox_more_menu = more_menu
+        for control in (add_link, more, download_import):
+            control.setFixedHeight(32)
         self.inbox_table = QTableWidget(0, 5)
         self.inbox_table.setHorizontalHeaderLabels(["received", "source", "url", "status", "error"])
         self.inbox_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.inbox_table.customContextMenuRequested.connect(self.open_inbox_context_menu)
         self._prepare_table(self.inbox_table, stretch_column=2)
-        self.restore_table_layout("inbox_v2", self.inbox_table)
+        for column, width in ((0, 150), (1, 130), (3, 90)):
+            self.inbox_table.horizontalHeader().resizeSection(column, width)
+        self.inbox_table.setTextElideMode(Qt.TextElideMode.ElideMiddle)  # keep the end of a URL
+        self.restore_table_layout("inbox_v3", self.inbox_table)
+        # Status tabs (design board 7): All / Waiting / Failed, with live counts.
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(4)
+        self.inbox_tab_group = QButtonGroup(self)
+        self.inbox_tab_group.setExclusive(True)
+        self.inbox_tabs: dict[str, QToolButton] = {}
+        for key, label in (("all", "All"), ("waiting", "Waiting"), ("failed", "Failed")):
+            tab = QToolButton()
+            tab.setObjectName("inboxTab")
+            tab.setCheckable(True)
+            tab.setText(label)
+            tab.setAccessibleName(f"Show {label.lower()} inbox items")
+            tab.clicked.connect(lambda _checked=False, k=key: self.set_inbox_tab(k))
+            self.inbox_tab_group.addButton(tab)
+            self.inbox_tabs[key] = tab
+            tabs_row.addWidget(tab)
+        tabs_row.addStretch(1)
+        tabs_row.addWidget(add_link)
+        tabs_row.addSpacing(8)
+        tabs_row.addWidget(more)
+        tabs_row.addSpacing(8)
+        tabs_row.addWidget(download_import)  # primary action at the trailing end
+        self.inbox_tabs["all"].setChecked(True)
+        self.inbox_tab = "all"
+        layout.addLayout(tabs_row)
+        layout.addSpacing(8)
+        self.inbox_empty = QLabel("Nothing here. Sounds you share from your iPhone land in this list.", self.inbox_table.viewport())
+        self.inbox_empty.setObjectName("emptyState")
+        self.inbox_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.inbox_empty.setVisible(False)
         layout.addWidget(self.inbox_table, 1)
         return view
 
@@ -2510,12 +2937,14 @@ class SoundVaultWindow(QMainWindow):
         review_title.setObjectName("sectionTitle")
         refresh_review = QPushButton("Refresh review queues")
         refresh_review.clicked.connect(self.refresh_review_queues)
-        header.addWidget(review_title)
+        review_title.setVisible(False)  # the page title above already names this page
         header.addStretch(1)
         header.addWidget(refresh_review)
+        refresh_review.setFixedHeight(32)
         layout.addLayout(header)
         self.review_table = QTableWidget(0, 3)
         self.review_table.setHorizontalHeaderLabels(["queue", "count", "next action"])
+        self.review_table.horizontalHeaderItem(1).setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.review_table.itemDoubleClicked.connect(self.apply_review_queue_filter)
         self._prepare_table(self.review_table, stretch_column=2)
         layout.addWidget(self.review_table, 1)
@@ -2540,12 +2969,14 @@ class SoundVaultWindow(QMainWindow):
             "Keeps the selected candidate in the vault and moves only the other duplicate folders to reports/duplicate-quarantine."
         )
         quarantine_duplicates.clicked.connect(self.quarantine_selected_duplicates)
-        header.addWidget(dedupe_title)
+        dedupe_title.setVisible(False)  # the page title above already names this page
         header.addStretch(1)
         header.addWidget(refresh_dedupe)
         header.addWidget(mark_duplicates)
         header.addWidget(mark_not_duplicates)
         header.addWidget(quarantine_duplicates)
+        for button in (refresh_dedupe, mark_duplicates, mark_not_duplicates, quarantine_duplicates):
+            button.setFixedHeight(32)
         layout.addLayout(header)
         tables = QHBoxLayout()
         self.dedupe_groups_table = QTableWidget(0, 4)
@@ -2585,13 +3016,16 @@ class SoundVaultWindow(QMainWindow):
         enrich_oembed.clicked.connect(self.run_oembed_enrichment)
         package_import = QPushButton("Package imported metadata")
         package_import.clicked.connect(self.package_imported_metadata)
-        header.addWidget(worker_title)
+        worker_title.setVisible(False)  # the page title above already names this page
         header.addStretch(1)
         header.addWidget(reenrich)
         header.addWidget(enrich_oembed)
         header.addWidget(package_import)
         header.addWidget(refresh_worker)
+        for button in (reenrich, enrich_oembed, package_import, refresh_worker):
+            button.setFixedHeight(32)
         layout.addLayout(header)
+        layout.addWidget(self.stats_cards)
         self.worker_status_table = QTableWidget(0, 2)
         self.worker_status_table.setHorizontalHeaderLabels(["metric", "value"])
         self._prepare_table(self.worker_status_table, stretch_column=1)
@@ -2603,10 +3037,11 @@ class SoundVaultWindow(QMainWindow):
         preview.setObjectName("preview")
         # Anchor the panel to the artwork width so it never needs a horizontal
         # scrollbar; everything inside stacks to this width.
-        preview.setMinimumWidth(250)
+        preview.setMinimumWidth(262)
         preview.setMaximumWidth(340)
         preview_layout = QVBoxLayout(preview)
-        preview_layout.setContentsMargins(20, 22, 20, 22)
+        # 262 - 16 - 14 - scrollbar (~10) - 6 inner margin leaves 216 for the 210 px artwork.
+        preview_layout.setContentsMargins(16, 22, 14, 22)
         preview_layout.setSpacing(10)
         self.artwork_label = QLabel("no artwork")
         self.artwork_label.setObjectName("artwork")
@@ -2618,14 +3053,26 @@ class SoundVaultWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         # Never span horizontally — content wraps/stacks to the panel width.
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_body = QWidget()
+        scroll_body.setObjectName("inspectorBody")
         scroll_layout = QVBoxLayout(scroll_body)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setContentsMargins(0, 0, 6, 0)  # clear of the scrollbar
         scroll_layout.setSpacing(10)
         self.preview_title = QLabel("Select a sound")
         self.preview_title.setObjectName("previewTitle")
         self.preview_title.setWordWrap(True)
         self._make_label_selectable(self.preview_title)
+        self.preview_artist = QLabel("", scroll_body)
+        self.preview_artist.setObjectName("previewArtist")
+        self.preview_artist.setWordWrap(True)
+        self.preview_artist.setVisible(False)
+        self._make_label_selectable(self.preview_artist)
+        title_block = QVBoxLayout()
+        title_block.setContentsMargins(0, 0, 0, 0)
+        title_block.setSpacing(2)
+        title_block.addWidget(self.preview_title)
+        title_block.addWidget(self.preview_artist)
         self.preview_meta = QLabel("Audio, tags, evidence and local paths will show here.", scroll_body)
         self.preview_meta.setObjectName("muted")
         self.preview_meta.setWordWrap(True)
@@ -2641,6 +3088,12 @@ class SoundVaultWindow(QMainWindow):
         self.progress_slider.sliderMoved.connect(self._preview_seek_time)
         self.progress_slider.sliderReleased.connect(self._commit_slider_seek)
         self.progress_slider.seekRequested.connect(self.seek_playback)
+        # The waveform is the primary scrubber (design board 6); it mirrors the slider.
+        self.preview_waveform = WaveformBar(scroll_body)
+        self.preview_waveform.setObjectName("previewWaveform")
+        self.preview_waveform.seekRequested.connect(self._seek_from_waveform)
+        self.progress_slider.valueChanged.connect(self._on_progress_value)
+        self.progress_slider.rangeChanged.connect(lambda *_: self._on_progress_value(self.progress_slider.value()))
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setObjectName("muted")
         self._make_label_selectable(self.time_label)
@@ -2664,22 +3117,23 @@ class SoundVaultWindow(QMainWindow):
         self.open_folder.clicked.connect(self.open_selected_folder)
         # Transcript + notes grow/shrink with the panel height (stretch factors
         # below) instead of being pinned to a fixed height.
-        transcript_group = QGroupBox("Transcript")
+        transcript_group = QGroupBox("TRANSCRIPT")  # Qt ignores text-transform
         transcript_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         transcript_layout = QVBoxLayout(transcript_group)
+        transcript_layout.setContentsMargins(0, 6, 0, 0)  # the editor is the only card
         self.transcript_text = QTextEdit()
         self.transcript_text.setReadOnly(True)
-        self.transcript_text.setMinimumHeight(110)
+        self.transcript_text.setMinimumHeight(72)
         self.transcript_text.setPlaceholderText(self._DEFAULT_TRANSCRIPT_PLACEHOLDER)
         transcript_layout.addWidget(self.transcript_text)
-        notes_group = QGroupBox("User notes")
+        notes_group = QGroupBox("NOTES")
         notes_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         notes_layout = QVBoxLayout(notes_group)
+        notes_layout.setContentsMargins(0, 6, 0, 0)
         self.user_notes_edit = QTextEdit()
-        self.user_notes_edit.setMinimumHeight(70)
-        self.user_notes_edit.setPlaceholderText(
-            "Add your own notes — a label, why you saved it, where to use it… (saved + searchable)"
-        )
+        self.user_notes_edit.setMinimumHeight(64)
+        self.user_notes_edit.setMaximumHeight(96)
+        self.user_notes_edit.setPlaceholderText("Add a note: saved and searchable")
         self.user_notes_edit.textChanged.connect(self._on_user_notes_changed)
         notes_layout.addWidget(self.user_notes_edit)
         evidence_group = QGroupBox("Evidence assets", scroll_body)
@@ -2710,24 +3164,47 @@ class SoundVaultWindow(QMainWindow):
         # artwork-width panel (a 3-across row was what forced the horizontal scroll).
         action_col = QVBoxLayout()
         action_col.setSpacing(6)
-        action_col.addWidget(self.copy_metadata)
+        self.open_tiktok_sound.setObjectName("previewPrimary")
         action_col.addWidget(self.open_tiktok_sound)
         action_col.addWidget(self.open_spotify)
-        action_col.addWidget(self.open_folder)
+        secondary = QHBoxLayout()
+        secondary.setSpacing(6)
+        secondary.addWidget(self.copy_metadata, 1)
+        secondary.addWidget(self.open_folder, 1)
+        action_col.addLayout(secondary)
         for _btn in (self.copy_metadata, self.open_tiktok_sound, self.open_spotify, self.open_folder, self.open_video, self.open_video_url):
             _btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             _btn.setMinimumHeight(32)
-        scroll_layout.addWidget(self.artwork_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        scroll_layout.addWidget(self.preview_title)
+        # One vertical rhythm: explicit gaps between blocks instead of a uniform spacing.
+        scroll_layout.setSpacing(0)
+        scroll_layout.addWidget(self.artwork_label, alignment=Qt.AlignmentFlag.AlignLeft)
+        scroll_layout.addSpacing(14)
+        scroll_layout.addLayout(title_block)
+        scroll_layout.addSpacing(12)
+        scroll_layout.addWidget(self._build_preview_stats(scroll_body))
+        scroll_layout.addSpacing(12)
+        scroll_layout.addWidget(self.preview_waveform)
         scroll_layout.addWidget(self.progress_slider)
         scroll_layout.addWidget(self.time_label)
+        scroll_layout.addSpacing(14)
         scroll_layout.addLayout(action_col)
-        scroll_layout.addWidget(transcript_group, 3)
-        scroll_layout.addWidget(notes_group, 2)
-        for hidden in (self.preview_meta, self.preview_tags, self.playback_status, evidence_group, video_group):
+        scroll_layout.addSpacing(4)
+        scroll_layout.addWidget(transcript_group, 1)
+        scroll_layout.addSpacing(4)
+        scroll_layout.addWidget(notes_group, 0)
+        # The slider and time label stay as the playback position model, but the
+        # now-playing bar is the one visible transport; the waveform above scrubs.
+        for hidden in (
+            self.preview_meta, self.preview_tags, self.playback_status, evidence_group, video_group,
+            self.progress_slider, self.time_label,
+        ):
             hidden.setVisible(False)
         scroll.setWidget(scroll_body)
         preview_layout.addWidget(scroll, 1)
+        # The artwork square tracks the column width so its right edge lines up with
+        # the stats, waveform and buttons below it.
+        self._preview_body = scroll_body
+        scroll.viewport().installEventFilter(self)
         return preview
 
     def setup_keyboard_shortcuts(self) -> None:
@@ -2739,6 +3216,12 @@ class SoundVaultWindow(QMainWindow):
         play_shortcut.activated.connect(self.play_selected_sound)
         escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         escape_shortcut.activated.connect(self.clear_search)
+        # ⌘1–⌘5 jump between the main views (design board 4, "Keyboard").
+        for number, view_name in enumerate(("library", "inbox", "review", "dedupe", "worker"), start=1):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{number}"), self)
+            shortcut.activated.connect(lambda name=view_name: self.show_view(name))
+        detail_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
+        detail_shortcut.activated.connect(self.toggle_detail_pane)
 
     def focus_search(self) -> None:
         self.search_box.setFocus()
@@ -2994,9 +3477,7 @@ class SoundVaultWindow(QMainWindow):
             self.progress_slider.setValue(self._external_audio_duration_ms)
         write_event("gui.external_audio_finished", target=str(target or ""), returncode=code)
         self._set_playing(None)
-        if hasattr(self, "transport_play_button"):
-            self.transport_play_button.setText("▶")
-            self.transport_play_button.setToolTip("Play selected sound")
+        self._sync_transport(False)
         # afplay reports no EndOfMedia signal, so drive continuous play from here.
         if self.continuous_play_enabled:
             QTimer.singleShot(0, self._play_next_continuous_sound)
@@ -3060,9 +3541,7 @@ class SoundVaultWindow(QMainWindow):
             target = self.external_audio_target
             if self._play_external_audio(target, start_ms=position) and self.current_preview_record is not None:
                 self._set_playing(self.current_preview_record.music_id)
-                if hasattr(self, "transport_play_button"):
-                    self.transport_play_button.setText("▮▮")
-                    self.transport_play_button.setToolTip("Stop playback")
+                self._sync_transport(True)
             return
         if self.audio_player is not None:
             self.audio_player.setPosition(position)
@@ -3091,6 +3570,21 @@ class SoundVaultWindow(QMainWindow):
             delegate.playing_music_id = music_id
             if hasattr(self, "table"):
                 self.table.viewport().update()
+        if hasattr(self, "track_list"):
+            self.track_list.viewport().update()
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is not None:
+            if music_id:
+                record = self.records_by_id.get(music_id) or (
+                    self.current_preview_record
+                    if self.current_preview_record is not None and self.current_preview_record.music_id == music_id
+                    else None
+                )
+                if record is not None:
+                    bar.set_track(record, self.track_delegate.peaks.get(getattr(record, "waveform_path", None)), playable=True)
+            bar.set_playing(bool(music_id))
+            if music_id:
+                self._on_progress_value(self.progress_slider.value())  # show where we are now
 
     def _drag_audio_path(self, music_id: str) -> Path | None:
         """Local audio file for a dragged row, so dragging out copies the real sound."""
@@ -3114,9 +3608,14 @@ class SoundVaultWindow(QMainWindow):
         table.viewport().setAutoFillBackground(False)
         header = table.horizontalHeader()
         header.setSectionsMovable(True)
-        header.setStretchLastSection(False)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setMinimumSectionSize(72)
+        # The last column fills the remaining width, so no table stops halfway across the
+        # page or scrolls sideways.
+        header.setStretchLastSection(True)
         for idx in range(table.columnCount()):
             header.setSectionResizeMode(idx, QHeaderView.ResizeMode.Interactive)
+        table.verticalHeader().setDefaultSectionSize(36)
         table.resizeColumnsToContents()
         header.resizeSection(stretch_column, max(header.sectionSize(stretch_column), 300))
 
@@ -3142,6 +3641,18 @@ class SoundVaultWindow(QMainWindow):
 
     def configure_column_menu(self) -> None:
         self.column_menu.clear()
+        density_header = self.column_menu.addSection("Density")
+        density_header.setEnabled(False)
+        density_group = QActionGroup(self)
+        current_density = self.settings.library_density()
+        for value, label in (("comfortable", "Comfortable"), ("compact", "Compact")):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(value == current_density)
+            action.triggered.connect(lambda _checked=False, d=value: (self.set_library_density(d), self.configure_column_menu()))
+            density_group.addAction(action)
+            self.column_menu.addAction(action)
+        self.column_menu.addSection("Table columns")
         for column in range(self.table.columnCount()):
             label = str(
                 self.table.model().headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or ""
@@ -3194,7 +3705,7 @@ class SoundVaultWindow(QMainWindow):
         # crash Qt with SIGABRT.
         workers = [
             getattr(self, name, None)
-            for name in ("_poll_worker", "_import_worker", "_transcribe_worker", "_transcribe_queue_worker")
+            for name in ("_poll_worker", "_import_worker", "_transcribe_worker", "_transcribe_queue_worker", "_analysis_worker")
         ]
         for worker in workers:
             if worker is not None and worker.isRunning():
@@ -3254,9 +3765,15 @@ class SoundVaultWindow(QMainWindow):
         }
         widget, title = mapping.get(name, mapping["library"])
         self.stack.setCurrentWidget(widget)
+        panel = getattr(self, "preview_panel", None)
+        if panel is not None:
+            key = name if name in mapping else "library"
+            panel.setVisible(key in self.PANE_VIEWS and not getattr(self, "_detail_pane_user_hidden", False))
         self.title_label.setText(title)
         for key, button in self.nav_buttons.items():
-            button.setProperty("active", key == name)
+            # "Library" is a section header; the active collection row below it carries
+            # the highlight, so two rows never light up at once.
+            button.setProperty("active", key == name and key != "library")
             button.style().unpolish(button)
             button.style().polish(button)
         if name == "inbox":
@@ -3690,12 +4207,14 @@ class SoundVaultWindow(QMainWindow):
             self.refresh_inbox()
             self.refresh_review_queues()
             self.refresh_worker_status()
+            self._update_sidebar_counts()
             write_event("gui.index_rebuild_complete", vault_root=str(self.vault_root), records=count)
             # Kick off a one-time background sweep that transcribes the existing
             # backlog (sounds with audio but no transcript). New imports already
             # transcribe via the live pipeline; this catches everything that landed
             # before transcription was wired up (or in an older build).
             QTimer.singleShot(1500, self._start_backlog_transcription)
+            QTimer.singleShot(2500, self._start_analysis_backfill)
         except Exception as exc:
             self.worker_label.setText(f"Worker\nindex error: {exc}")
             self.stats_label.setText("index failed")
@@ -3713,7 +4232,7 @@ class SoundVaultWindow(QMainWindow):
         search_cursor_position = self.search_box.cursorPosition()
         selected_music_id = self._selected_music_id() or self._pending_selected_music_id
         self._pending_selected_music_id = None
-        scroll_value = self.table.verticalScrollBar().value()
+        scroll_value = self._library_view().verticalScrollBar().value()
         duration_filter = self.duration_filter.currentData() if hasattr(self, "duration_filter") else "all"
         media_filter = self.media_filter.currentData() if hasattr(self, "media_filter") else "all"
         status_filter = self.status_filter.currentData() if hasattr(self, "status_filter") else "all"
@@ -3726,6 +4245,7 @@ class SoundVaultWindow(QMainWindow):
             usage_filter=str(usage_filter or "all"),
         )
         self.current_rows = self._apply_library_collection_filter(self.current_rows)
+        self.current_rows = self._apply_track_filters(self.current_rows)
         self._sort_library_rows()
         self.records_by_id = {record.music_id: record for record in self.current_rows}
         total = self.vm.db.stats().total_sounds
@@ -3738,6 +4258,7 @@ class SoundVaultWindow(QMainWindow):
         query_note = " • query active" if self.search_box.text().strip() else ""
         suffix = f" • {active_filters}" if active_filters else ""
         self.result_count_label.setText(f"{len(self.current_rows):,} displayed / {total:,} indexed{suffix}{query_note}")
+        self._update_filter_controls()
         # Model reset — O(1) per cell on demand instead of building 11×N
         # QTableWidgetItems on every keystroke/filter/sort (the old beach-ball).
         favorites_set = set(self.vm.favorite_music_ids())
@@ -3751,6 +4272,29 @@ class SoundVaultWindow(QMainWindow):
         if search_had_focus:
             self.search_box.setFocus(Qt.FocusReason.OtherFocusReason)
             self.search_box.setCursorPosition(min(search_cursor_position, len(self.search_box.text())))
+
+    def _active_filter_count(self) -> int:
+        count = sum(
+            1 for combo in (self.duration_filter, self.media_filter, self.status_filter, self.usage_filter, self.bpm_filter)
+            if combo.currentData() not in (None, "all")
+        )
+        return count + (1 if self.vocals_only.isChecked() else 0)
+
+    def _update_filter_controls(self) -> None:
+        active = self._active_filter_count()
+        self.filters_button.setText(f"Filters · {active}" if active else "Filters")
+        self.narrowed_bar.setVisible(bool(active or self.search_box.text().strip()))
+
+    def clear_library_search_and_filters(self) -> None:
+        for combo in (self.duration_filter, self.media_filter, self.status_filter, self.usage_filter, self.bpm_filter):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+        self.vocals_only.blockSignals(True)
+        self.vocals_only.setChecked(False)
+        self.vocals_only.blockSignals(False)
+        self.search_box.clear()  # schedules the refresh
+        self.refresh_table()
 
     @staticmethod
     def _active_library_filter_summary(
@@ -3845,6 +4389,8 @@ class SoundVaultWindow(QMainWindow):
                     return 1 if self._record_has_playable_pointer(record) else 0
                 case 10:
                     return (", ".join(record.tags[:3]) or record.status or "").lower()
+                case 100:  # BPM_SORT_KEY; unknown tempos sort last
+                    return record.bpm if record.bpm is not None else float("inf")
                 case _:
                     return (record.title or record.music_id or "").lower()
 
@@ -3910,7 +4456,7 @@ class SoundVaultWindow(QMainWindow):
                     break
         self.table.clearSelection()
         self.table.selectRow(target_row)
-        self.table.verticalScrollBar().setValue(scroll_value)
+        self._library_view().verticalScrollBar().setValue(scroll_value)
         self.update_preview_from_selection()
 
     def clear_preview(self, title: str = "Select a sound") -> None:
@@ -3922,8 +4468,15 @@ class SoundVaultWindow(QMainWindow):
             self._loading_notes = False
         self.current_preview_record = None
         self.preview_title.setText(title)
-        if hasattr(self, "now_playing_title"):
-            self.now_playing_title.setText("select a sound to inspect waveform, provenance, transcript, and evidence")
+        if hasattr(self, "preview_artist"):
+            self.preview_artist.setText("")
+            self.preview_artist.setVisible(False)
+        if hasattr(self, "artwork_label"):
+            self._paint_empty_artwork()
+        if hasattr(self, "preview_waveform"):
+            self.preview_waveform.set_peaks(None, playable=False)
+            self.preview_waveform.set_progress(0.0)
+        self._set_preview_stats(None)
         self.preview_meta.setText("Audio, tags, evidence and local paths will show here.")
         self.preview_tags.setText("")
         if hasattr(self, "transcript_text"):
@@ -3996,14 +4549,14 @@ class SoundVaultWindow(QMainWindow):
 
     def _show_preview_record(self, record) -> None:
         self.current_preview_record = record
-        self.preview_title.setText(record.title or record.music_id)
-        if hasattr(self, "now_playing_title"):
-            full = f"{record.title or record.music_id} · {record.artist or 'unknown source'}"
-            if len(full) > 48:
-                full = full[:45] + "…"
-            self.now_playing_title.setText(full)
+        title = display_title(record)
+        self.preview_title.setText(title)
+        artist = (record.artist or "").strip()
+        self.preview_artist.setText("" if artist.casefold() == title.casefold() else artist)
+        self.preview_artist.setVisible(bool(self.preview_artist.text()))
+        self._cue_now_playing(record)
         self.preview_meta.setText(self._formatted_metadata(record))
-        self.preview_tags.setText(" ".join(f"#{tag}" for tag in record.tags) or "no tags yet")
+        self.preview_tags.setText(" ".join(f"#{tag}" for tag in user_tags(record.tags)) or "no tags yet")
         # Set the state-specific placeholder first, so an empty transcript box
         # explains *why* (no speech / no audio / not run yet) rather than implying
         # a lookup failure.
@@ -4017,7 +4570,13 @@ class SoundVaultWindow(QMainWindow):
         self.open_tiktok_sound.setEnabled(self._sound_url_for_record(record) is not None)
         self.open_spotify.setVisible(self._spotify_url_for_record(record) is not None)
         self.copy_metadata.setEnabled(True)
+        self._set_preview_stats(record)
         target = self.vm.play_target_for(record)
+        self.preview_waveform.set_peaks(
+            self.track_delegate.peaks.get(getattr(record, "waveform_path", None)),
+            playable=target is not None,
+        )
+        self.preview_waveform.set_progress(self.track_progress(record.music_id))
         duration_ms = self._duration_ms_for_record(record)
         if duration_ms <= 0 and isinstance(target, Path):
             # ~3% of sounds have no stored duration. Reuse a duration we already probed
@@ -4135,26 +4694,65 @@ class SoundVaultWindow(QMainWindow):
 
     @staticmethod
     def _full_transcript_text(record) -> str:
-        return record.transcript_text or ""
+        # Filler like "Music Music Music" is not a transcript; show the "no speech" note.
+        return record.transcript_text if has_speech(record.transcript_text) else ""
+
+    def _paint_empty_artwork(self) -> None:
+        """Nothing selected: a quiet rounded tile with a note glyph, like the bottom bar."""
+        from sound_vault.ui.track_list import RAISED, draw_icon
+
+        size = self.artwork_label.size()
+        ratio = self.devicePixelRatioF() or 1.0
+        out = QPixmap(int(size.width() * ratio), int(size.height() * ratio))
+        out.setDevicePixelRatio(ratio)
+        out.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(out)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        tile = QPainterPath()
+        tile.addRoundedRect(QRectF(0, 0, size.width(), size.height()), 16, 16)
+        painter.fillPath(tile, RAISED)
+        draw_icon(painter, "note", QRectF(0, 0, size.width(), size.height()), MUTED, size=56)
+        painter.end()
+        self.artwork_label.setText("")
+        self.artwork_label.setPixmap(out)
 
     def _populate_artwork(self, record) -> None:
+        """Fill the square: crop to the centre, round the corners. With no artwork, show
+        the same coloured initials tile the list row and now-playing bar use."""
+        from sound_vault.ui.track_list import initials, tile_color
+
         image = record.artwork_path or (record.evidence_images[0] if record.evidence_images else None)
-        if image is None:
-            self.artwork_label.setPixmap(QPixmap())
-            self.artwork_label.setText("no artwork")
-            return
-        pixmap = QPixmap(str(image))
-        if pixmap.isNull():
-            self.artwork_label.setText(image.name)
-            return
-        self.artwork_label.setText("")
-        self.artwork_label.setPixmap(
-            pixmap.scaled(
-                self.artwork_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+        source = QPixmap(str(image)) if image is not None else QPixmap()
+        size = self.artwork_label.size()
+        ratio = self.devicePixelRatioF() or 1.0
+        out = QPixmap(int(size.width() * ratio), int(size.height() * ratio))
+        out.setDevicePixelRatio(ratio)
+        out.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(out)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(0, 0, size.width(), size.height()), 16, 16)
+        painter.setClipPath(clip)
+        if not source.isNull():
+            scaled = source.scaled(
+                out.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
             )
-        )
+            x = (scaled.width() - out.width()) // 2
+            y = (scaled.height() - out.height()) // 2
+            scaled.setDevicePixelRatio(ratio)
+            painter.drawPixmap(0, 0, scaled, x, y, out.width(), out.height())
+        else:
+            painter.fillRect(QRectF(0, 0, size.width(), size.height()), tile_color(record.music_id))
+            font = QFont("Unbounded")
+            font.setPixelSize(64)
+            font.setWeight(QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.setPen(QColor(251, 237, 255, 215))
+            painter.drawText(QRectF(0, 0, size.width(), size.height()), Qt.AlignmentFlag.AlignCenter, initials(display_title(record)))
+        painter.end()
+        self.artwork_label.setText("")
+        self.artwork_label.setPixmap(out)
 
     def _populate_evidence(self, record) -> None:
         lines = [f"{idx}. {path.name}" for idx, path in enumerate(record.evidence_images[:8], start=1)]
@@ -4332,8 +4930,299 @@ class SoundVaultWindow(QMainWindow):
         # Repaint just the toggled row's star (model emits dataChanged for it).
         self.table.library_model().set_favorite(str(music_id), is_favorite)
 
-    def open_library_context_menu(self, point) -> None:
-        index = self.table.indexAt(point)
+    # ---- track list (0.5) -------------------------------------------------------
+
+    def _library_view(self):
+        """The library view currently on screen (track list or classic table)."""
+        stack = getattr(self, "library_stack", None)
+        if stack is not None and stack.currentWidget() is not None:
+            return stack.currentWidget()
+        return self.table
+
+    def set_library_view_mode(self, mode: str, *, persist: bool = True) -> None:
+        mode = "table" if mode == "table" else "list"
+        view = self.table if mode == "table" else self.track_list
+        scroll = self._library_view().verticalScrollBar().value() if hasattr(self, "library_stack") else 0
+        self.library_stack.setCurrentWidget(view)
+        self.view_mode_button.blockSignals(True)
+        self.view_mode_button.setChecked(mode == "table")
+        self.view_mode_button.setText("Table" if mode == "table" else "List")
+        self.view_mode_button.setAccessibleName(f"Library view: {'table' if mode == 'table' else 'track list'}")
+        self.view_mode_button.blockSignals(False)
+        current = self.table.currentIndex()
+        if current.isValid():
+            view.scrollTo(self.table.model().index(current.row(), SOUND_COL))
+        elif scroll:
+            view.verticalScrollBar().setValue(scroll)
+        if persist:
+            self.settings.set_library_view_mode(mode)
+
+    def set_library_density(self, density: str) -> None:
+        self.track_list.set_density(density)
+        self.settings.set_library_density(density)
+
+    def _apply_sort_choice(self, index: int) -> None:
+        if not (0 <= index < len(LIBRARY_SORTS)):
+            return
+        _label, column, order = LIBRARY_SORTS[index]
+        self.library_sort_column = column
+        self.library_sort_order = order
+        self.table.horizontalHeader().setSortIndicator(column if column < self.table.columnCount() else -1, order)
+        QTimer.singleShot(0, self.refresh_table)
+
+    def _apply_track_filters(self, rows: list) -> list:
+        bpm = self.bpm_filter.currentData() if hasattr(self, "bpm_filter") else "all"
+        if bpm and bpm != "all":
+            def in_range(record) -> bool:
+                value = record.bpm
+                if bpm == "unknown":
+                    return value is None
+                if value is None:
+                    return False
+                return {
+                    "under_90": value < 90,
+                    "90_120": 90 <= value < 120,
+                    "120_150": 120 <= value < 150,
+                    "over_150": value >= 150,
+                }.get(str(bpm), True)
+
+            rows = [record for record in rows if in_range(record)]
+        if getattr(self, "vocals_only", None) is not None and self.vocals_only.isChecked():
+            rows = [record for record in rows if has_speech(record.transcript_text)]
+        return rows
+
+    def _row_for_music_id(self, music_id: str) -> int:
+        return self.table.library_model().row_of(music_id)
+
+    # TrackListHost: callbacks the row painter uses -------------------------------
+    def track_is_playing(self, music_id: str) -> bool:
+        return bool(self.playing_music_id) and self.playing_music_id == str(music_id)
+
+    def track_progress(self, music_id: str) -> float:
+        if not self.track_is_playing(music_id):
+            return 0.0
+        maximum = self.progress_slider.maximum()
+        return self.progress_slider.value() / maximum if maximum > 0 else 0.0
+
+    def track_play(self, music_id: str) -> None:
+        if self.track_is_playing(music_id):
+            self.pause_playback()
+        else:
+            self.play_record_by_id(str(music_id))
+
+    def track_favorite(self, music_id: str) -> None:
+        self.toggle_favorite_by_id(str(music_id))
+
+    def track_add_to_bin(self, music_id: str, global_pos) -> None:
+        ids = self._selected_library_music_ids()
+        if str(music_id) not in ids:
+            ids = (str(music_id),)
+        menu = QMenu(self)
+        favorites = menu.addAction("Favorites")
+        favorites.triggered.connect(lambda: self.add_music_ids_to_library_target("favorites", ids))
+        for bin_row in self.vm.library_bins():
+            action = menu.addAction(bin_row.name)
+            action.triggered.connect(
+                lambda _checked=False, bin_id=bin_row.id: self.add_music_ids_to_library_target(f"bin:{bin_id}", ids)
+            )
+        menu.addSeparator()
+        new_bin = menu.addAction("New sorting bin…")
+        new_bin.triggered.connect(lambda: self.create_sorting_bin(seed_music_ids=ids))
+        menu.exec(global_pos)
+
+    def track_reveal(self, music_id: str) -> None:
+        record = self.records_by_id.get(str(music_id))
+        folder = getattr(record, "folder_path", None)
+        if folder is not None and Path(folder).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def track_copy_link(self, music_id: str) -> None:
+        record = self.records_by_id.get(str(music_id))
+        url = (self._sound_url_for_record(record) if record is not None else None) or ""
+        if not url:
+            self.statusBar().showMessage("This sound has no source link", 3000)
+            return
+        QApplication.clipboard().setText(url)
+        self.statusBar().showMessage("Source link copied", 2000)
+
+    def track_more(self, global_pos) -> None:
+        point = self.track_list.viewport().mapFromGlobal(global_pos)
+        self.open_library_context_menu(point, view=self.track_list)
+
+    def track_seek(self, music_id: str, fraction: float) -> None:
+        maximum = self.progress_slider.maximum()
+        if self.track_is_playing(music_id) and maximum > 0:
+            self.seek_playback(int(maximum * max(0.0, min(1.0, fraction))))
+
+    def track_play_at(self, music_id: str, fraction: float) -> None:
+        """Play ``music_id`` from ``fraction`` of its length in one step. A click on a
+        stopped or paused track's waveform starts it at the clicked spot, not at 0:00."""
+        music_id = str(music_id)
+        fraction = max(0.0, min(1.0, float(fraction)))
+        if self.track_is_playing(music_id) and self.progress_slider.maximum() > 0:
+            self.track_seek(music_id, fraction)
+            return
+        if self.current_preview_record is None or self.current_preview_record.music_id != music_id:
+            record = self.records_by_id.get(music_id)
+            if record is None:
+                return
+            self._select_row_for_music_id(music_id)
+            self.current_preview_record = self.vm.preview_for(music_id)
+        self.play_selected_sound(start_fraction=fraction)
+
+    def _seek_from_waveform(self, fraction: float) -> None:
+        record = self.current_preview_record
+        if record is not None:
+            self.track_play_at(record.music_id, fraction)
+
+    def _seek_from_now_playing(self, fraction: float) -> None:
+        """A click on the bar's waveform plays the bar's track from there, even when paused."""
+        music_id = self.playing_music_id
+        if not music_id:
+            record = self.now_playing_bar.record()
+            music_id = record.music_id if record is not None else None
+        if music_id:
+            self.track_play_at(music_id, fraction)
+
+    def _now_playing_toggle(self) -> None:
+        """Play/pause on the bar acts on the bar's track, not whatever row is selected."""
+        if self.playing_music_id:
+            self.pause_playback()
+            return
+        record = self.now_playing_bar.record()
+        if record is not None:
+            self.play_record_by_id(record.music_id)
+        else:
+            self.toggle_play_pause()
+
+    def _on_progress_value(self, value: int) -> None:
+        playing = self.playing_music_id
+        if not playing:
+            return
+        bar = getattr(self, "now_playing_bar", None)
+        if bar is not None:
+            maximum = self.progress_slider.maximum()
+            bar.set_progress(
+                self.track_progress(playing),
+                self._format_ms(int(value)),
+                self._format_ms(maximum) if maximum > 0 else None,
+            )
+        record = self.current_preview_record
+        if record is not None and record.music_id == playing and hasattr(self, "preview_waveform"):
+            self.preview_waveform.set_progress(self.track_progress(playing))
+        # Repaint only the playing row of the track list (cheap; ~10 Hz from the player).
+        if hasattr(self, "track_list") and self.library_stack.currentWidget() is self.track_list:
+            row = self._row_for_music_id(playing)
+            if row >= 0:
+                self.track_list.viewport().update(
+                    self.track_list.visualRect(self.track_list.model().index(row, SOUND_COL))
+                )
+
+    # Detail-pane stats grid (design board 6): value over label, three per row.
+    _PREVIEW_STATS = (("uses", "USES"), ("bpm", "BPM"), ("length", "LENGTH"),
+                      ("added", "ADDED"), ("videos", "VIDEOS"))
+
+    def _build_preview_stats(self, parent: QWidget) -> QWidget:
+        box = QWidget(parent)
+        box.setObjectName("previewStats")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(0, 4, 0, 4)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(10)
+        self.preview_stat_values: dict[str, QLabel] = {}
+        # Row 2: ADDED spans two columns so a full date ("May 17, 2023") never elides;
+        # VIDEOS sits under LENGTH.
+        places = {"added": (1, 0, 1, 2), "videos": (1, 2, 1, 1)}
+        for index, (key, caption) in enumerate(self._PREVIEW_STATS):
+            cell = QVBoxLayout()
+            cell.setSpacing(2)
+            value = ElidedLabel("—", box)
+            value.setObjectName("previewStatValue")
+            label = QLabel(caption, box)
+            label.setObjectName("previewStatLabel")
+            cell.addWidget(value)
+            cell.addWidget(label)
+            grid.addLayout(cell, *places.get(key, (index // 3, index % 3, 1, 1)))
+            self.preview_stat_values[key] = value
+        for column in range(3):
+            grid.setColumnStretch(column, 1)
+        return box
+
+    def _set_preview_stats(self, record) -> None:
+        values = getattr(self, "preview_stat_values", None)
+        if not values:
+            return
+        if record is None:
+            for label in values.values():
+                label.setText("—")
+            return
+        from datetime import date
+
+        from sound_vault.ui.track_list import format_bpm, format_duration, format_uses
+
+        added = (record.added_at or "")[:10]
+        try:
+            day = date.fromisoformat(added) if added else None
+            if day is None:
+                added = "—"
+            elif day.year == date.today().year:
+                added = f"{day:%b} {day.day}"
+            else:
+                added = f"{day:%b} {day.day}, {day.year}"
+        except ValueError:
+            added = added or "—"
+        values["uses"].setText(format_uses(record.usage_count))
+        values["bpm"].setText(format_bpm(record.bpm).replace(" BPM", ""))
+        values["length"].setText(format_duration(record.duration_seconds))
+        values["added"].setText(added)
+        values["videos"].setText(f"{record.associated_video_count:,}")
+
+    # Below this window height the archive-health panel yields its room to navigation.
+    HEALTH_PANEL_MIN_HEIGHT = 820
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        panel = getattr(self, "archive_health_panel", None)
+        if panel is not None:
+            panel.setVisible(self.height() >= self.HEALTH_PANEL_MIN_HEIGHT)
+
+    # The detail pane belongs to pages that select a sound; elsewhere it showed stale
+    # or unrelated content.
+    PANE_VIEWS = ("library", "dedupe")
+
+    def toggle_detail_pane(self) -> None:
+        """⌘I: hide or show the detail pane (more room for the track list)."""
+        panel = getattr(self, "preview_panel", None)
+        if panel is not None:
+            self._detail_pane_user_hidden = panel.isVisible()
+            panel.setVisible(not panel.isVisible())
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt override
+        body = getattr(self, "_preview_body", None)
+        if event.type() == QEvent.Type.Resize and body is not None and obj is body.parentWidget():
+            side = max(160, min(320, event.size().width() - 6))
+            if self.artwork_label.width() != side:
+                self.artwork_label.setFixedSize(side, side)
+                if self.current_preview_record is not None:
+                    self._populate_artwork(self.current_preview_record)
+        return super().eventFilter(obj, event)
+
+    def _favorite_current_track(self) -> None:
+        music_id = self._selected_music_id()
+        if music_id:
+            self.toggle_favorite_by_id(music_id)
+
+    def _bin_menu_for_current_track(self) -> None:
+        music_id = self._selected_music_id()
+        if not music_id:
+            return
+        row = self._row_for_music_id(music_id)
+        rect = self.track_list.visualRect(self.track_list.model().index(row, SOUND_COL))
+        self.track_add_to_bin(music_id, self.track_list.viewport().mapToGlobal(rect.center()))
+
+    def open_library_context_menu(self, point, view=None) -> None:
+        view = view or self.table
+        index = view.indexAt(point)
         if index.isValid():
             selected_rows = {i.row() for i in self.table.selectionModel().selectedRows()}
             if index.row() not in selected_rows:
@@ -4393,7 +5282,7 @@ class SoundVaultWindow(QMainWindow):
         menu.addAction(folder_action)
         menu.addSeparator()
         menu.addAction(retranscribe_action)
-        menu.exec(self.table.viewport().mapToGlobal(point))
+        menu.exec(view.viewport().mapToGlobal(point))
 
     def mark_selected_library_as_duplicate(self, music_ids: tuple[str, ...] | list[str] | None = None) -> None:
         selected_ids = self._dedupe_music_ids(list(music_ids or self._selected_library_music_ids()))
@@ -4430,18 +5319,24 @@ class SoundVaultWindow(QMainWindow):
                 return value
         return None
 
-    def play_record_by_id(self, music_id: str) -> None:
-        record = self.records_by_id.get(str(music_id))
-        if record is None:
-            return
+    def _select_row_for_music_id(self, music_id: str) -> None:
         for row_idx in range(self.table.rowCount()):
             if self.table.music_id_at(row_idx) == music_id:
                 self.table.selectRow(row_idx)
                 break
+
+    def play_record_by_id(self, music_id: str) -> None:
+        record = self.records_by_id.get(str(music_id))
+        if record is None:
+            return
+        self._select_row_for_music_id(music_id)
         self.current_preview_record = self.vm.preview_for(record.music_id)
         self.play_selected_sound()
 
-    def play_selected_sound(self) -> None:
+    def play_selected_sound(self, start_fraction: float | None = None) -> None:
+        """Play the selected sound. With ``start_fraction`` it starts at that point of
+        the track and never toggles to pause (a waveform click means "play from here")."""
+        self._pending_start_fraction = None
         if self.current_preview_record is None:
             return
         target = self.vm.play_target_for(self.current_preview_record)
@@ -4456,24 +5351,33 @@ class SoundVaultWindow(QMainWindow):
 
         source = self._playback_source_for(target)
         if self._should_use_external_audio(target):
-            if self._is_external_audio_playing() and self.external_audio_target == target:
+            if start_fraction is None and self._is_external_audio_playing() and self.external_audio_target == target:
                 self.pause_playback()
                 return
             if self.audio_player is not None:
                 self.audio_player.stop()
-            if self._play_external_audio(target):
+            start_ms = 0
+            if start_fraction:
+                duration_ms = self._duration_ms_for_record(self.current_preview_record) or self._probe_audio_duration_ms(target)
+                start_ms = int(duration_ms * start_fraction)
+            if self._play_external_audio(target, start_ms=start_ms):
                 self._set_playing(self.current_preview_record.music_id)
-                if hasattr(self, "transport_play_button"):
-                    self.transport_play_button.setText("▮▮")
-                    self.transport_play_button.setToolTip("Stop playback")
+                self._sync_transport(True)
                 return
-        if self.audio_player.source() == source and self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self.audio_player.source() == source and self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState and start_fraction is None:
             self.audio_player.pause()
             self.playback_status.setText("Playback paused")
             self._set_playing(None)
             return
         if self.audio_player.source() != source:
             self.audio_player.setSource(source)
+        if start_fraction:
+            duration = self.audio_player.duration()
+            if duration > 0:
+                self.audio_player.setPosition(int(duration * start_fraction))
+            else:
+                # Not loaded yet: _player_duration_changed seeks once the length is known.
+                self._pending_start_fraction = start_fraction
         self.audio_player.play()
         self._set_playing(self.current_preview_record.music_id)
         self.playback_status.setText(f"Playing {self._playback_label_for(target)}")
@@ -4529,6 +5433,10 @@ class SoundVaultWindow(QMainWindow):
 
     def _player_duration_changed(self, duration: int) -> None:
         self.progress_slider.setRange(0, max(0, duration))
+        pending = getattr(self, "_pending_start_fraction", None)
+        if pending and duration > 0 and self.audio_player is not None:
+            self._pending_start_fraction = None
+            self.audio_player.setPosition(int(duration * pending))
         position = self.audio_player.position() if self.audio_player is not None else 0
         self.time_label.setText(f"{self._format_ms(position)} / {self._format_ms(duration)}")
 
@@ -4536,9 +5444,7 @@ class SoundVaultWindow(QMainWindow):
         from PySide6.QtMultimedia import QMediaPlayer
 
         playing = state == QMediaPlayer.PlaybackState.PlayingState
-        if hasattr(self, "transport_play_button"):
-            self.transport_play_button.setText("▮▮" if playing else "▶")
-            self.transport_play_button.setToolTip("Pause playback" if playing else "Play selected sound")
+        self._sync_transport(playing)
         if playing and self.current_preview_record is not None:
             self._set_playing(self.current_preview_record.music_id)
         elif not playing:
@@ -4554,8 +5460,7 @@ class SoundVaultWindow(QMainWindow):
         player_error = self.audio_player.errorString() if self.audio_player is not None else ""
         detail = error_string or player_error or "unknown media error"
         self.playback_status.setText(f"Playback error: {detail}")
-        if hasattr(self, "transport_play_button"):
-            self.transport_play_button.setText("▶")
+        self._sync_transport(False)
 
     @staticmethod
     def _format_usage_count(value: int | None) -> str:
@@ -4713,14 +5618,54 @@ class SoundVaultWindow(QMainWindow):
             # alarming out of context, e.g. "Your IP address is blocked"); the full raw
             # error stays on hover + right-click ▸ Copy error.
             friendly = humanize_failure(err).short if err else ""
-            for col_idx, value in enumerate([received, item.source, item.url, item.status, friendly]):
-                table_item = QTableWidgetItem(str(value))
+            source = _SOURCE_LABELS.get(str(item.source), str(item.source))
+            for col_idx, value in enumerate([_friendly_time(received), source, item.url, item.status, friendly]):
+                table_item = _SortableItem(str(value))
                 table_item.setData(Qt.ItemDataRole.UserRole, item.id)
+                if col_idx == 0:
+                    table_item.set_sort_key(str(received))  # sorts by the real time
+                    table_item.setToolTip(str(received))
                 if err:
                     table_item.setToolTip(err)
                 self.inbox_table.setItem(row_idx, col_idx, table_item)
         self.inbox_table.setSortingEnabled(True)
         self.inbox_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+        self._apply_inbox_tab()
+
+    @staticmethod
+    def _inbox_bucket(status: str) -> str:
+        return "failed" if str(status).lower() in {"failed", "error"} else "waiting"
+
+    def set_inbox_tab(self, key: str) -> None:
+        self.inbox_tab = key if key in {"all", "waiting", "failed"} else "all"
+        if hasattr(self, "inbox_tabs"):
+            self.inbox_tabs[self.inbox_tab].setChecked(True)
+        self._apply_inbox_tab()
+
+    def _apply_inbox_tab(self) -> None:
+        if not hasattr(self, "inbox_tabs"):
+            return
+        rows = getattr(self, "current_inbox_rows", [])
+        counts = {"all": len(rows), "waiting": 0, "failed": 0}
+        for item in rows:
+            counts[self._inbox_bucket(item.status)] += 1
+        for key, label in (("all", "All"), ("waiting", "Waiting"), ("failed", "Failed")):
+            self.inbox_tabs[key].setText(f"{label} {counts[key]:,}")
+        status_col = 3
+        for row in range(self.inbox_table.rowCount()):
+            cell = self.inbox_table.item(row, status_col)
+            bucket = self._inbox_bucket(cell.text() if cell is not None else "")
+            self.inbox_table.setRowHidden(row, self.inbox_tab != "all" and bucket != self.inbox_tab)
+        empty = getattr(self, "inbox_empty", None)
+        if empty is not None:
+            messages = {
+                "all": "Nothing here. Sounds you share from your iPhone land in this list.",
+                "waiting": "Nothing waiting to import.",
+                "failed": "No failed imports.",
+            }
+            empty.setText(messages.get(self.inbox_tab, messages["all"]))
+            empty.setGeometry(self.inbox_table.viewport().rect())
+            empty.setVisible(counts.get(self.inbox_tab, 0) == 0)
 
     def _inbox_item_at(self, pos) -> "ShortcutInboxItem | None":
         """The inbox row under a context-menu position (via the id stashed in UserRole)."""
@@ -4890,8 +5835,6 @@ class SoundVaultWindow(QMainWindow):
         # whole-batch crash), so surface them explicitly — otherwise a run where
         # every link failed reads as "Imported 0 sound(s)." and looks like success.
         if failures:
-            sample = failures[0]
-            reason = getattr(sample, "reason", "") or "unknown error"
             # If the failures look like a missing/expired TikTok session, route the
             # user straight to the fix instead of showing a dead-end error.
             tiktok_failures = [o for o in failures if self._looks_like_tiktok_auth_failure(o)]
@@ -5057,6 +6000,59 @@ class SoundVaultWindow(QMainWindow):
         """Enrichment cycle tick: quietly queue any sound still missing a transcript.
         Cheap when there's nothing to do; only surfaces a message when it finds work."""
         self._enqueue_pending_transcriptions(announce=False)
+        self._start_analysis_backfill()
+
+    def _start_analysis_backfill(self) -> None:
+        """Compute waveforms + BPM for sounds that don't have them yet. Skips sounds that
+        already failed this session, so an undecodable file isn't retried every cycle."""
+        if _env_flag("SOUND_VAULT_DISABLE_ANALYSIS"):
+            return
+        worker = getattr(self, "_analysis_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        tried = self.__dict__.setdefault("_analysis_tried", set())
+        targets = [t for t in self.vm.analysis_targets(self._displayed_music_ids()) if t[0] not in tried]
+        if not targets:
+            return
+        tried.update(t[0] for t in targets)
+        worker = _AnalysisWorker(self.vm, targets, parent=self)
+        worker.analyzed.connect(self._on_sound_analyzed)
+        worker.progress.connect(self._on_analysis_progress)
+        self._analysis_worker = worker
+        worker.start()
+
+    def _on_sound_analyzed(self, music_id: str) -> None:
+        """A re-analysis rewrites waveform.json at the same path, so drop the cached
+        shape before the coalesced library refresh repaints the row."""
+        record = self.records_by_id.get(str(music_id))
+        path = getattr(record, "waveform_path", None)
+        if path is not None:
+            self.track_delegate.peaks.invalidate(path)
+        self._on_queue_transcribed(music_id)
+
+    def _displayed_music_ids(self) -> list[str]:
+        """Library rows in display order, starting at the top row on screen, so the
+        backfill draws what the user is looking at first."""
+        table = getattr(self, "table", None)
+        if table is None:
+            return []
+        count = table.rowCount()
+        first = 0
+        view = getattr(self, "track_list", None)
+        if view is not None:
+            index = view.indexAt(QPoint(4, 4))
+            if index.isValid():
+                first = index.row()
+        rows = list(range(first, count)) + list(range(0, first))
+        return [mid for mid in (table.music_id_at(r) for r in rows) if mid]
+
+    def _on_analysis_progress(self, done: int, total: int) -> None:
+        self._analysis_progress = (done, total)
+        # No timeout: a timed message blinks off between updates. Cleared when done.
+        if done >= total:
+            self.statusBar().clearMessage()
+        elif done % 25 == 0:
+            self.statusBar().showMessage(f"Drawing waveforms… {done:,}/{total:,}")
 
     def _on_queue_progress(self, done: int, enqueued: int) -> None:
         if done >= enqueued:
@@ -5166,14 +6162,21 @@ class SoundVaultWindow(QMainWindow):
         rows = self.vm.review_queue_rows()
         self.review_table.setSortingEnabled(False)
         self.review_table.setRowCount(len(rows))
-        for row_idx, (queue, count, action, status_filter, media_filter) in enumerate(rows):
-            for col_idx, value in enumerate([queue, f"{count:,}", action]):
-                table_item = QTableWidgetItem(str(value))
+        for row_idx, (queue_name, count, action, status_filter, media_filter) in enumerate(rows):
+            label = _QUEUE_LABELS.get(queue_name, str(queue_name).replace("_", " ").capitalize())
+            action = "Open in Library" if action == "Review status" else action
+            for col_idx, value in enumerate([label, f"{count:,}", action]):
+                table_item = _SortableItem(str(value))
                 table_item.setData(Qt.ItemDataRole.UserRole, {"status_filter": status_filter, "media_filter": media_filter})
+                table_item.setToolTip("Double-click to show these sounds in the Library")
                 if col_idx == 1:
-                    table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    table_item.set_sort_key(int(count))  # "2,036" must sort after "151"
+                    table_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.review_table.setItem(row_idx, col_idx, table_item)
         self.review_table.setSortingEnabled(True)
+        header = self.review_table.horizontalHeader()
+        header.resizeSection(0, 280)
+        header.resizeSection(1, 100)
 
     def apply_review_queue_filter(self, item: QTableWidgetItem) -> None:
         payload = item.data(Qt.ItemDataRole.UserRole)
@@ -5204,6 +6207,7 @@ class SoundVaultWindow(QMainWindow):
                     table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.dedupe_groups_table.setItem(row_idx, col_idx, table_item)
         self.dedupe_groups_table.setSortingEnabled(True)
+        self.dedupe_groups_table.resizeColumnsToContents()
         selected_row = -1
         if previous_group_id:
             for row_idx in range(self.dedupe_groups_table.rowCount()):
@@ -5309,9 +6313,7 @@ class SoundVaultWindow(QMainWindow):
             if self.audio_player is not None:
                 self.audio_player.stop()
             if self._play_external_audio(target):
-                if hasattr(self, "transport_play_button"):
-                    self.transport_play_button.setText("▮▮")
-                    self.transport_play_button.setToolTip("Stop playback")
+                self._sync_transport(True)
                 return
         if self._ensure_audio_player():
             self.audio_player.setSource(self._playback_source_for(target))
@@ -5396,6 +6398,7 @@ class SoundVaultWindow(QMainWindow):
             self.worker_status_table.setItem(row_idx, 0, QTableWidgetItem(metric))
             self.worker_status_table.setItem(row_idx, 1, QTableWidgetItem(value))
         self.worker_status_table.setSortingEnabled(True)
+        self.worker_status_table.horizontalHeader().resizeSection(0, 300)  # sized after data, not while empty
 
     def _start_worker_job(self, name: str, future) -> None:
         if self._worker_future is not None and not self._worker_future.done():
@@ -5758,106 +6761,28 @@ QMainWindow, QWidget {
 }
 #brandMark { background: transparent; }
 #sourceGroup {
-    color: #7d6fa9;
+    color: #a993d6;
     background: transparent;
     border: none;
-    padding: 10px 6px 4px 6px;
-    font-size: 9px;
+    padding: 10px 11px 4px 11px;  /* same text edge and style as the Library header */
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 2.4px;
+    letter-spacing: 1.6px;
     text-transform: uppercase;
 }
 
 /* Title typography */
-#title { font-family: "Unbounded", "Quicksand", sans-serif; font-size: 17px; font-weight: 700; color: #fbedff; letter-spacing: -0.01em; background: transparent; }
+#vaultPath { font-size: 12px; color: #c5b3e6; background: transparent; }
+#title { font-family: "Unbounded", "Quicksand", sans-serif; font-size: 22px; font-weight: 700; color: #fbedff; letter-spacing: -0.01em; background: transparent; }
 #sectionTitle { font-family: "Quicksand", sans-serif; font-size: 14px; font-weight: 600; color: #fbedff; background: transparent; }
-#previewTitle { font-family: "Quicksand", sans-serif; font-size: 16px; font-weight: 600; color: #fbedff; background: transparent; }
-#muted { color: #8c7fb5; font-size: 11px; background: transparent; }
+#previewTitle { font-family: "Quicksand", sans-serif; font-size: 20px; font-weight: 700; color: #fbedff; background: transparent; }
+#previewArtist { font-family: "Quicksand", sans-serif; font-size: 13px; color: #c5b3e6; background: transparent; }
+#preview QGroupBox { background: transparent; border: none; padding: 0; margin-top: 16px; }
+#preview QGroupBox::title { left: 0; padding: 0; font-size: 10px; letter-spacing: 1.2px; color: #66ecff; }
+#preview QPushButton { text-align: center; min-height: 32px; }
+#preview QPushButton#previewPrimary { border: 1px solid #b793ff; color: #fbedff; }
+#muted { color: #a993d6; font-size: 11px; background: transparent; }
 #onboardBody { color: #d9cef0; font-size: 12px; line-height: 150%; background: transparent; }
-
-/* Chrome header strip — glossy holo sheen */
-#chromeHeader {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #1b0f3d, stop:0.5 #2a1860, stop:1 #1b0f3d);
-    border-top: 1px solid #5a3fa0;
-    border-bottom: 1px solid #0a0518;
-    border-left: 1px solid #2a1758;
-    border-right: 1px solid #1a0c33;
-    border-radius: 14px;
-}
-#transportDeck {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #20123f, stop:0.5 #170c33, stop:1 #100826);
-    border-top: 1px solid #4a2f86;
-    border-bottom: 1px solid #050310;
-    border-left: 1px solid #1a0c33;
-    border-right: 1px solid #1a0c33;
-    border-radius: 12px;
-}
-
-/* Transport buttons — dark glass, holo on hover */
-#transportButton {
-    min-width: 34px;
-    min-height: 30px;
-    border-radius: 9px;
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #2a1858, stop:1 #170c33);
-    color: #f0e6ff;
-    border: 1px solid #1a0c33;
-    border-top: 1px solid #4a2f86;
-    padding: 4px;
-    text-align: center;
-    font-weight: 700;
-}
-#transportButton:hover {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #66ecff, stop:1 #b793ff);
-    color: #0a0518;
-    border: 1px solid #66ecff;
-}
-#transportButton:pressed {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #ff6ad5, stop:1 #b793ff);
-    color: #0a0518;
-}
-#transportButton:checked {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #66ecff, stop:1 #ff6ad5);
-    color: #0a0518;
-    border: 1px solid #ffffff;
-    font-weight: 700;
-}
-
-/* Now-Playing HUD capsule */
-#capsuleDisplay {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #100826, stop:0.06 #150a33, stop:1 #1b0f3d);
-    border: 1px solid #0a0518;
-    border-top: 1px solid #5a3fa0;
-    border-radius: 12px;
-}
-#displayEyebrow {
-    color: #66ecff;
-    font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 1.8px;
-    text-transform: uppercase;
-    background: transparent;
-}
-#displayTitle {
-    color: #fbedff;
-    font-family: "Quicksand", "Quicksand", sans-serif;
-    font-size: 14px;
-    font-weight: 600;
-    background: transparent;
-}
-#displaySubtitle {
-    color: #8c7fb5;
-    font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 10px;
-    background: transparent;
-}
 
 /* Portal tabs (vestigial) */
 #libraryTabs {
@@ -5890,8 +6815,8 @@ QMainWindow, QWidget {
         stop:0 #1b0f3d, stop:1 #150a33);
     border: 1px solid #2a1758;
     border-top: 1px solid #5a3fa0;
-    border-radius: 14px;
-    padding: 4px 12px;
+    border-radius: 10px;
+    padding: 0;
 }
 #limeStatusDot { background: transparent; }
 #statusReadout {
@@ -5943,14 +6868,7 @@ QMainWindow, QWidget {
     background-position: top right;
     border-left: 1px solid #2a1758;
 }
-#artwork {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #66ecff, stop:0.5 #b793ff, stop:1 #ff6ad5);
-    color: #1a0526;
-    border: 1px solid #0a0518;
-    border-top: 1px solid #ffb3ec;
-    border-radius: 16px;
-}
+#artwork { background: transparent; border: none; }
 
 /* Generic buttons — glassy violet */
 QPushButton, QToolButton {
@@ -6030,12 +6948,15 @@ QToolButton::menu-button { border: none; width: 0; }
 }
 
 /* Sidebar nav */
+QScrollArea#navScroll, QWidget#navBody, QWidget#librarySection, QWidget#inspectorBody { background: transparent; border: none; }
+#navButton[section="true"] { color: #a993d6; font-size: 10px; font-weight: 700; letter-spacing: 1.6px; }
 #navButton {
     background: transparent;
-    color: #b3a3d6;
+    color: #c5b3e6;
     border: 1px solid transparent;
-    border-radius: 10px;
-    padding: 7px 11px;
+    border-radius: 9px;
+    padding: 5px 11px;
+    min-height: 20px;
     text-align: left;
     font-family: "Quicksand", sans-serif;
     font-weight: 500;
@@ -6070,9 +6991,10 @@ QToolButton::menu-button { border: none; width: 0; }
 
 #libraryBinButton {
     text-align: left;
-    padding: 5px 9px;
+    min-height: 20px;
+    padding: 5px 40px 5px 11px;  /* right: room for the count */
     border-radius: 9px;
-    color: #b3a3d6;
+    color: #c5b3e6;
     background: transparent;
     border: 1px solid transparent;
     font-weight: 500;
@@ -6130,15 +7052,15 @@ QLineEdit:focus, QComboBox:focus {
     border: 1px solid #66ecff;
     border-top: 1px solid #66ecff;
 }
-QComboBox::drop-down { width: 18px; border: none; background: transparent; }
+QComboBox { padding-right: 30px; }  /* text never runs under the chevron */
+QComboBox::drop-down { width: 22px; border: none; background: transparent; }
+QCheckBox::indicator:checked { image: url("__CHECK__"); }
 QComboBox::down-arrow {
-    image: none;
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #b793ff;
-    margin-right: 6px;
+    /* Qt has no CSS border-triangle; the old rule painted a flat bar. */
+    image: url("__CHEVRON__");
+    width: 10px;
+    height: 6px;
+    margin-right: 10px;
 }
 QComboBox QAbstractItemView {
     background: #150a33;
@@ -6158,8 +7080,8 @@ QComboBox QAbstractItemView::item:hover {
 }
 
 #searchBox {
-    border-radius: 13px;
-    padding: 4px 14px;
+    border-radius: 10px;
+    padding: 0 12px;
     background: #0e0724;
     border: 1px solid #2a1758;
     border-top: 1px solid #1a0c33;
@@ -6182,15 +7104,15 @@ QTableView, QTableWidget {
 QTableView::item, QTableWidget::item { padding: 4px 8px; border: none; background: transparent; }
 QTableView::item:hover, QTableWidget::item:hover { background: rgba(183, 147, 255, 0.12); }
 QTableView::item:selected, QTableWidget::item:selected {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 rgba(102,236,255,0.28), stop:1 rgba(255,106,213,0.20));
-    color: #ffffff;
+    background: #1d1042;  /* same raised fill as a selected list row */
+    color: #fbedff;
 }
+QHeaderView::up-arrow, QHeaderView::down-arrow { subcontrol-position: center right; width: 8px; right: 8px; }
 QHeaderView::section {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 #20123f, stop:1 #150a33);
-    color: #b3a3d6;
-    padding: 6px 8px;
+    color: #a993d6;
+    padding: 6px 10px;
     border: none;
     border-right: 1px solid #0c0720;
     border-bottom: 1px solid #0a0518;
@@ -6202,6 +7124,18 @@ QHeaderView::section {
     letter-spacing: 1.2px;
 }
 
+#emptyState { color: #a993d6; font-size: 13px; background: transparent; }
+#preview QPushButton#previewPrimary:disabled { border: 1px solid #2a1758; color: #7d6fa9; }
+#dangerButton:disabled { background: #160c30; color: #7d6fa9; border: 1px solid #2a1758; }
+#cautionButton { background: transparent; color: #ff6ad5; border: 1px solid rgba(255, 106, 213, 0.45); text-align: center; }
+#cautionButton:hover { background: rgba(255, 106, 213, 0.10); }
+#formLabel { color: #a993d6; background: transparent; }
+QLineEdit#monoField { font-family: "SF Mono", "Menlo", monospace; font-size: 12px; }
+QDialog QGroupBox { margin-top: 18px; padding: 14px 14px 12px 14px; }
+QStatusBar { background: #05030f; color: #c5b3e6; font-size: 11px; border-top: 1px solid #2a1758; }
+QPushButton:focus, QToolButton:focus { border: 1px solid #66ecff; }
+QTextEdit:focus { border: 1px solid #66ecff; }
+
 /* Transcript / text editors */
 QTextEdit {
     background: #0e0724;
@@ -6210,8 +7144,8 @@ QTextEdit {
     border-radius: 12px;
     padding: 10px;
     color: #e7d9ff;
-    font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 11px;
+    font-family: "Quicksand", sans-serif;
+    font-size: 13px;
     selection-background-color: #b793ff;
     selection-color: #0a0518;
 }
@@ -6303,25 +7237,68 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 #archiveHealthTitle {
     color: #66ecff;
     font-family: "Quicksand", "SF Mono", monospace;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
     letter-spacing: 1.8px;
     text-transform: uppercase;
     background: transparent;
 }
 #archiveHealthLabel {
-    color: #b3a3d6;
-    font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 10px;
+    color: #c5b3e6;
+    font-family: "Quicksand", sans-serif;
+    font-size: 11px;
+    font-weight: 600;
     background: transparent;
 }
 #archiveHealthValue {
     color: #fbedff;
     font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     background: transparent;
 }
+
+/* ---- 0.5 track list (design boards 1-4) ---- */
+QListView#trackList { background: transparent; border: none; outline: none; }
+QCheckBox { color: #fbedff; spacing: 8px; background: transparent; }
+QCheckBox::indicator {
+    width: 16px; height: 16px; border-radius: 5px;
+    border: 2px solid #8a7bb0; background: transparent;
+}
+QCheckBox::indicator:checked { background: #b793ff; border-color: #b793ff; }
+QCheckBox::indicator:focus { border-color: #66ecff; }
+QWidget#filterChips QComboBox { min-height: 30px; max-height: 30px; padding: 0 10px; }
+QCheckBox#vocalsOnly {
+    padding: 0 12px; border-radius: 10px; min-height: 30px; max-height: 30px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+}
+QCheckBox#vocalsOnly:checked { border-color: #b793ff; background: #1d1042; }
+QToolButton#viewModeButton { padding: 0 14px; }
+QToolButton#filtersButton { min-width: 0; padding-left: 12px; padding-right: 12px; }
+QToolButton#filtersButton:checked { background: #1d1042; border-color: #b793ff; }
+QWidget#narrowedBar { background: transparent; }
+QToolButton#linkButton {
+    border: none; background: transparent; color: #66ecff; font-size: 12px; padding: 0;
+}
+QToolButton#linkButton:hover { text-decoration: underline; }
+QWidget#previewWaveform { background: transparent; }
+QFrame#nowPlayingBar {
+    background: #150a33; border-top: 1px solid rgba(255, 255, 255, 0.12); border-radius: 0;
+}
+QLabel#nowPlayingTrack { font-size: 14px; font-weight: 700; color: #fbedff; background: transparent; }
+QLabel#nowPlayingArtist, QLabel#nowPlayingTime { font-size: 12px; color: #c5b3e6; background: transparent; }
+QLabel#nowPlayingArt { border-radius: 10px; background: transparent; }
+QWidget#nowPlayingText { background: transparent; }
+QWidget#statsCards { background: transparent; }
+QWidget#previewStats { background: transparent; }
+QToolButton#inboxTab {
+    min-height: 32px; padding: 0 14px; border-radius: 16px; border: none;
+    color: #c5b3e6; background: transparent; font-weight: 600;
+}
+QToolButton#inboxTab:checked { background: #1d1042; color: #fbedff; }
+QToolButton#inboxTab:hover { color: #fbedff; }
+QLabel#previewStatValue { font-size: 14px; font-weight: 700; color: #fbedff; background: transparent; }
+QLabel#previewStatLabel { font-size: 10px; color: #a993d6; letter-spacing: 1px; background: transparent; }
 """
 
 

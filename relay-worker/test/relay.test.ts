@@ -399,11 +399,11 @@ describe("POST /v1/admin/forward", () => {
 
 describe("CORS", () => {
   it("allows GET from soundcache.io origins and nothing else", async () => {
-    for (const ok of ["https://soundcache.io", "https://www.soundcache.io", "https://soundcache-web.vercel.app", "http://localhost:8000"]) {
+    for (const ok of ["https://soundcache.io", "https://www.soundcache.io", "http://localhost:8000"]) {
       expect(CORS_ORIGIN_REGEX.test(ok)).toBe(true);
       expect((await get("/v1/leaderboard", { origin: ok })).headers.get("access-control-allow-origin")).toBe(ok);
     }
-    for (const bad of ["https://evil.com", "https://soundcache.io.evil.com", "https://notsoundcache.io"]) {
+    for (const bad of ["https://evil.com", "https://soundcache-web.vercel.app", "https://soundcache.io.evil.com", "https://notsoundcache.io"]) {
       expect(CORS_ORIGIN_REGEX.test(bad)).toBe(false);
       expect((await get("/v1/leaderboard", { origin: bad })).headers.get("access-control-allow-origin")).toBeNull();
     }

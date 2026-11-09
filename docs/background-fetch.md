@@ -31,7 +31,7 @@ sound on your phone; it lands in the vault within one poll interval — GUI open
 
 Each poll is one relay request (and can briefly wake the hosted DB). For a personal
 vault, **180–300s is plenty** — sounds aren't time-critical, and a longer interval
-keeps Vercel function invocations and Neon compute (and therefore credits) low. The
+keeps relay requests (Cloudflare Worker + D1) low. The
 GUI's manual "Download & import" button is always available for an instant pull.
 
 ## Test the relay ↔ desktop loop locally (no cloud)
@@ -54,7 +54,7 @@ sound-vault-ingest --poll-relay
 ```
 
 The sound appears under `{vault}/sounds/`. This is exactly the path the hosted relay
-serves over the internet once deployed to Vercel.
+serves over the internet at `https://api.soundcache.io`.
 
 ## Enabling the TikTok capture fallback
 
