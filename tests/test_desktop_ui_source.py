@@ -145,7 +145,7 @@ def test_desktop_has_real_views_and_rich_archive_detail_panel():
 def test_desktop_inspector_shows_full_transcript_without_metadata_truncation():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
-    assert 'transcript_group = QGroupBox("Transcript")' in source
+    assert 'transcript_group = QGroupBox("TRANSCRIPT")' in source
     assert "self.transcript_text = QTextEdit()" in source
     assert "self.transcript_text.setReadOnly(True)" in source
     assert "self.transcript_text.setPlainText(self._full_transcript_text(record))" in source
@@ -524,7 +524,7 @@ def test_desktop_inspector_opens_associated_video_assets_and_normalizes_artwork(
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
     assert "self.artwork_label.setFixedSize(210, 210)" in source
-    assert "pixmap.scaled(" in source
+    assert "KeepAspectRatioByExpanding" in source  # artwork fills the square (centre crop)
     assert "self.open_video = QPushButton(\"Open video\")" in source
     assert "self.open_video_url = QPushButton(\"Open URL\")" in source
     assert "itemDoubleClicked.connect(self.open_associated_video_from_item)" in source

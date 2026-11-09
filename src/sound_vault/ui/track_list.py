@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from sound_vault.vault.analysis import load_peaks
+from sound_vault.vault.indexer import display_title, has_speech
 
 # ---------------------------------------------------------------- tokens (board 2)
 NIGHT = QColor("#0a0518")
@@ -60,7 +61,8 @@ RAISED = QColor("#1d1042")
 INK = QColor("#fbedff")
 MUTED = QColor("#c5b3e6")
 LABEL = QColor("#a993d6")
-WAVE_OFF = QColor("#4a3d72")
+WAVE_OFF = QColor("#4a3d72")  # decorative only (unplayed waveform bars)
+ICON_REST = QColor("#8574b8")  # controls at rest: 4.6:1 on NIGHT_2, above the 3:1 minimum
 LILAC = QColor("#b793ff")
 PINK = QColor("#ff6ad5")
 CYAN = QColor("#66ecff")
@@ -75,7 +77,7 @@ RECORD_ROLE = int(Qt.ItemDataRole.UserRole) + 40
 ROW_HEIGHT = {"comfortable": 76, "compact": 56}
 ART_SIZE = {"comfortable": 56, "compact": 40}
 NEW_WINDOW = timedelta(days=7)
-ACTIONS = ("favorite", "bin", "drag", "link", "more")
+ACTIONS = ("bin", "drag", "link", "favorite", "more")  # heart + ⋮ stay together at the edge
 ACTION_TIPS = {
     "favorite": "Add to favorites",
     "bin": "Add to a sorting bin",
@@ -121,8 +123,16 @@ def is_new(added_at: str, now: datetime | None = None) -> bool:
     return timedelta(0) <= now - added <= NEW_WINDOW
 
 
+# Tags the import pipeline adds for its own bookkeeping; never shown as user tags.
+SYSTEM_TAGS = frozenset({"favorite_sound", "packaged_sample", "ios_shortcut", "recovery", "manual"})
+
+
+def user_tags(tags) -> list[str]:
+    return [t for t in tags if t and t not in SYSTEM_TAGS and not t.startswith("web:")]
+
+
 def tag_lines(tags: tuple[str, ...] | list[str]) -> tuple[str, str]:
-    tags = [t for t in tags if t]
+    tags = user_tags(tags)
     return ", ".join(tags[:2]), ", ".join(tags[2:4])
 
 
@@ -138,7 +148,7 @@ def tile_color(music_id: str) -> QColor:
 
 
 def accessible_row_text(record) -> str:
-    parts = [record.title or record.music_id]
+    parts = [display_title(record)]
     if record.artist:
         parts.append(record.artist)
     parts.append(format_duration(record.duration_seconds))
@@ -150,7 +160,8 @@ def accessible_row_text(record) -> str:
 
 
 def resample_peaks(peaks: list[float], bars: int) -> list[float]:
-    """Max-pool ``peaks`` down (or repeat up) to ``bars`` values."""
+    """Average ``peaks`` down (or repeat up) to ``bars`` values. Averaging, not the
+    max, so a short lull still shows as a dip when several slices share one bar."""
     if bars <= 0:
         return []
     if not peaks:
@@ -160,7 +171,8 @@ def resample_peaks(peaks: list[float], bars: int) -> list[float]:
     for i in range(bars):
         a = int(i * n / bars)
         b = max(a + 1, int((i + 1) * n / bars))
-        out.append(max(peaks[a:b]))
+        chunk = peaks[a:b]
+        out.append(sum(chunk) / len(chunk))
     return out
 
 
@@ -247,8 +259,8 @@ def row_layout(rect: QRect, density: str = "comfortable") -> RowLayout:
     """Place every cell of a row inside ``rect``.
 
     Breakpoints (row width, after the 16 px inner padding), chosen so the waveform keeps
-    roughly 200 px+ before any optional column appears: tags need 1150, the full action
-    strip 1000 (else favorite + more), uses 860; the waveform drops under 600, and the
+    140 px+ before any optional column appears: tags need 1150, the full action
+    strip 1000 (else favorite + more), uses 790; the waveform drops under 600, and the
     icons and length under 460. Cells never overlap and
     always stay inside ``rect``.
     """
@@ -282,7 +294,7 @@ def row_layout(rect: QRect, density: str = "comfortable") -> RowLayout:
     right -= actions_w + gap
 
     uses = tags = length = wave = icons = None
-    if width >= 860:
+    if width >= 790:  # the list sorts by uses by default, so keep the number visible
         uses = box(right - 64, 64)
         right -= 64 + gap
     available = right - x
@@ -299,7 +311,9 @@ def row_layout(rect: QRect, density: str = "comfortable") -> RowLayout:
         icons_w = 0
     available = right - x
     if width >= 600:
-        text_w = max(170, min(420, int(available * 0.36)))
+        text_w = max(200, min(480, int(available * 0.42)))
+        # Titles get the extra room only while the waveform keeps 140 px.
+        text_w = max(200, min(text_w, available - (icons_w + gap if icons_w else 0) - gap - 140))
         text = box(x, text_w)
         x += text_w + gap
         if icons_w:
@@ -448,6 +462,11 @@ def draw_icon(painter: QPainter, name: str, rect: QRect | QRectF, color: QColor,
         path.lineTo(p(22, 6))
         path.lineTo(p(22, 18))
         path.lineTo(p(16, 14))
+    elif name == "eye":
+        path.moveTo(p(2, 12))
+        path.quadTo(p(12, 3), p(22, 12))
+        path.quadTo(p(12, 21), p(2, 12))
+        path.addEllipse(p(12, 12), 3 * s, 3 * s)
     painter.drawPath(path)
     painter.restore()
 
@@ -463,6 +482,7 @@ class TrackListHost(Protocol):
     def track_copy_link(self, music_id: str) -> None: ...
     def track_more(self, global_pos: QPoint) -> None: ...
     def track_seek(self, music_id: str, fraction: float) -> None: ...
+    def track_play_at(self, music_id: str, fraction: float) -> None: ...
 
 
 # ---------------------------------------------------------------- delegate
@@ -516,44 +536,63 @@ class TrackRowDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        # Row ground: transparent → hover → selected/playing (raised + lilac ring).
+        # One signal per state, so all three can show at once and still be told apart:
+        # selected = raised fill + lilac ring, playing = pink bar on the left edge,
+        # hover = a faint wash. Keyboard focus adds a cyan ring.
         bg = QPainterPath()
         bg.addRoundedRect(QRectF(rect), 14, 14)
-        if selected or playing:
+        widget = option.widget
+        focus_ring = focused and widget is not None and widget.hasFocus()
+        if selected:
             painter.fillPath(bg, RAISED)
-            painter.setPen(QPen(QColor(183, 147, 255, 130 if selected else 90), 1))
-            painter.drawPath(bg)
+            if not focus_ring:  # the cyan focus ring replaces it; two rings blur together
+                painter.setPen(QPen(LILAC, 1.5))
+                painter.drawPath(bg)
         elif hovered:
-            painter.fillPath(bg, NIGHT_2)
-        if focused and selected:
+            painter.fillPath(bg, HOVER)
+        if playing:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(PINK)
+            painter.drawRoundedRect(QRectF(rect.left() + 3, rect.top() + 14, 3, rect.height() - 28), 1.5, 1.5)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+        if focus_ring:
             painter.setPen(QPen(CYAN, 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(QRectF(rect).adjusted(1, 1, -1, -1), 13, 13)
 
         dim = not playable
         if dim:
-            painter.setOpacity(0.62)
+            painter.setOpacity(0.62)  # art, play and waveform only; text stays legible
         self._paint_art(painter, lay.art, record)
-        draw_icon(painter, "pause" if playing else "play", lay.play, WAVE_OFF if dim else INK, size=18)
-        self._paint_text(painter, lay.text, record)
+        draw_icon(painter, "pause" if playing else "play", lay.play, ICON_REST if dim else INK, size=18)
+        painter.setOpacity(1.0)
+        self._paint_text(painter, lay.text, record, playing=playing)
+        if dim:
+            painter.setOpacity(0.62)
         if lay.icons is not None:
             self._paint_icons(painter, lay.icons, record)
         if lay.wave is not None:
             self._paint_wave(painter, lay.wave, record, playable, self.host.track_progress(music_id) if playing else 0.0)
         if lay.length is not None:
-            self._two_lines(painter, lay.length, format_duration(record.duration_seconds), format_bpm(record.bpm), first_font=self.body_font, align=Qt.AlignmentFlag.AlignLeft, tabular=True)
+            # Blank, not "—", when there is no clear beat: most sounds have none, and a
+            # column of dashes hides the real tempos.
+            bpm = format_bpm(record.bpm) if record.bpm else ""
+            self._two_lines(painter, lay.length, format_duration(record.duration_seconds), bpm, first_font=self.body_font, align=Qt.AlignmentFlag.AlignLeft, tabular=True)
         if lay.tags is not None:
             first, second = tag_lines(record.tags)
             self._two_lines(painter, lay.tags, first or "—", second, first_font=self.body_font, align=Qt.AlignmentFlag.AlignLeft)
         if lay.uses is not None:
-            self._two_lines(painter, lay.uses, format_uses(record.usage_count), "uses" if record.usage_count is not None else "", first_font=self._bold(self.body_font, 14), align=Qt.AlignmentFlag.AlignLeft, tabular=True)
+            self._two_lines(painter, lay.uses, format_uses(record.usage_count), "uses" if record.usage_count is not None else "", first_font=self._bold(self.body_font, 14), align=Qt.AlignmentFlag.AlignRight, tabular=True)
         painter.setOpacity(1.0)
-        show_actions = hovered or selected or playing or favorite
+        # At rest a row shows only its heart and ⋮ menu; the other actions appear on
+        # hover, selection or playback. Fewer marks per row keeps 2,000 rows scannable.
+        show_actions = hovered or selected or playing
         for name, r in lay.actions.items():
             if name == "favorite":
-                color = PINK if favorite else (INK if show_actions else WAVE_OFF)
+                color = PINK if favorite else (INK if show_actions else MUTED)
                 draw_icon(painter, "favorite", r, color, filled=favorite)
-            else:
-                draw_icon(painter, name, r, INK if show_actions else WAVE_OFF)
+            elif show_actions or name == "more":
+                draw_icon(painter, name, r, INK if show_actions else MUTED)
         painter.restore()
 
     @staticmethod
@@ -585,15 +624,21 @@ class TrackRowDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
         painter.drawPath(clip)
 
-    def _paint_text(self, painter: QPainter, r: QRect, record) -> None:
-        title = record.title or record.music_id
+    def _paint_text(self, painter: QPainter, r: QRect, record, *, playing: bool = False) -> None:
+        title = display_title(record)
+        artist = (record.artist or "").strip()
+        if artist.casefold() == title.casefold():
+            artist = ""  # never print the same name twice
         new = is_new(record.added_at, self.now())
         fm = QFontMetrics(self.title_font)
         badge_w = QFontMetrics(self.badge_font).horizontalAdvance("NEW") + 8 if new else 0
-        top = QRect(r.left(), r.center().y() - 21, r.width(), 22)
+        if artist:
+            top = QRect(r.left(), r.center().y() - 21, r.width(), 22)
+        else:
+            top = QRect(r.left(), r.center().y() - 11, r.width(), 22)
         bottom = QRect(r.left(), r.center().y() + 1, r.width(), 20)
         painter.setFont(self.title_font)
-        painter.setPen(INK)
+        painter.setPen(LILAC if playing else INK)
         title_text = fm.elidedText(title, Qt.TextElideMode.ElideRight, max(0, r.width() - badge_w))
         painter.drawText(top, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), title_text)
         if new:
@@ -601,22 +646,23 @@ class TrackRowDelegate(QStyledItemDelegate):
             painter.setFont(self.badge_font)
             painter.setPen(GOLD)
             painter.drawText(QRect(x, top.top(), badge_w, top.height()), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), "NEW")
-        painter.setFont(self.body_font)
-        painter.setPen(MUTED)
-        artist = QFontMetrics(self.body_font).elidedText(record.artist or "", Qt.TextElideMode.ElideRight, r.width())
-        painter.drawText(bottom, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), artist)
+        if artist:
+            painter.setFont(self.body_font)
+            painter.setPen(MUTED)
+            artist = QFontMetrics(self.body_font).elidedText(artist, Qt.TextElideMode.ElideRight, r.width())
+            painter.drawText(bottom, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), artist)
 
     def _paint_icons(self, painter: QPainter, r: QRect, record) -> None:
         x = r.left()
-        if (record.transcript_text or "").strip():
-            draw_icon(painter, "mic", QRect(x, r.top(), 20, r.height()), MUTED, size=16)
+        if has_speech(record.transcript_text):
+            draw_icon(painter, "mic", QRect(x, r.top(), 20, r.height()), LABEL, size=14)
         x += 24
         if record.associated_video_count > 0:
-            draw_icon(painter, "video", QRect(x, r.top(), 20, r.height()), MUTED, size=16)
+            draw_icon(painter, "video", QRect(x, r.top(), 20, r.height()), LABEL, size=14)
 
     def _paint_wave(self, painter: QPainter, r: QRect, record, playable: bool, progress: float) -> None:
         if not playable:
-            pen = QPen(WAVE_OFF, 2, Qt.PenStyle.DashLine)
+            pen = QPen(ICON_REST, 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawLine(r.left(), r.center().y(), r.right(), r.center().y())
             return
@@ -640,7 +686,7 @@ class TrackRowDelegate(QStyledItemDelegate):
         if tabular:
             for f in (f1, f2):
                 f.setFeature(QFont.Tag("tnum"), 1)
-        top = QRect(r.left(), r.center().y() - 20, r.width(), 20)
+        top = QRect(r.left(), r.center().y() - 21, r.width(), 22)  # same line box as the title
         bottom = QRect(r.left(), r.center().y() + 1, r.width(), 18)
         painter.setFont(f1)
         painter.setPen(INK)
@@ -694,10 +740,8 @@ class TrackRowDelegate(QStyledItemDelegate):
         elif hit == "wave":
             lay = self.layout_for(option.rect)
             fraction = (pos.x() - lay.wave.left()) / max(1, lay.wave.width())
-            if self.host.track_is_playing(mid):
-                self.host.track_seek(mid, max(0.0, min(1.0, fraction)))
-            else:
-                self.host.track_play(mid)
+            # One click plays from the clicked spot, whether or not this row is playing.
+            self.host.track_play_at(mid, max(0.0, min(1.0, fraction)))
         return True
 
     def helpEvent(self, event, view, option, index) -> bool:  # noqa: N802 - Qt override
@@ -711,7 +755,7 @@ class TrackRowDelegate(QStyledItemDelegate):
         elif hit == "play" and record is not None:
             tip = ("Pause " if self.host.track_is_playing(record.music_id) else "Play ") + (record.title or "")
         elif hit == "wave":
-            tip = "Click to seek" if record is not None and self.host.track_is_playing(record.music_id) else "Click to play"
+            tip = "Click to play from here"
         if tip:
             QToolTip.showText(event.globalPos(), tip, view)
             return True
@@ -741,6 +785,7 @@ class TrackListView(QListView):
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.viewport().setAutoFillBackground(False)
+        self.setViewportMargins(0, 0, 8, 0)  # selected rows clear the scrollbar
         self.setAccessibleName("Sounds")
 
     def row_delegate(self) -> TrackRowDelegate:
@@ -810,7 +855,7 @@ class WaveformBar(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self.rect().adjusted(0, 4, 0, -4)
         if not self._enabled_audio:
-            painter.setPen(QPen(WAVE_OFF, 2, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(ICON_REST, 2, Qt.PenStyle.DashLine))
             painter.drawLine(r.left(), r.center().y(), r.right(), r.center().y())
             return
         bars = max(1, r.width() // 3)
@@ -821,6 +866,13 @@ class WaveformBar(QWidget):
             h = 2 if values is None else max(3, int(round(values[i] * r.height())))
             painter.setBrush(LILAC if i < played else WAVE_OFF)
             painter.drawRoundedRect(QRectF(r.left() + i * 3, r.center().y() - h / 2, 2, h), 1, 1)
+        if values is not None:
+            # Playhead: where playback is (or will start), even at 0:00. Clamped so it is
+            # never half-clipped at an edge; the dot reads as a handle.
+            x = max(r.left() + 3.0, min(r.right() - 3.0, r.left() + self._progress * r.width()))
+            painter.setBrush(PINK)
+            painter.drawRoundedRect(QRectF(x - 1, r.top(), 2, r.height()), 1, 1)
+            painter.drawEllipse(QPointF(x, r.top() + 1), 3, 3)
         if self.hasFocus():
             painter.setPen(QPen(CYAN, 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1004,6 +1056,24 @@ class ElidedLabel(QLabel):
         self.setToolTip(self._full if elided != self._full else "")
 
 
+def _rounded(pixmap: QPixmap, side: int, radius: float) -> QPixmap:
+    """``pixmap`` scaled to a ``side`` square with rounded corners (a QLabel's
+    border-radius does not clip its pixmap)."""
+    scale = 2
+    out = QPixmap(side * scale, side * scale)
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    clip = QPainterPath()
+    clip.addRoundedRect(QRectF(out.rect()), radius * scale, radius * scale)
+    painter.setClipPath(clip)
+    painter.drawPixmap(out.rect(), pixmap)
+    painter.end()
+    out.setDevicePixelRatio(scale)
+    return out
+
+
 class NowPlayingBar(QFrame):
     """Bottom bar (design board 1): art, title/artist, previous / play / next, a
     waveform scrubber with elapsed and total time, then repeat (continuous play) and
@@ -1027,14 +1097,17 @@ class NowPlayingBar(QFrame):
         self._artwork = artwork
         self._record = None
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 10)
-        layout.setSpacing(14)
+        # Explicit gaps group the bar into three zones: track, transport, timeline.
+        layout.setContentsMargins(16, 10, 8, 10)
+        layout.setSpacing(0)
         self.art = QLabel()
         self.art.setFixedSize(44, 44)
         self.art.setObjectName("nowPlayingArt")
         layout.addWidget(self.art)
+        layout.addSpacing(12)
         text = QVBoxLayout()
-        text.setSpacing(1)
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(2)
         self.title = ElidedLabel("Nothing playing")
         self.title.setObjectName("nowPlayingTrack")
         self.artist = ElidedLabel("")
@@ -1047,16 +1120,20 @@ class NowPlayingBar(QFrame):
         text_box.setObjectName("nowPlayingText")
         text_box.setLayout(text)
         text_box.setMinimumWidth(170)  # room for a real title before it elides
-        text_box.setMaximumWidth(280)
+        text_box.setMaximumWidth(220)
         layout.addWidget(text_box, 1)
+        layout.addSpacing(24)
         self.prev_button = IconButton("prev", "Previous sound")
         self.play_button = IconButton("pause", "Pause", filled_disc=True)
         self.next_button = IconButton("next", "Next sound")
         self.prev_button.clicked.connect(self.previousRequested)
         self.play_button.clicked.connect(self.toggleRequested)
         self.next_button.clicked.connect(self.nextRequested)
-        for button in (self.prev_button, self.play_button, self.next_button):
+        for index, button in enumerate((self.prev_button, self.play_button, self.next_button)):
+            if index:
+                layout.addSpacing(6)
             layout.addWidget(button)
+        layout.addSpacing(24)
         self.elapsed = QLabel("0:00")
         self.elapsed.setObjectName("nowPlayingTime")
         self.wave = WaveformBar(bar_height=32)
@@ -1064,9 +1141,16 @@ class NowPlayingBar(QFrame):
         self.wave.seekRequested.connect(self.seekRequested)
         self.total = QLabel("0:00")
         self.total.setObjectName("nowPlayingTime")
+        # Fixed widths so the waveform doesn't shift when "0:59" becomes "12:04".
+        for label, align in ((self.elapsed, Qt.AlignmentFlag.AlignRight), (self.total, Qt.AlignmentFlag.AlignLeft)):
+            label.setFixedWidth(label.fontMetrics().horizontalAdvance("00:00") + 6)
+            label.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.elapsed)
-        layout.addWidget(self.wave, 3)
+        layout.addSpacing(10)
+        layout.addWidget(self.wave, 5)
+        layout.addSpacing(10)
         layout.addWidget(self.total)
+        layout.addSpacing(20)
         self.repeat_button = IconButton("repeat", "Continuous play: keep playing down the list")
         self.repeat_button.setCheckable(True)
         self.repeat_button.toggled.connect(self.repeatToggled)
@@ -1074,6 +1158,7 @@ class NowPlayingBar(QFrame):
         self.shuffle_button = IconButton("shuffle", "Play a random sound from the list")
         self.shuffle_button.clicked.connect(self.shuffleRequested)
         layout.addWidget(self.repeat_button)
+        layout.addSpacing(4)
         layout.addWidget(self.shuffle_button)
         self._show_empty()
 
@@ -1095,7 +1180,7 @@ class NowPlayingBar(QFrame):
         painter = QPainter(pixmap)
         draw_icon(painter, "note", pixmap.rect(), MUTED, size=40)
         painter.end()
-        self.art.setPixmap(pixmap.scaled(44, 44, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.art.setPixmap(_rounded(pixmap, 44, 8))
         self.wave.set_peaks(None, playable=False)
         self.wave.set_progress(0.0)
         self.elapsed.setText("0:00")
@@ -1112,8 +1197,10 @@ class NowPlayingBar(QFrame):
             self.wave.set_progress(0.0)
             self.elapsed.setText("0:00")
         self._shown_id = record.music_id
-        self.title.setText(record.title or record.music_id)
-        self.artist.setText(record.artist or "")
+        title = display_title(record)
+        self.title.setText(title)
+        artist = record.artist or ""
+        self.artist.setText("" if artist.casefold() == title.casefold() else artist)
         pixmap = self._artwork.get(record.artwork_path, 88)
         if pixmap is None:
             pixmap = QPixmap(88, 88)
@@ -1128,7 +1215,7 @@ class NowPlayingBar(QFrame):
             painter.end()
         side = min(pixmap.width(), pixmap.height())
         square = pixmap.copy((pixmap.width() - side) // 2, (pixmap.height() - side) // 2, side, side)
-        self.art.setPixmap(square.scaled(44, 44, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.art.setPixmap(_rounded(square, 44, 8))
         self.wave.set_peaks(peaks, playable=playable)
         self.total.setText(format_duration(record.duration_seconds))
 

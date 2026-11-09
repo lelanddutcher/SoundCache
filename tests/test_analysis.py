@@ -88,14 +88,14 @@ def test_analyze_sound_folder_writes_waveform_and_metadata(tmp_path):
     assert abs(result.bpm - sound.bpm) <= 2
     waveform = json.loads((sound.folder / "waveform.json").read_text())
     assert waveform["version"] == analysis.ANALYSIS_VERSION
-    assert len(waveform["peaks"]) == analysis.PEAK_COUNT
+    assert len(waveform["peaks"]) == len(waveform["levels"]) == analysis.PEAK_COUNT
     meta = json.loads((sound.folder / "metadata.json").read_text())
     assert meta["bpm"] == result.bpm
     assert meta["paths"]["waveform"] == str(sound.folder / "waveform.json")
     assert meta["paths"]["audio"] == str(audio)  # existing fields survive
     assert meta["tiktok_visible_title"] == sound.title
     assert not needs_analysis(meta)
-    assert load_peaks(sound.folder / "waveform.json") == waveform["peaks"]
+    assert load_peaks(sound.folder / "waveform.json") == waveform["levels"]
 
 
 @needs_ffmpeg
@@ -175,3 +175,26 @@ def test_index_created_before_bpm_gains_the_columns(tmp_path):
     assert {"bpm", "waveform_path"} <= columns
     old = index.get("m1")
     assert old.bpm is None and old.waveform_path is None
+
+
+def test_levels_show_a_drop_that_peaks_hide():
+    rng = np.random.default_rng(0)
+    loud = rng.uniform(-1, 1, DECODE_RATE * 4).astype(np.float32)
+    # A quiet stretch that still has a few full-scale transients, like a mastered breakdown.
+    quiet = (rng.uniform(-1, 1, DECODE_RATE * 2) * 0.15).astype(np.float32)
+    quiet[:: DECODE_RATE // 8] = 1.0
+    samples = np.concatenate([loud, quiet, loud])
+    peaks = compute_peaks(samples, count=10)
+    levels = analysis.compute_levels(samples, count=10)
+    assert min(peaks) > 0.9  # peaks: a flat block
+    assert max(levels) == 1.0 and levels[5] < 0.2  # levels: the drop is obvious
+    assert analysis.compute_levels(np.zeros(0, dtype=np.float32), count=3) == [0.0] * 3
+
+
+def test_load_peaks_prefers_levels_and_reads_old_files(tmp_path):
+    new = tmp_path / "new.json"
+    new.write_text(json.dumps({"version": 2, "peaks": [1.0, 1.0], "levels": [0.2, 1.0]}))
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps({"version": 1, "peaks": [0.9, 1.0]}))
+    assert load_peaks(new) == [0.2, 1.0]
+    assert load_peaks(old) == [0.9, 1.0]

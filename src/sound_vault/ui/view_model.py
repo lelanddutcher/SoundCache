@@ -1214,18 +1214,30 @@ class LibraryViewModel:
         self._reindex_one(Path(folder))
         return status == "ok"
 
-    def analysis_targets(self) -> list[tuple[str, Path, Path]]:
-        """Sounds with local audio but no waveform yet (imported before 0.5, or a failed
-        analysis): ``(music_id, folder, audio_path)``. Drives the background backfill."""
+    def analysis_targets(self, priority: "list[str] | None" = None) -> list[tuple[str, Path, Path]]:
+        """Sounds with local audio that may need a waveform: ``(music_id, folder, audio_path)``.
+        Drives the background backfill.
+
+        Order: sounds with no waveform at all first, then sounds analysed by an older
+        version (read from the indexed metadata, no file I/O). Within each group, ids in
+        ``priority`` (the rows on screen, in display order) come first."""
+        from sound_vault.vault.analysis import needs_analysis
+
         with self._lock:
             records = list(self._records_by_id.values())
-        targets: list[tuple[str, Path, Path]] = []
+        rank = {mid: i for i, mid in enumerate(priority or ())}
+        missing: list[tuple[str, Path, Path]] = []
+        stale: list[tuple[str, Path, Path]] = []
         for record in records:
-            if record.waveform_path is not None:
+            if record.folder_path is None or record.local_audio_path is None:
                 continue
-            if record.folder_path is not None and record.local_audio_path is not None:
-                targets.append((record.music_id, Path(record.folder_path), Path(record.local_audio_path)))
-        return targets
+            target = (record.music_id, Path(record.folder_path), Path(record.local_audio_path))
+            if record.waveform_path is None:
+                missing.append(target)
+            elif needs_analysis(record.raw if isinstance(record.raw, dict) else {}):
+                stale.append(target)
+        order = lambda t: rank.get(t[0], len(rank))  # noqa: E731 - local sort key
+        return sorted(missing, key=order) + sorted(stale, key=order)
 
     def analyze_one(self, music_id: str, folder: "Path | str", audio: "Path | str") -> bool:
         """Compute waveform + BPM for one sound and refresh its index row. Best-effort;

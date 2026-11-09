@@ -71,7 +71,7 @@ def test_tile_color_is_stable_per_sound():
 
 
 def test_resample_peaks():
-    assert resample_peaks([0.1, 0.9, 0.2, 0.4], 2) == [0.9, 0.4]
+    assert resample_peaks([0.1, 0.9, 0.2, 0.4], 2) == pytest.approx([0.5, 0.3])
     assert len(resample_peaks([0.5] * 400, 97)) == 97
     assert resample_peaks([], 3) == [0.0, 0.0, 0.0]
 
@@ -100,13 +100,15 @@ def test_columns_drop_out_in_the_documented_order():
     assert full.tags and full.uses and full.wave and full.icons and len(full.actions) == 5
     no_tags = row_layout(QRect(0, 0, 960, 76))
     assert no_tags.tags is None and no_tags.uses is not None
-    no_uses = row_layout(QRect(0, 0, 820, 76))
+    keeps_uses = row_layout(QRect(0, 0, 830, 76))
+    assert keeps_uses.uses is not None  # default sort is by uses, so it stays longest
+    no_uses = row_layout(QRect(0, 0, 760, 76))
     assert no_uses.uses is None and no_uses.wave is not None
     slim_actions = row_layout(QRect(0, 0, 960, 76))
     assert set(slim_actions.actions) == {"favorite", "more"}
     # The waveform keeps real width before optional columns appear.
-    for width in (900, 1000, 1060, 1200, 1400):
-        assert row_layout(QRect(0, 0, width, 76)).wave.width() >= 220, width
+    for width in (760, 830, 900, 1000, 1060, 1200, 1400):
+        assert row_layout(QRect(0, 0, width, 76)).wave.width() >= 120, width
     no_wave = row_layout(QRect(0, 0, 560, 76))
     assert no_wave.wave is None and no_wave.length is not None
     phone = row_layout(QRect(0, 0, 360, 76))
@@ -365,13 +367,37 @@ def test_header_has_no_jukebox_chrome_and_bar_spans_views(window):
         assert window.now_playing_bar.isVisible(), view
 
 
-def test_status_cards_collapse_on_short_windows(window):
-    window.resize(1440, 700)
+def test_status_cards_live_on_worker_status_not_the_library(window):
+    window.show_view("library")
     QApplication.processEvents()
     assert not window.stats_cards.isVisible()
-    window.resize(1440, 900)
+    window.show_view("worker")
     QApplication.processEvents()
     assert window.stats_cards.isVisible()
+
+
+def test_filters_fold_away_and_a_narrowed_library_says_so(window):
+    window.show_view("library")
+    QApplication.processEvents()
+    assert not window.filter_chips.isVisible() and not window.narrowed_bar.isVisible()
+    window.filters_button.setChecked(True)
+    QApplication.processEvents()
+    assert window.filter_chips.isVisible()
+
+    window.vocals_only.setChecked(True)
+    window.search_box.setText("hook")
+    window.refresh_table()
+    QApplication.processEvents()
+    assert window.filters_button.text() == "Filters · 1"
+    assert window.narrowed_bar.isVisible()
+    assert "displayed /" in window.result_count_label.text()
+
+    window.clear_library_search_and_filters()
+    QApplication.processEvents()
+    assert window.search_box.text() == "" and not window.vocals_only.isChecked()
+    assert window.filters_button.text() == "Filters"
+    assert not window.narrowed_bar.isVisible()
+    assert len(window.current_rows) == 24
 
 
 def test_sidebar_counts_match_what_each_row_shows(window):
@@ -449,3 +475,42 @@ def test_now_playing_bar_goes_compact_on_narrow_widths():
     QApplication.processEvents()
     assert bar.wave.isVisible() and bar.total.isVisible()
     bar.deleteLater()
+
+
+def test_one_click_on_a_stopped_rows_waveform_plays_from_that_spot(window, monkeypatch):
+    starts = []
+    monkeypatch.setattr(window, "play_selected_sound", lambda start_fraction=None: starts.append(start_fraction))
+    view = window.track_list
+    index = next(
+        view.model().index(r, 2) for r in range(view.model().rowCount())
+        if window.track_delegate.layout_for(view.visualRect(view.model().index(r, 2))).wave is not None
+    )
+    record = index.data(RECORD_ROLE)
+    wave = window.track_delegate.layout_for(view.visualRect(index)).wave
+    _click(view, index, at=QPoint(wave.left() + wave.width() * 3 // 4, wave.center().y()))
+    assert len(starts) == 1 and abs(starts[0] - 0.75) < 0.02
+    assert window.current_preview_record.music_id == record.music_id
+
+
+def test_play_from_a_spot_seeks_once_the_media_length_is_known(window):
+    class Player:
+        seeked_to = None
+
+        def setPosition(self, ms):  # noqa: N802 - Qt name
+            self.seeked_to = ms
+
+        def position(self):
+            return 0
+
+    window.audio_player = Player()
+    window._pending_start_fraction = 0.5
+    # Qt reports the length only after the file loads; the pending start applies then.
+    window._player_duration_changed(60_000)
+    assert window.audio_player.seeked_to == 30_000
+    assert window._pending_start_fraction is None
+
+
+def test_resample_averages_so_a_short_lull_still_dips():
+    loud_with_lull = [1.0, 1.0, 0.1, 1.0, 1.0, 1.0, 1.0, 1.0]
+    bars = resample_peaks(loud_with_lull, 4)
+    assert bars[1] < 0.6 and bars[0] == 1.0

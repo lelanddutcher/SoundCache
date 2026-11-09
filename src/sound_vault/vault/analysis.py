@@ -3,7 +3,11 @@
 Both come from one ffmpeg decode to mono PCM. Results live next to the audio, the
 same file-native way as everything else in the vault:
 
-* ``waveform.json`` beside the audio: ``{"version", "peaks": [0..1 × N], "duration"}``.
+* ``waveform.json`` beside the audio: ``{"version", "peaks", "levels", "duration"}``.
+  ``peaks`` is the loudest sample per slice (kept for older readers); ``levels`` is
+  the loudness per slice, which is what the UI draws. Peaks look like a solid block
+  on mastered music because almost every slice touches full scale; levels show
+  where a track drops or goes quiet.
 * ``metadata.json`` gains ``bpm`` and ``bpm_confidence`` (``bpm`` is null when the
   estimate is not trustworthy, e.g. a 3-second SFX or free-time speech), plus
   ``paths.waveform`` and an ``analysis`` stamp.
@@ -22,7 +26,8 @@ import numpy as np
 
 from sound_vault.vault.metadata_io import atomic_write_json, read_json_lenient
 
-ANALYSIS_VERSION = 1
+# 2 added "levels". Sounds analysed at version 1 are re-analysed in the background.
+ANALYSIS_VERSION = 2
 PEAK_COUNT = 400
 DECODE_RATE = 11_025
 WAVEFORM_FILENAME = "waveform.json"
@@ -38,6 +43,7 @@ class AnalysisError(RuntimeError):
 @dataclass(frozen=True)
 class AudioAnalysis:
     peaks: list[float]
+    levels: list[float]
     duration: float
     bpm: float | None
     bpm_confidence: float
@@ -72,6 +78,26 @@ def compute_peaks(samples: np.ndarray, count: int = PEAK_COUNT) -> list[float]:
     if top > 0:
         peaks /= top
     return [round(float(p), 3) for p in peaks]
+
+
+# Levels are RMS raised to this power: a small contrast stretch so a lull reads as
+# clearly lower than the hook without hiding quiet speech.
+LEVEL_CONTRAST = 1.5
+
+
+def compute_levels(samples: np.ndarray, count: int = PEAK_COUNT) -> list[float]:
+    """Loudness (RMS) per bucket, scaled so the loudest bucket is 1.0, then contrast-stretched."""
+    if samples.size == 0:
+        return [0.0] * count
+    edges = np.linspace(0, samples.size, count + 1).astype(int)
+    squares = np.square(samples.astype(np.float64))
+    sums = np.add.reduceat(squares, np.minimum(edges[:-1], samples.size - 1))
+    widths = np.diff(edges)
+    rms = np.where(widths > 0, np.sqrt(sums / np.maximum(widths, 1)), 0.0)
+    top = rms.max()
+    if top > 0:
+        rms = (rms / top) ** LEVEL_CONTRAST
+    return [round(float(v), 3) for v in rms]
 
 
 def estimate_bpm(samples: np.ndarray, sample_rate: int = DECODE_RATE) -> tuple[float | None, float]:
@@ -147,6 +173,7 @@ def analyze_audio(audio_path: Path) -> AudioAnalysis:
     bpm, confidence = estimate_bpm(samples)
     return AudioAnalysis(
         peaks=compute_peaks(samples),
+        levels=compute_levels(samples),
         duration=round(samples.size / DECODE_RATE, 3),
         bpm=bpm,
         bpm_confidence=confidence,
@@ -174,7 +201,7 @@ def analyze_sound_folder(folder: Path, audio_path: Path, *, force: bool = False)
     waveform_path = folder / WAVEFORM_FILENAME
     atomic_write_json(
         waveform_path,
-        {"version": ANALYSIS_VERSION, "peaks": result.peaks, "duration": result.duration},
+        {"version": ANALYSIS_VERSION, "peaks": result.peaks, "levels": result.levels, "duration": result.duration},
     )
     paths = dict(metadata.get("paths") if isinstance(metadata.get("paths"), dict) else {})
     paths["waveform"] = str(waveform_path)
@@ -192,14 +219,17 @@ def analyze_sound_folder(folder: Path, audio_path: Path, *, force: bool = False)
 
 
 def load_peaks(path: Path | None) -> list[float] | None:
-    """Read peaks from a waveform.json; None if missing or unreadable."""
+    """Read the values to draw from a waveform.json: ``levels`` when present, else the
+    older ``peaks``. None if missing or unreadable."""
     if path is None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    peaks = payload.get("peaks") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    peaks = payload.get("levels") if isinstance(payload.get("levels"), list) else payload.get("peaks")
     if not isinstance(peaks, list):
         return None
     try:

@@ -138,7 +138,8 @@ def test_desktop_gui_qa_harness_exercises_core_editor_workflows(tmp_path, monkey
     monkeypatch.setattr(desktop_module.QDesktopServices, "openUrl", lambda url: opened_urls.append(url.toString()))
     window.open_selected_tiktok_sound()
     assert opened_urls == ["https://www.tiktok.com/music/Hot-Hook-hot"]
-    assert window.artwork_label.size().width() == 210
+    art = window.artwork_label.size()
+    assert art.width() == art.height() and 160 <= art.width() <= 320  # square, tracks the pane width
     # Portal count-tabs were replaced by the ArchiveHealthPanel (coverage %).
     # 1 sound, 1 with a transcript -> 100% transcript coverage.
     window.refresh_portal_tabs()

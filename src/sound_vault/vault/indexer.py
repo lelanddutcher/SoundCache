@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
+import re
 from sound_vault.vault.metadata_io import read_json_lenient
 import os
 from pathlib import Path
@@ -117,6 +118,18 @@ class SoundRecord:
 TRANSCRIPT_STATES = ("available", "empty", "no_audio", "pending")
 
 
+# Words speech recognition invents on music with no singing or talking ("Music Music
+# Music", "you", "Thank you."). A transcript made only of these is not speech.
+_PHANTOM_TRANSCRIPT_WORDS = frozenset({"music", "you", "thank", "thanks", "bye", "applause", "silence"})
+_WORD = re.compile(r"[a-z']+")
+
+
+def has_speech(text: str | None) -> bool:
+    """True when ``text`` holds real words, not just recognition filler on an instrumental."""
+    words = _WORD.findall((text or "").lower())
+    return bool(words) and not set(words) <= _PHANTOM_TRANSCRIPT_WORDS
+
+
 def transcript_state(record: "SoundRecord") -> str:
     """Classify a sound's transcript into one of :data:`TRANSCRIPT_STATES`.
 
@@ -132,14 +145,57 @@ def transcript_state(record: "SoundRecord") -> str:
     The SQL surfaces in :mod:`sound_vault.db.index_db` mirror this logic, minus
     the file-existence check (a coarse, stat-free approximation).
     """
-    if (record.transcript_text or "").strip():
+    if has_speech(record.transcript_text):
         return "available"
+    if (record.transcript_text or "").strip():
+        return "empty"  # transcription ran; it only heard filler like "Music Music"
     path = record.transcript_path
     if path is not None and path.exists():
         return "empty"
     if record.local_audio_path is None:
         return "no_audio"
     return "pending"
+
+
+# TikTok localizes "original sound" to the viewer's language.
+_ORIGINAL_SOUND_NAMES = frozenset({
+    "original sound", "originalton", "originalljud", "son original", "sonido original",
+    "som original", "suono originale", "originalsound", "oryginalny dźwięk", "orijinal ses",
+    "originele audio", "originallyd", "alkuperäinen ääni", "оригинальный звук", "suara asli",
+    "âm thanh gốc", "เสียงต้นฉบับ", "オリジナル楽曲", "原声", "오리지널 사운드",
+})
+_PAGE_TITLE_COUNT = re.compile(r"^\(\d+\)\s*")
+_PAGE_TITLE_SITE = re.compile(r"\s*\|\s*TikTok\s*$", re.IGNORECASE)
+
+
+def _fold(text: str) -> str:
+    import unicodedata
+
+    return unicodedata.normalize("NFKC", text or "").casefold().strip()
+
+
+def display_title(record: "SoundRecord") -> str:
+    """The name to show for a sound.
+
+    Most TikTok sounds have a visible title like "♬ - Keith Whitley", which cleans to
+    the creator's name, so the list would read "Keith Whitley / Keith Whitley". The music
+    page's title, "(13)Keith Whitley - Miami, My Amy | TikTok", holds the song name;
+    this returns "Miami, My Amy" in that case, and the visible title otherwise.
+    """
+    title = (record.title or "").strip()
+    artist = (record.artist or "").strip()
+    if title and _fold(title) != _fold(artist):
+        return title
+    page = _PAGE_TITLE_SITE.sub("", _PAGE_TITLE_COUNT.sub("", record.music_page_title or "")).strip()
+    if artist and _fold(page).startswith(_fold(artist) + " - "):
+        page = page[len(artist) + 3:].strip()
+    elif " - " in page and not artist:
+        page = page.split(" - ", 1)[1].strip()
+    if _fold(page) in _ORIGINAL_SOUND_NAMES:
+        return "original sound"
+    if page and _fold(page) != _fold(artist):
+        return page
+    return title or record.music_id
 
 
 def _normalize_tags(value: Any) -> tuple[str, ...]:
@@ -756,7 +812,9 @@ def _record_from_data(
         folder = _folder_from_data(vault_root, music_id, data, folder_hint, folder_lookup, validate=read_full) or folder
     audio = _audio_from_data(folder, data, scan_folder=read_summary, validate=read_full)
     videos = _associated_videos(folder, data, load_sidecars=read_full)
-    manifest_context = _video_manifest_context(folder, data, load_sidecars=read_full)
+    # Summary reads include the small manifest: its music_page_title carries the song
+    # name, which the list shows when the visible title is only the creator's name.
+    manifest_context = _video_manifest_context(folder, data, load_sidecars=read_summary)
     transcript_context = _transcript_context(folder, data, load_sidecars=read_summary)
     hashtags = _record_hashtags(data, videos)
     artwork = _artwork_from_data(folder, data, scan_folder=read_summary, validate=read_full)
