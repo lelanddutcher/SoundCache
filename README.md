@@ -106,3 +106,5 @@ Tests: `pytest -q` (set `SOUND_VAULT_DISABLE_RELAY_POLL=1 SOUND_VAULT_DISABLE_TR
 <div align="center">
 now go forth and hoard ✦ &nbsp;·&nbsp; <a href="https://soundcache.io">soundcache.io</a>
 </div>
+
+[![As seen on Open Source Alternatives](https://www.opensourcealternatives.to/badge-osa.svg)](https://www.opensourcealternatives.to)
