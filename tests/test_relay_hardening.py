@@ -148,8 +148,9 @@ def test_cors_regex_allows_www_and_apex_but_not_lookalikes():
     import re
 
     rx = relay_server._CORS_ORIGIN_REGEX
-    for allowed in ("https://soundcache.io", "https://www.soundcache.io",
-                    "https://soundcache-web.vercel.app", "http://localhost:8000"):
+    for allowed in ("https://soundcache.io", "https://www.soundcache.io", "http://localhost:8000"):
         assert re.match(rx, allowed), allowed
-    for blocked in ("https://evil.com", "https://soundcache.io.evil.com", "https://notsoundcache.io"):
+    # *.vercel.app was allowed while the site ran there; the site and relay left Vercel,
+    # and any Vercel user can claim a *.vercel.app host, so it is no longer trusted.
+    for blocked in ("https://evil.com", "https://soundcache-web.vercel.app", "https://soundcache.io.evil.com", "https://notsoundcache.io"):
         assert re.match(rx, blocked) is None, blocked

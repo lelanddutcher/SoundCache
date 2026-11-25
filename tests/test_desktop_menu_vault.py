@@ -69,3 +69,19 @@ def test_onboarding_dialog_records_chosen_vault(app, tmp_path):
     dialog.vault_edit.setText(str(chosen_target))
     dialog._go_next()  # records the choice, advances to tiktok page
     assert dialog.chosen_vault() == chosen_target
+
+
+def test_vault_info_opens_and_names_the_inbox_queue(app, tmp_path, monkeypatch):
+    """Vault → Vault Info… used to raise NameError: inbox_path_for_vault was never imported."""
+    from sound_vault.ui import desktop as desktop_module
+
+    shown: dict[str, str] = {}
+    monkeypatch.setattr(
+        desktop_module.QMessageBox,
+        "information",
+        lambda _parent, title, text, *a, **k: shown.update(title=title, text=text),
+    )
+    window = SoundVaultWindow(vault_root=tmp_path / "vault")
+    window.show_vault_info()
+    assert shown["title"] == "Vault info"
+    assert "Inbox queue:" in shown["text"]

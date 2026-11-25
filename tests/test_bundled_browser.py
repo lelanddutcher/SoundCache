@@ -93,3 +93,56 @@ def test_login_window_never_touches_coreaudio():
     text = (Path(__file__).resolve().parent.parent / "scripts" / "tiktok_login.cjs").read_text()
     for flag in ("--disable-speech-api", "--disable-speech-synthesis-api", "--mute-audio"):
         assert flag in text, f"{flag} missing — login window can wedge on CoreAudio"
+
+
+def test_every_capture_launch_asks_for_the_chromium_sandbox():
+    """Playwright launches Chromium with --no-sandbox unless told otherwise. The capture
+    scripts browse the open web, so every launch must go through launch_chromium.cjs,
+    which turns the sandbox on (macOS), and the helper must ship in the app."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    helper = (root / "scripts" / "launch_chromium.cjs").read_text()
+    assert "chromiumSandbox: true" in helper
+    for name in ("capture_tiktok_audio.cjs", "capture_usage_count.cjs", "tiktok_login.cjs"):
+        text = (root / "scripts" / name).read_text()
+        assert "chromium.launch(" not in text, f"{name} launches Chromium without the sandbox helper"
+        assert "launchChromium(chromium," in text
+        assert 'require("playwright")' in text, f"{name} must resolve the bundled playwright"
+    spec = (root / "packaging" / "SoundCache.spec").read_text()
+    assert '"launch_chromium.cjs"' in spec
+
+
+def test_launch_helper_requests_the_sandbox_and_falls_back(tmp_path):
+    """Run launch_chromium.cjs under node with a fake chromium, as if on macOS."""
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    helper = Path(__file__).resolve().parent.parent / "scripts" / "launch_chromium.cjs"
+    probe = tmp_path / "probe.cjs"
+    probe.write_text(
+        "Object.defineProperty(process, 'platform', { value: 'darwin' });\n"
+        f"const {{ launchChromium }} = require({json.dumps(str(helper))});\n"
+        "(async () => {\n"
+        "  const calls = [];\n"
+        "  const ok = { launch: async (o) => { calls.push(o); return 'browser'; } };\n"
+        "  await launchChromium(ok, { headless: true });\n"
+        "  let first = true;\n"
+        "  const flaky = { launch: async (o) => { calls.push(o); if (first) { first = false; throw new Error('no sandbox here'); } return 'browser'; } };\n"
+        "  await launchChromium(flaky, { headless: true });\n"
+        "  console.log(JSON.stringify(calls));\n"
+        "})();\n"
+    )
+    out = subprocess.run([node, str(probe)], capture_output=True, text=True, timeout=30, check=True)
+    calls = json.loads(out.stdout.strip().splitlines()[-1])
+    assert calls[0] == {"headless": True, "chromiumSandbox": True}
+    assert calls[1] == {"headless": True, "chromiumSandbox": True}
+    assert calls[2] == {"headless": True}  # fallback after a failed sandboxed launch
+    assert "retrying without the sandbox" in out.stderr

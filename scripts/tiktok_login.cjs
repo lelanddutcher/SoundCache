@@ -16,6 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const { launchChromium } = require("./launch_chromium.cjs");
 
 const OUT = process.argv[2];
 const LOGIN_URL = "https://www.tiktok.com/login";
@@ -34,7 +35,7 @@ const hasSession = (cookies) =>
   }
   fs.mkdirSync(path.dirname(OUT), { recursive: true, mode: 0o700 });
 
-  const browser = await chromium.launch({
+  const browser = await launchChromium(chromium, {
     headless: false,
     args: [
       "--disable-blink-features=AutomationControlled",

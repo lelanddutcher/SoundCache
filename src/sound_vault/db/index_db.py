@@ -111,7 +111,7 @@ _COLUMNS = (
     "vault_version", "canonical_url", "source_music_url", "music_page_title",
     "video_manifest_captured_at", "transcript_text", "transcript_language",
     "transcript_path", "duration_seconds", "user_notes", "search_text",
-    "raw_json", "evidence_paths", "associated_videos",
+    "raw_json", "evidence_paths", "associated_videos", "bpm", "waveform_path",
 )
 
 # Columns selected for read (everything except search_text), in _row_to_record order.
@@ -121,7 +121,7 @@ _READ_COLUMNS = (
     "usage_count", "source_provider", "source_confidence", "vault_version",
     "canonical_url", "source_music_url", "music_page_title", "video_manifest_captured_at",
     "transcript_text", "transcript_language", "transcript_path", "duration_seconds",
-    "user_notes", "raw_json", "evidence_paths", "associated_videos",
+    "user_notes", "raw_json", "evidence_paths", "associated_videos", "bpm", "waveform_path",
 )
 
 
@@ -156,6 +156,8 @@ def _record_values(record: SoundRecord) -> tuple:
         _dump_raw(record.raw),
         _dump_paths(record.evidence_images),
         _dump_videos(record.associated_videos),
+        record.bpm,
+        str(record.waveform_path) if record.waveform_path else "",
     )
 
 
@@ -253,8 +255,38 @@ class IndexDatabase:
     def _select_columns(self, prefix: str = "sounds.") -> str:
         return ", ".join(f"{prefix}{column}" for column in _READ_COLUMNS)
 
-    def search(
+    def search(self, query: str, **filters) -> list[SoundRecord]:
+        """Full records matching ``query`` + filters, newest first."""
+        sql, params = self._search_sql(self._select_columns(), query, **filters)
+        with self._connect() as db:
+            rows = db.execute(sql, params).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def search_ids(self, query: str, **filters) -> list[str]:
+        """Just the music IDs ``search`` would return, in the same order.
+
+        Decoding a full row (three JSON blobs + paths) costs ~80 µs; for a 20k-row
+        library that is most of a refresh. Callers with an in-memory record cache (the
+        view model) use this and only decode the IDs they don't have."""
+        sql, params = self._search_sql("sounds.music_id", query, **filters)
+        with self._connect() as db:
+            return [str(row[0]) for row in db.execute(sql, params).fetchall()]
+
+    def get_many(self, music_ids: list[str]) -> list[SoundRecord]:
+        """Full records for ``music_ids`` (any order; missing IDs are skipped)."""
+        out: list[SoundRecord] = []
+        ids = list(dict.fromkeys(str(m) for m in music_ids))
+        with self._connect() as db:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                marks = ", ".join("?" for _ in chunk)
+                sql = f"SELECT {self._select_columns()} FROM sounds WHERE music_id IN ({marks})"
+                out.extend(self._row_to_record(row) for row in db.execute(sql, chunk).fetchall())
+        return out
+
+    def _search_sql(
         self,
+        columns: str,
         query: str,
         *,
         limit: int | None = None,
@@ -262,14 +294,14 @@ class IndexDatabase:
         media_filter: str = "all",
         status_filter: str = "all",
         usage_filter: str = "all",
-    ) -> list[SoundRecord]:
+    ) -> tuple[str, tuple]:
         normalized = query.strip().lower()
         if limit is not None:
             limit = max(1, min(int(limit), 10000))
         else:
             limit = 50000
         fts_query = self._fts_query(normalized)
-        sql = f"SELECT {self._select_columns()} FROM sounds"
+        sql = f"SELECT {columns} FROM sounds"
         clauses: list[str] = []
         params_list: list[object] = []
         if fts_query:
@@ -333,10 +365,7 @@ class IndexDatabase:
                      sounds.title COLLATE NOCASE
             LIMIT ?
         """
-        params = (*params_list, limit)
-        with self._connect() as db:
-            rows = db.execute(sql, params).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        return sql, (*params_list, limit)
 
     @staticmethod
     def _fts_query(query: str) -> str:
@@ -401,6 +430,8 @@ class IndexDatabase:
             raw=_load_raw(row[24] if len(row) > 24 else None),
             evidence_images=_load_paths(row[25] if len(row) > 25 else None),
             associated_videos=_load_videos(row[26] if len(row) > 26 else None),
+            bpm=float(row[27]) if len(row) > 27 and row[27] is not None else None,
+            waveform_path=Path(str(row[28])) if len(row) > 28 and row[28] else None,
         )
 
     def stats(self) -> IndexStats:
@@ -490,6 +521,8 @@ class IndexDatabase:
                 "raw_json": "ALTER TABLE sounds ADD COLUMN raw_json TEXT NOT NULL DEFAULT ''",
                 "evidence_paths": "ALTER TABLE sounds ADD COLUMN evidence_paths TEXT NOT NULL DEFAULT ''",
                 "associated_videos": "ALTER TABLE sounds ADD COLUMN associated_videos TEXT NOT NULL DEFAULT ''",
+                "bpm": "ALTER TABLE sounds ADD COLUMN bpm REAL",
+                "waveform_path": "ALTER TABLE sounds ADD COLUMN waveform_path TEXT NOT NULL DEFAULT ''",
             }
             for column, statement in migrations.items():
                 if column not in columns:
@@ -565,7 +598,9 @@ class IndexDatabase:
                     search_text TEXT NOT NULL,
                     raw_json TEXT NOT NULL DEFAULT '',
                     evidence_paths TEXT NOT NULL DEFAULT '',
-                    associated_videos TEXT NOT NULL DEFAULT ''
+                    associated_videos TEXT NOT NULL DEFAULT '',
+                    bpm REAL,
+                    waveform_path TEXT NOT NULL DEFAULT ''
                 )
                 """
         )

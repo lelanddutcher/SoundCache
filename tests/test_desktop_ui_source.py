@@ -145,7 +145,7 @@ def test_desktop_has_real_views_and_rich_archive_detail_panel():
 def test_desktop_inspector_shows_full_transcript_without_metadata_truncation():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
-    assert 'transcript_group = QGroupBox("Transcript")' in source
+    assert 'transcript_group = QGroupBox("TRANSCRIPT")' in source
     assert "self.transcript_text = QTextEdit()" in source
     assert "self.transcript_text.setReadOnly(True)" in source
     assert "self.transcript_text.setPlainText(self._full_transcript_text(record))" in source
@@ -389,7 +389,8 @@ def test_desktop_preserves_selection_scroll_and_sort_when_refreshing_library():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
     assert "selected_music_id = self._selected_music_id()" in source
-    assert "scroll_value = self.table.verticalScrollBar().value()" in source
+    # Scroll position of whichever library view is showing (track list or table).
+    assert "scroll_value = self._library_view().verticalScrollBar().value()" in source
     assert "sort_column = self.library_sort_column" in source
     assert "sort_order = self.library_sort_order" in source
     assert "self._restore_library_selection(selected_music_id, scroll_value)" in source
@@ -462,10 +463,10 @@ def test_desktop_retro_chrome_uses_itunes_limewire_early_web_motifs():
     assert "dangerButton" in source
     assert "rowPlayButton" in source
     assert "3px inset" in source
-    assert "self._build_jukebox_chrome" in source
-    assert "chromeHeader" in source
-    assert "transportDeck" in source
-    assert "capsuleDisplay" in source
+    # The jukebox header is gone; the bottom now-playing bar is the one transport.
+    assert "self._build_jukebox_chrome" not in source
+    assert "self._build_now_playing_bar()" in source
+    assert "self._build_index_status()" in source
     assert "sourceGroup" in source
     assert "limeStatusDot" in source
     assert "libraryTabs" in source
@@ -481,7 +482,7 @@ def test_desktop_retro_chrome_uses_itunes_limewire_early_web_motifs():
 def test_desktop_chrome_controls_are_wired_to_real_behavior():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
-    assert "transport_actions" in source
+    assert "self.now_playing_bar.previousRequested.connect(self.select_previous_sound)" in source
     assert "self.select_previous_sound" in source
     assert "self.play_selected_sound" in source
     assert "self.pause_playback" in source
@@ -516,14 +517,14 @@ def test_desktop_inspector_scrolls_and_restores_saved_selection():
     assert "self._pending_selected_music_id" in source
     assert "state.get(\"selected_music_id\")" in source
     assert "selected_music_id = self._selected_music_id() or self._pending_selected_music_id" in source
-    assert "self.now_playing_title.setText" in source
+    assert "self._cue_now_playing(record)" in source
 
 
 def test_desktop_inspector_opens_associated_video_assets_and_normalizes_artwork():
     source = DESKTOP_SOURCE.read_text(encoding="utf-8")
 
     assert "self.artwork_label.setFixedSize(210, 210)" in source
-    assert "pixmap.scaled(" in source
+    assert "KeepAspectRatioByExpanding" in source  # artwork fills the square (centre crop)
     assert "self.open_video = QPushButton(\"Open video\")" in source
     assert "self.open_video_url = QPushButton(\"Open URL\")" in source
     assert "itemDoubleClicked.connect(self.open_associated_video_from_item)" in source

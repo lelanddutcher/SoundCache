@@ -107,3 +107,53 @@ def test_settings_ignores_corrupt_table_header_layout(tmp_path):
     path.write_text('{"table_layouts": {"library": "not-base64!!"}}\n', encoding="utf-8")
 
     assert AppSettings(path).table_layout("library") is None
+
+
+@pytest.mark.parametrize(
+    "legacy",
+    ["https://sound-vault-relay.vercel.app", "https://sound-vault-relay-git-main-x.vercel.app/", "https://vercel.app"],
+)
+def test_saved_legacy_vercel_relay_moves_to_current_relay(tmp_path, legacy):
+    # A pairing made before the relay left Vercel saved that host; the Vercel project is
+    # gone and its pairings did not carry over, so the URL moves to the current relay
+    # and the dead credentials are dropped (the app then asks for a new pairing).
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"relay_base_url": "%s", "relay_pair_code": "OLD-1", "relay_device_id": "d",'
+        ' "relay_device_secret": "s", "vault_root": "/v"}' % legacy,
+        encoding="utf-8",
+    )
+
+    settings = AppSettings(path)
+
+    assert settings.relay_base_url() == "https://api.soundcache.io"
+    assert settings.relay_pair_code() == ""
+    assert settings.relay_device_id() == ""
+    assert settings.relay_device_secret() == ""
+    assert str(settings.vault_root()) == "/v"
+    # Persisted, so the next launch (and the Pair iPhone QR) reads the new host.
+    assert '"https://api.soundcache.io"' in path.read_text(encoding="utf-8")
+    assert "OLD-1" not in path.read_text(encoding="utf-8")
+
+
+def test_current_and_self_hosted_relays_are_left_alone(tmp_path):
+    for url in ("https://api.soundcache.io", "https://relay.example.com", "http://192.168.1.5:43117"):
+        path = tmp_path / "settings.json"
+        AppSettings(path).set_relay_config(base_url=url, pair_code="KEEP-1", device_id="d", device_secret="s")
+        loaded = AppSettings(path)
+        assert loaded.relay_base_url() == url
+        assert loaded.relay_pair_code() == "KEEP-1"
+
+
+def test_typing_a_legacy_relay_saves_the_current_one(tmp_path):
+    settings = AppSettings(tmp_path / "settings.json")
+    settings.set_relay_config(base_url=" https://sound-vault-relay.vercel.app/ ", pair_code="NEW-1")
+    assert settings.relay_base_url() == "https://api.soundcache.io"
+
+
+def test_lookalike_hosts_are_not_treated_as_legacy():
+    from sound_vault.settings import is_legacy_relay_url
+
+    assert not is_legacy_relay_url("https://vercel.app.evil.example")
+    assert not is_legacy_relay_url("https://notvercel.app")
+    assert not is_legacy_relay_url("")

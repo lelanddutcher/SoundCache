@@ -1,0 +1,21 @@
+{
+  "_comment": "Portable binaries bundled into Sound Cache.app (Contents/.../bin). Fetched and sha256-verified by packaging/fetch_vendor.sh; the build refuses anything that doesn't match. Keep these on patched releases: Node had 10 CVEs fixed on 2026-10-20/21 (incl. an exploited Brotli RCE, CVE-2026-111497), and the old ffmpeg-static build was FFmpeg 6.1.1 from 2023.",
+  "pinned": "2026-11-04",
+  "node": {
+    "version": "24.22.2",
+    "url": "https://nodejs.org/dist/v24.22.2/node-v24.22.2-darwin-arm64.tar.gz",
+    "sha256": "aa9549349e47dffaa42dcf95d6e06ade8c4bdafc980979883b88767670df385a",
+    "member": "node-v24.22.2-darwin-arm64/bin/node",
+    "minimum_patched": {"24": "24.22.1", "22": "22.23.4", "26": "26.12.1"}
+  },
+  "ffmpeg": {
+    "version": "9.0.2",
+    "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip",
+    "sha256": "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924"
+  },
+  "ffprobe": {
+    "version": "9.0.2",
+    "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffprobe.zip",
+    "sha256": "fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6"
+  }
+}

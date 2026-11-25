@@ -390,3 +390,54 @@ def test_title_artist_ignores_placeholder_slug_uses_real_title():
     real = tiktok_music("u", music_id="123", title_guess="Kickoff")
     title3, _ = IngestService._title_artist(real, {"title": "DL Title", "uploader": "x"})
     assert title3 == "Kickoff"
+
+
+class _RealAudioDownloader(FakeDownloader):
+    """Writes a real 120 BPM click track (WAV bytes, .m4a name like the real capture)."""
+
+    def download(self, url, *, dest_dir, basename, source_id=None, **kwargs):
+        import io
+        import sys
+        import wave
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
+        from fixture_vault import click_track
+
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+        audio_path = Path(dest_dir) / f"{basename}.wav"
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16_000)
+            w.writeframes(click_track(120, 12).tobytes())
+        audio_path.write_bytes(buf.getvalue())
+        return DownloadResult(ok=True, audio_path=audio_path, info=self.info, method="yt-dlp")
+
+
+def test_ingest_writes_waveform_and_bpm_for_the_track_list(tmp_path, monkeypatch):
+    import shutil
+
+    import pytest
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    monkeypatch.delenv("SOUND_VAULT_DISABLE_ANALYSIS", raising=False)
+    indexed = []
+    svc = make_service(tmp_path, _RealAudioDownloader(), index_sink=indexed.append)
+
+    out = svc.ingest_url("https://www.tiktok.com/t/abc/", source="ios_shortcut")
+
+    assert out.status == "ingested"
+    meta = json.loads((out.folder / "metadata.json").read_text())
+    assert abs(meta["bpm"] - 120) <= 2
+    assert (out.folder / "waveform.json").exists()
+    assert indexed and abs(indexed[-1].metadata["bpm"] - 120) <= 2  # the index sees it too
+
+
+def test_ingest_skips_analysis_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOUND_VAULT_DISABLE_ANALYSIS", "1")
+    svc = make_service(tmp_path, _RealAudioDownloader())
+    out = svc.ingest_url("https://www.tiktok.com/t/abc/", source="ios_shortcut")
+    assert out.status == "ingested"
+    assert not (out.folder / "waveform.json").exists()

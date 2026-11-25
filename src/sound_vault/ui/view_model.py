@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import shutil
 from threading import Lock
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from sound_vault.diagnostics import exception_fields, write_event
 from sound_vault.db.index_db import IndexDatabase
@@ -17,6 +17,9 @@ from sound_vault.importers.tiktok_archive import (
 from sound_vault.ingest.shortcut_inbox import ShortcutInboxItem, ShortcutInboxStore
 from sound_vault.relay.client import RelayClient, RelayInboxItem, _default_get_json
 from sound_vault.settings import inbox_path_for_vault
+
+if TYPE_CHECKING:
+    from sound_vault.ingest.service import ReconcileReport
 from sound_vault.vault.metadata_io import atomic_write_json, read_json_lenient
 from sound_vault.vault.indexer import (
     CatalogStats,
@@ -162,23 +165,29 @@ class LibraryViewModel:
         status_filter: str = "all",
         usage_filter: str = "all",
     ) -> list[SoundRecord]:
-        records = self.db.search(
+        # IDs only, then records from the in-memory cache: decoding every row on each
+        # keystroke was ~2 s for a 20k-sound library. Only cache misses hit the DB.
+        ids = self.db.search_ids(
             query,
             duration_filter=duration_filter,
             media_filter=media_filter,
             status_filter=status_filter,
             usage_filter=usage_filter,
         )
+        with self._lock:
+            missing = [music_id for music_id in ids if music_id not in self._records_by_id]
+        fetched = {record.music_id: record for record in self.db.get_many(missing)} if missing else {}
         hydrated: list[SoundRecord] = []
         # Under the lock so this read-modify-write can't tear against the indexer's
         # atomic dict rebind or the import worker's record refreshes.
         with self._lock:
-            for record in records:
-                cached = self._records_by_id.get(record.music_id)
-                if cached is not None:
-                    hydrated.append(cached)
-                    continue
-                self._records_by_id[record.music_id] = record
+            for music_id in ids:
+                record = self._records_by_id.get(music_id)
+                if record is None:
+                    record = fetched.get(music_id)
+                    if record is None:
+                        continue
+                    self._records_by_id[music_id] = record
                 hydrated.append(record)
         return hydrated
 
@@ -532,7 +541,6 @@ class LibraryViewModel:
         a platform host allowlist before queuing — no file:// / internal-IP /
         off-platform links reach the ingest path. Returns a summary dict.
         """
-        import json as _json
         from urllib.parse import urlparse
 
         from sound_vault.url_safety import is_safe_public_url
@@ -625,7 +633,6 @@ class LibraryViewModel:
     def set_user_notes(self, music_id: str, notes: str) -> bool:
         """Persist a sound's user notes to metadata.json (file-native truth) + the
         index (so notes are searchable). Returns False if the sound is unknown."""
-        import json as _json
 
         record = self.db.get(music_id)
         if record is None:
@@ -1206,6 +1213,46 @@ class LibraryViewModel:
             return False
         self._reindex_one(Path(folder))
         return status == "ok"
+
+    def analysis_targets(self, priority: "list[str] | None" = None) -> list[tuple[str, Path, Path]]:
+        """Sounds with local audio that may need a waveform: ``(music_id, folder, audio_path)``.
+        Drives the background backfill.
+
+        Order: sounds with no waveform at all first, then sounds analysed by an older
+        version (read from the indexed metadata, no file I/O). Within each group, ids in
+        ``priority`` (the rows on screen, in display order) come first."""
+        from sound_vault.vault.analysis import needs_analysis
+
+        with self._lock:
+            records = list(self._records_by_id.values())
+        rank = {mid: i for i, mid in enumerate(priority or ())}
+        missing: list[tuple[str, Path, Path]] = []
+        stale: list[tuple[str, Path, Path]] = []
+        for record in records:
+            if record.folder_path is None or record.local_audio_path is None:
+                continue
+            target = (record.music_id, Path(record.folder_path), Path(record.local_audio_path))
+            if record.waveform_path is None:
+                missing.append(target)
+            elif needs_analysis(record.raw if isinstance(record.raw, dict) else {}):
+                stale.append(target)
+        order = lambda t: rank.get(t[0], len(rank))  # noqa: E731 - local sort key
+        return sorted(missing, key=order) + sorted(stale, key=order)
+
+    def analyze_one(self, music_id: str, folder: "Path | str", audio: "Path | str") -> bool:
+        """Compute waveform + BPM for one sound and refresh its index row. Best-effort;
+        returns True when new analysis was written."""
+        from sound_vault.vault.analysis import analyze_sound_folder
+
+        try:
+            result = analyze_sound_folder(Path(folder), Path(audio))
+        except Exception as exc:  # noqa: BLE001 - per-item best-effort, never fatal
+            write_event("analysis.error", music_id=str(music_id), **exception_fields(exc))
+            return False
+        if result is None:
+            return False
+        self._reindex_one(Path(folder))
+        return True
 
     def _reindex_one(self, folder: Path) -> None:
         """Rebuild + upsert one sound's index row from its on-disk metadata (used

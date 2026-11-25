@@ -37,4 +37,4 @@ if [ "$(head -c 4 "$OUT")" = "AEA1" ]; then
 else
   echo "error: output is not a signed AEA1 archive"; exit 1
 fi
-echo "Next: redeploy soundcache-web (vercel --prod) so /shortcut serves the new file."
+echo "Next: commit the file to soundcache-web and push to main (Cloudflare deploys it) so /shortcut serves it."

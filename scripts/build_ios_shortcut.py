@@ -16,7 +16,7 @@ shortcuts-toolkit). The desktop app's "Pair iPhone" panel produces the same
 artifact plus a scan-to-set-up QR.
 
 Usage:
-    python scripts/build_ios_shortcut.py --relay https://your-relay.vercel.app --pair-code RIVER-7421 --out web/shortcut
+    python scripts/build_ios_shortcut.py --relay https://api.soundcache.io --pair-code RIVER-7421 --out web/shortcut
 """
 from __future__ import annotations
 
@@ -27,15 +27,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from sound_vault.ingest.shortcut_builder import qr_svg, setup_url, workflow_plist_bytes  # noqa: E402
+from sound_vault.settings import DEFAULT_RELAY_BASE_URL, is_legacy_relay_url  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate the Save to Sound Cache iOS Shortcut")
-    parser.add_argument("--relay", default="https://your-relay.vercel.app", help="relay base URL")
+    parser.add_argument("--relay", default=DEFAULT_RELAY_BASE_URL, help="relay base URL")
     parser.add_argument("--pair-code", default="YOUR-PAIR-CODE", help="pairing code from the desktop app")
     parser.add_argument("--out", type=Path, default=Path("web/shortcut"), help="output directory")
     parser.add_argument("--name", default="SoundCache", help="output file basename")
     args = parser.parse_args(argv)
+    if is_legacy_relay_url(args.relay):
+        parser.error(f"{args.relay} is the old Vercel relay, which no longer exists; use {DEFAULT_RELAY_BASE_URL}")
 
     args.out.mkdir(parents=True, exist_ok=True)
     plist_path = args.out / f"{args.name}.unsigned.plist"

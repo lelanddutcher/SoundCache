@@ -121,7 +121,7 @@ def test_desktop_source_exposes_settings_pairing_async_and_play_controls():
 
     assert "SettingsDialog" in source
     assert "Create pairing code" in source
-    assert "Save relay settings" in source
+    assert "Save settings" in source
     assert "rebuild_index_async" in source
     assert "QTimer" in source
     assert "self.play_button" in source

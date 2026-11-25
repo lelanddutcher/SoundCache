@@ -95,31 +95,45 @@ Each entitlement you can drop is hardening you keep, so add `allow-jit` /
 ## The actual release pipeline (what ships)
 
 The `.app` here is fully self-contained — it bundles Python, the GPU ASR engines
-(MLX + faster-whisper), the Playwright JS driver, and portable **node + ffmpeg +
-ffprobe** (`packaging/vendor/bin`, downloaded by nothing in git — see below), so an
-end user needs **no Homebrew**. Chromium (~1.5 GB) is NOT bundled; the app downloads
-it on first "Connect TikTok" via Playwright.
+(MLX + faster-whisper), the Playwright JS driver, portable **node + ffmpeg + ffprobe**
+(`packaging/vendor/bin`) and **Chromium** (Chrome for Testing, added by
+`add_browser.sh`), so an end user needs **no Homebrew** and nothing downloads at runtime.
+
+Every bundled binary is pinned to a patched version with a sha256:
+`packaging/vendor.json` (node, ffmpeg, ffprobe) and `packaging/chrome-for-testing.json`
+(Chromium). CI's `security-audit` workflow fetches, verifies, bundles and launches those
+exact builds on macOS for every PR and weekly. See `docs/security-dependencies.md`.
 
 ```bash
-# 1. one-time: fetch the portable binaries into packaging/vendor/bin/
-#    node (nodejs.org, arm64) + ffmpeg/ffprobe (eugeneware/ffmpeg-static, arm64)
-# 2. build:
+# 0. refresh pins if a security release came out (then commit):
+python packaging/update_chrome_pin.py            # latest Chrome for Testing stable
+#    node / ffmpeg: edit packaging/vendor.json (version, url, sha256)
+# 1. fetch + sha256-verify the pinned node/ffmpeg/ffprobe into packaging/vendor/bin/
+packaging/fetch_vendor.sh
+# 2. build (the venv must satisfy pyproject's security floors: pip install -U -e ".[gui,ingest]"):
+~/venvs/sound-vault/bin/pip install -U -e ".[gui,ingest]"
+npm ci
 ~/venvs/sound-vault/bin/pyinstaller packaging/SoundCache.spec \
     --distpath dist --workpath build/pyi --noconfirm
 chmod +x "dist/Sound Cache.app/Contents/Frameworks/bin/"*   # datas drops the +x bit
-# 3. sign + notarize the app, then wrap it in a notarized DMG:
+packaging/check_vendor.sh                                    # refuses stale binaries
+# 3. bundle the pinned, verified Chrome for Testing:
+packaging/add_browser.sh "dist/Sound Cache.app"
+# 4. sign + notarize the app, then wrap it in a notarized DMG:
 packaging/sign_and_notarize.sh "dist/Sound Cache.app"
-packaging/make_dmg.sh "dist/Sound Cache.app" 0.3.1
-# 4. gh release create v0.3.1 dist/SoundCache-0.3.1-arm64.dmg ...
+packaging/make_dmg.sh "dist/Sound Cache.app" 0.5.0
+# 5. gh release create v0.5.0 dist/SoundCache-0.5.0-arm64.dmg ...
 ```
 
 ## Bundled third-party binaries & licenses
 
-- **node** (`nodejs.org`, arm64) — MIT/ISC-style; ships its own OpenSSL/ICU.
-- **ffmpeg + ffprobe** (`github.com/eugeneware/ffmpeg-static`, arm64) — these are
-  **GPL** static builds. Distributing them means the release must honor the GPL:
-  keep the license/notice and be able to point to corresponding source. If that's a
-  concern, swap in an LGPL/BSD ffmpeg build.
-- **Chromium** — downloaded at runtime by Playwright (BSD-3); not redistributed by us.
+- **node** (`nodejs.org`, darwin-arm64) — MIT/ISC-style; ships its own OpenSSL/ICU.
+- **ffmpeg + ffprobe** (`ffmpeg.martin-riedl.de`, macOS arm64 release builds; until
+  0.5 these came from `eugeneware/ffmpeg-static`, which is stuck on FFmpeg 6.1.1) — **GPL**
+  static builds. Distributing them means the release must honor the GPL: keep the
+  license/notice and be able to point to corresponding source. If that's a concern, swap
+  in an LGPL/BSD ffmpeg build.
+- **Chromium** — Google Chrome for Testing (BSD-3 plus Chromium's third-party notices),
+  redistributed inside the app since 0.4.5.
 
 `packaging/vendor/` is gitignored (these are downloaded binaries, not source).

@@ -78,7 +78,7 @@ def test_submitted_video_is_recatalogued_under_the_sound(tmp_path):
     assert out.status == "ingested"
     assert out.music_id == "SND999"                      # keyed to the SOUND
     assert out.folder is not None and out.folder.name.startswith("SND999 -")
-    rows = [json.loads(l) for l in (tmp_path / "catalog" / "sounds.jsonl").read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in (tmp_path / "catalog" / "sounds.jsonl").read_text().splitlines() if line.strip()]
     assert rows[0]["tiktok_music_id"] == "SND999"
     assert rows[0]["tiktok_visible_title"] == "Real Sound"
     assert rows[0]["canonical_url"] == "https://www.tiktok.com/music/sound-SND999"

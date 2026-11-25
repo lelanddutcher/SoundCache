@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "soundcache-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-13",
+  "upload_source_maps": true,
+  "observability": { "enabled": true },
+  // api.soundcache.io is served directly by this Worker (Cloudflare creates the DNS
+  // record and certificate). workers.dev stays on as a break-glass URL.
+  "routes": [{ "pattern": "api.soundcache.io", "custom_domain": true }],
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "soundcache-relay",
+      "database_id": "5caf5559-27ce-42ae-a0d6-37b725a89a7f",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "SOUND_VAULT_RELAY_RATE_LIMIT": "60",
+    "SOUND_VAULT_RELAY_RATE_WINDOW_SECONDS": "60"
+  }
+  // Secret (set with `wrangler secret put`, never committed): RELAY_ADMIN_TOKEN
+}
